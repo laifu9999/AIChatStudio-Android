@@ -21,7 +21,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -223,8 +227,9 @@ fun ReaderScreen(nav: NavController, pid: Long) {
             }
         } else {
             // 左右翻页（每章一页，章内可滚动）
+            val pagerState = rememberPagerState { written.size }
             androidx.compose.foundation.pager.HorizontalPager(
-                count = written.size,
+                state = pagerState,
                 modifier = Modifier.padding(pv).fillMaxSize().background(theme.bg)
             ) { page ->
                 val ch = written[page]
@@ -280,7 +285,7 @@ fun ReaderScreen(nav: NavController, pid: Long) {
                     Slider(
                         value = fontSize.toFloat(),
                         onValueChange = { settings = settings.copy(size = it.toInt()); ReaderPrefs.save(ctx, settings) },
-                        valueRange = 12f, 34f, steps = 10
+                        valueRange = 12f..34f, steps = 10
                     )
                     Spacer(Modifier.height(6.dp))
                     Text("翻页方式", fontSize = 13.sp, color = Color(0xFF8A8698))
