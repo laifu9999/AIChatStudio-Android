@@ -12,30 +12,35 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,6 +57,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -66,14 +72,21 @@ import com.lele.novelmaster.engine.ChatService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
+// ---------- 配色 ----------
+private val BrandTop = Color(0xFF6750A4)
+private val BrandBottom = Color(0xFF8B5CF6)
+private val PageBgTop = Color(0xFFF7F5FC)
+private val PageBgBottom = Color(0xFFEFEBF9)
+private val BubbleUser = Color(0xFF6750A4)
+private val BubbleAi = Color(0xFFFFFFFF)
+private val BubbleTool = Color(0xFFE7F6EC)
+private val BubbleErr = Color(0xFFFDE8E8)
+private val TextMain = Color(0xFF1F1B2E)
+private val TextSub = Color(0xFF8A8698)
+
 /**
- * 主界面 —— 像豆包 / 元宝一样以聊天为主。
- *
- * 消息分类：
- *  - user: 用户发
- *  - assistant: AI 回复
- *  - tool: 本地工具执行结果（绿色气泡，可点击跳转 / 折叠详情）
- *  - system: 系统提示（顶栏提示、欢迎语、错误）
+ * 主界面 v2 —— 聊天即操作（豆包/元宝风格）
+ * 修复：无项目时消息流 pid 统一为 0；键盘 imePadding 不遮挡输入框。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,304 +94,379 @@ fun ChatScreen(nav: NavHostController) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // currentPid = 0 表示"未选择项目"，聊天统一存到 0，读写一致
     var currentPid by remember { mutableStateOf(0L) }
-    var menuOpen by remember { mutableStateOf(false) }
     var drawerOpen by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
-    val messages by Repo.dao.messagesFlow(if (currentPid == 0L) -1 else currentPid).collectAsState(initial = emptyList())
+    val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
     val aw by AutoWriteManager.state.collectAsState()
     val listState = rememberLazyListState()
 
-    // 选中第一本作为默认项目；同时未启用自动初始化欢迎语
+    // 默认选中第一本书；无书时展示欢迎语（pid=0 与消息流一致）
     LaunchedEffect(projects) {
         if (currentPid == 0L && projects.isNotEmpty()) currentPid = projects.first().id
         if (currentPid == 0L && projects.isEmpty()) {
-            val exist = Repo.dao.messagesFlow(-1).first()
-            if (exist.isEmpty()) Repo.dao.insertMessage(Message(projectId = 0, role = "assistant", content = ChatService.Welcome, kind = "text"))
+            val exist = Repo.dao.messagesFlow(0).first()
+            if (exist.isEmpty()) {
+                Repo.dao.insertMessage(
+                    Message(projectId = 0, role = "assistant", content = ChatService.Welcome, kind = "text")
+                )
+            }
         }
     }
 
-    // 自动滚动
     LaunchedEffect(messages.size, busy) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
     }
 
-    fun send(userInput: String) {
-        val text = userInput.trim()
-        if (text.isEmpty() || busy) return
+    fun send(text: String) {
+        val t = text.trim()
+        if (t.isEmpty() || busy) return
         input = ""
         busy = true
         scope.launch {
-            ChatService.handle(ctx, currentPid, text) { newPid ->
-                if (newPid != 0L) currentPid = newPid
-            }
+            ChatService.handle(ctx, currentPid, t) { newPid -> if (newPid != 0L) currentPid = newPid }
             busy = false
         }
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("乐乐", fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(8.dp))
-                        ProjectMenu(currentPid, projects) { picked ->
-                            currentPid = picked
-                            menuOpen = false
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .background(Color.White.copy(alpha = 0.22f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) { Text("乐", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text("乐乐写小说", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            Text(
+                                if (currentPid == 0L) "还没选书 · 先聊一本新的" else "《${projects.firstOrNull { it.id == currentPid }?.title ?: ""}》",
+                                color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp
+                            )
                         }
+                        Spacer(Modifier.width(10.dp))
+                        ProjectMenu(currentPid, projects) { currentPid = it }
                     }
                 },
                 actions = {
-                    TextButton(onClick = { nav.navigate("ai") }) { Text("AI 模型", color = Color.White) }
+                    TextButton(onClick = { nav.navigate("ai") }) {
+                        Text("AI 模型", color = Color.White, fontSize = 13.sp)
+                    }
                     IconButton(onClick = { drawerOpen = true }) {
-                        Icon(Icons.Filled.Menu, contentDescription = "菜单", tint = Color.White)
+                        Icon(Icons.Filled.Menu, "菜单", tint = Color.White)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF6750A4),
-                    titleContentColor = Color.White
-                )
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         },
-        bottomBar = {
-            InputBar(input = input, busy = busy, onChange = { input = it }, onSend = { send(it) })
-        }
+        bottomBar = { InputBar(input, busy, { input = it }, { send(it) }) }
     ) { pad ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(pad)
-                .background(Color(0xFFF6F4FB))
+                .background(Brush.verticalGradient(listOf(PageBgTop, PageBgBottom)))
         ) {
-            // 自动写作实时卡片
             if (aw.running) AutoWriteCard(aw) { AutoWriteManager.stop() }
 
-            // 快捷指令栏
-            QuickChipsRow(onPick = { send(it) })
+            QuickChipsRow { send(it) }
 
-            // 消息列表
             LazyColumn(
                 state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 12.dp)
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
             ) {
-                items(messages, key = { it.id }) { m ->
-                    MessageBubble(m)
-                }
+                items(messages, key = { it.id }) { m -> MessageBubble(m) }
                 if (busy) {
                     item {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 8.dp, top = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 44.dp)) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = BrandTop)
                             Spacer(Modifier.width(8.dp))
-                            Text("正在思考…", color = Color(0xFF888888), fontSize = 13.sp)
+                            Text("乐乐正在处理…", color = TextSub, fontSize = 13.sp)
                         }
                     }
                 }
+                item { Spacer(Modifier.height(8.dp)) }
             }
         }
 
-        if (drawerOpen) MenuDrawer(
-            onClose = { drawerOpen = false },
-            onNav = { route -> drawerOpen = false; nav.navigate(route) }
-        )
+        if (drawerOpen) {
+            MenuDrawer(onClose = { drawerOpen = false }, onNav = { r -> drawerOpen = false; nav.navigate(r) })
+        }
     }
 }
 
-/* ------------------ 顶栏项目切换菜单 ------------------ */
+/* ---------------- 顶栏项目切换 ---------------- */
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProjectMenu(currentPid: Long, projects: List<Project>, onPick: (Long) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    val title = projects.firstOrNull { it.id == currentPid }?.title ?: "未选择"
     Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0x33FFFFFF),
+        shape = RoundedCornerShape(14.dp),
+        color = Color.White.copy(alpha = 0.20f),
         modifier = Modifier.clickable { open = true }
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
         ) {
-            Text(title, color = Color.White, fontSize = 14.sp)
-            Spacer(Modifier.width(4.dp))
-            Text("▾", color = Color.White, fontSize = 12.sp)
+            Text("切换书籍 ▾", color = Color.White, fontSize = 12.sp)
         }
     }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-        if (projects.isEmpty()) DropdownMenuItem(text = { Text("暂无项目，先在菜单创建一本") }, onClick = { open = false })
-        projects.forEach { p ->
-            DropdownMenuItem(
-                text = { Text("《${p.title}》  ·  目标${p.targetChapters}章") },
-                onClick = { open = false; onPick(p.id) }
-            )
-        }
-    }
-}
-
-/* ------------------ 输入栏 ------------------ */
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, onSend: (String) -> Unit) {
-    Surface(color = Color.White, tonalElevation = 4.dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = onChange,
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 48.dp, max = 160.dp),
-                placeholder = { Text("告诉 AI 你想写什么 / 要做什么…") },
-                maxLines = 4
-            )
-            Spacer(Modifier.width(8.dp))
-            IconButton(
-                enabled = !busy,
-                onClick = { onSend(input) }
-            ) {
-                if (busy) CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
-                else Icon(Icons.Filled.Send, contentDescription = "发送", tint = Color(0xFF6750A4))
-            }
-        }
-    }
-}
-
-/* ------------------ 单条消息气泡 ------------------ */
-
-@Composable
-private fun MessageBubble(m: Message) {
-    val bg = when (m.role) {
-        "user" -> Color(0xFFEEE4FF)
-        "assistant" -> Color.White
-        "tool" -> Color(0xFFE6F6EC)
-        "system" -> Color(0xFFFFF6D6)
-        else -> Color.White
-    }
-    val align = if (m.role == "user") Alignment.End else Alignment.Start
-
-    val maxW = 320.dp
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (m.role == "user") Arrangement.End else Arrangement.Start
-    ) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = bg),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.widthIn(max = maxW)
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(m.content, color = Color(0xFF222222), fontSize = 15.sp)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = m.role + " · " + timeFmt(m.createdAt),
-                    color = Color(0xFF999999),
-                    fontSize = 10.sp
+        if (projects.isEmpty()) {
+            DropdownMenuItem(text = { Text("暂无书籍 · 在聊天里说「我想写一本…」即可创建") }, onClick = { open = false })
+        } else {
+            projects.forEach { p ->
+                DropdownMenuItem(
+                    text = { Text("《${p.title}》· ${p.targetChapters}章") },
+                    onClick = { open = false; onPick(p.id) }
                 )
             }
         }
     }
 }
 
-/* ------------------ 自动写作实时卡片 ------------------ */
+/* ---------------- 输入栏（防键盘遮挡关键：imePadding） ---------------- */
+
+@Composable
+private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, onSend: (String) -> Unit) {
+    Surface(color = Color.Transparent) {
+        Column(
+            modifier = Modifier
+                .background(Color.White)
+                .navigationBarsPadding()
+                .imePadding()
+        ) {
+            HorizontalDivider(color = Color(0x14000000))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = onChange,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 46.dp, max = 150.dp),
+                    placeholder = { Text("想写什么、要做什么，直接说…", color = TextSub, fontSize = 14.sp) },
+                    shape = RoundedCornerShape(23.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = BrandTop,
+                        unfocusedBorderColor = Color(0x1F000000),
+                        focusedContainerColor = Color(0xFFF8F6FD),
+                        unfocusedContainerColor = Color(0xFFF8F6FD)
+                    ),
+                    maxLines = 4
+                )
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .background(
+                            Brush.verticalGradient(listOf(BrandTop, BrandBottom)),
+                            CircleShape
+                        )
+                        .clickable(enabled = !busy) { onSend(input) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (busy) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+                    else Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Color.White, modifier = Modifier.size(20.dp))
+                }
+            }
+        }
+    }
+}
+
+/* ---------------- 消息气泡 ---------------- */
+
+@Composable
+private fun MessageBubble(m: Message) {
+    when (m.role) {
+        "user" -> UserBubble(m)
+        "tool" -> ToolBubble(m)
+        "system" -> SystemBubble(m)
+        else -> AiBubble(m)
+    }
+}
+
+@Composable
+private fun UserBubble(m: Message) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End
+    ) {
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(max = 300.dp)) {
+            Box(
+                modifier = Modifier
+                    .background(BubbleUser, RoundedCornerShape(18.dp).copy(bottomEnd = RoundedCornerShape(4.dp).bottomEnd))
+            ) {
+                Text(
+                    m.content,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+            Text(timeFmt(m.createdAt), color = TextSub, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, end = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun AiBubble(m: Message) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .background(Brush.verticalGradient(listOf(BrandTop, BrandBottom)), CircleShape),
+            contentAlignment = Alignment.Center
+        ) { Text("乐", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+        Spacer(Modifier.width(8.dp))
+        Column(horizontalAlignment = Alignment.Start, modifier = Modifier.widthIn(max = 300.dp)) {
+            Box(
+                modifier = Modifier
+                    .background(BubbleAi, RoundedCornerShape(18.dp).copy(bottomStart = RoundedCornerShape(4.dp).bottomStart))
+            ) {
+                Text(
+                    m.content,
+                    color = TextMain,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+            Text(timeFmt(m.createdAt), color = TextSub, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, start = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun ToolBubble(m: Message) {
+    val lines = m.content.split("\n")
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = BubbleTool),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.widthIn(max = 320.dp)
+        ) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(lines.firstOrNull() ?: "", color = Color(0xFF1B7A3D), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                if (lines.size > 1) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(lines.drop(1).joinToString("\n"), color = Color(0xFF2E5B3C), fontSize = 13.sp, lineHeight = 19.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SystemBubble(m: Message) {
+    val isErr = m.kind == "error"
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = if (isErr) BubbleErr else Color(0xFFFFF6D6)),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.widthIn(max = 320.dp)
+        ) {
+            Text(
+                m.content,
+                color = if (isErr) Color(0xFFB91C1C) else Color(0xFF8A6E2F),
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+        }
+    }
+}
+
+/* ---------------- 自动写作实时卡片 ---------------- */
 
 @Composable
 private fun AutoWriteCard(aw: com.lele.novelmaster.data.AutoWriteManager.Progress, onStop: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(8.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF6D6)),
-        shape = RoundedCornerShape(12.dp)
+        shape = RoundedCornerShape(14.dp)
     ) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.PlayArrow, null, tint = Color(0xFF8A6E2F))
+                Icon(Icons.Filled.PlayArrow, null, tint = Color(0xFF8A6E2F), modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("自动写作中", fontWeight = FontWeight.Bold, color = Color(0xFF8A6E2F))
+                Text("自动写作中", fontWeight = FontWeight.Bold, color = Color(0xFF8A6E2F), fontSize = 14.sp)
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = onStop) { Text("停止", color = Color(0xFFB91C1C)) }
+                TextButton(onClick = onStop) { Text("停止", color = Color(0xFFB91C1C), fontSize = 13.sp) }
+            }
+            Text("当前：${aw.currentChapter}", fontSize = 13.sp, color = TextMain)
+            Spacer(Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .background(Color(0x33AA8A4F), RoundedCornerShape(3.dp))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(if (aw.total == 0) 0f else (aw.done.toFloat() / aw.total).coerceIn(0f, 1f))
+                        .height(6.dp)
+                        .background(Color(0xFF8A6E2F), RoundedCornerShape(3.dp))
+                )
             }
             Spacer(Modifier.height(4.dp))
-            Text("当前：${aw.currentChapter}", fontSize = 13.sp)
-            Spacer(Modifier.height(4.dp))
-            LinearProgress(progress = if (aw.total == 0) 0f else aw.done.toFloat() / aw.total)
-            Spacer(Modifier.height(4.dp))
-            Text("${aw.done}/${aw.total} 章", fontSize = 12.sp, color = Color(0xFF555555))
+            Text("${aw.done}/${aw.total} 章", fontSize = 12.sp, color = TextSub)
             if (aw.logs.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
-                Divider(color = Color(0x33AA8A4F))
-                Spacer(Modifier.height(4.dp))
-                aw.logs.take(3).forEach {
-                    Text("• $it", fontSize = 11.sp, color = Color(0xFF666666))
-                }
+                aw.logs.take(2).forEach { Text("• $it", fontSize = 11.sp, color = TextSub, maxLines = 1) }
             }
         }
     }
 }
 
-@Composable
-private fun LinearProgress(progress: Float) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(6.dp)
-            .background(Color(0x33AA8A4F), RoundedCornerShape(3.dp))
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(progress.coerceIn(0f, 1f))
-                .height(6.dp)
-                .background(Color(0xFF8A6E2F), RoundedCornerShape(3.dp))
-        )
-    }
-}
-
-/* ------------------ 快捷指令 ------------------ */
+/* ---------------- 快捷指令（横向滚动，不挤爆屏） ---------------- */
 
 @Composable
 private fun QuickChipsRow(onPick: (String) -> Unit) {
     val items = listOf(
-        "写下下一章" to "写下一章",
-        "列出所有设定卡" to "列出设定卡",
-        "一键补全大纲" to "补全大纲",
-        "开始自动写作" to "开始自动写作 1 到 30",
-        "停止写作" to "停止写作"
+        "✍️ 写下一章",
+        "🗂 列出设定卡",
+        "🧭 补全大纲",
+        "🚀 自动写作 1 到 30",
+        "⏹ 停止写作"
     )
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        items.forEach { (label, sendText) ->
+        items(items) { label ->
             AssistChip(
-                onClick = { onPick(sendText) },
-                label = { Text(label, fontSize = 12.sp) }
+                onClick = { onPick(label.substringAfter(" ").trim()) },
+                label = { Text(label, fontSize = 12.sp) },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = Color.White,
+                    labelColor = BrandTop
+                ),
+                border = null
             )
         }
     }
 }
 
-private fun timeFmt(ms: Long): String {
-    val d = java.util.Date(ms)
-    val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
-    return fmt.format(d)
-}
+private fun timeFmt(ms: Long): String =
+    java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA).format(java.util.Date(ms))

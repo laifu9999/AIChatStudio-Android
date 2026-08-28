@@ -110,7 +110,7 @@ object IntentRouter {
         // ------- 自动写作 -------
         if (Regex("自动写作|一键写完|自动写完|自动写下去|全部?自动|开始自动").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
-            val rangePair = Regex("(从第)?([0-9零一二三四五六七八九十百千]{1,4})(章?)?(到|~|至|\\-)?第?([0-9零一二三四五六七八九十百千]{1,4})章?").find(raw)
+            val rangePair = Regex("(从第)?([0-9零一二三四五六七八九十百千]{1,4})(章?)?(到|~|至|\\-)?第?([0-9零一二三四五六七八九十百千]{1,4})章?").find(noAi)
             val (from, to) = if (rangePair != null) {
                 val a = parseChineseNum(rangePair.groupValues[2])
                 val b = parseChineseNum(rangePair.groupValues[5])
