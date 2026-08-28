@@ -515,4 +515,5 @@ object Tools {
     } catch (e: Exception) {
         ToolResult(false, "工具执行失败：${e.message?.take(200)}")
     }
+    }
 }
