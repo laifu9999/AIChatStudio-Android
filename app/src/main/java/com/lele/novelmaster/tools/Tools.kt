@@ -21,7 +21,8 @@ data class ToolResult(
     val ok: Boolean = true,
     val summary: String = "",
     val detail: String = "",
-    val navigateTo: String? = null
+    val navigateTo: String? = null,
+    val newProjectId: Long? = null
 )
 
 /**
@@ -57,7 +58,7 @@ object Tools {
             Repo.dao.insertChapters(list)
             id
         }
-        return ToolResult(true, "已创建项目《$title》", "项目 ID = $pid ，已生成 ${totalCh} 章骨架。")
+        return ToolResult(true, "已创建项目《$title》", "项目 ID = $pid ，已生成 ${totalCh} 章骨架。", newProjectId = pid)
     }
 
     suspend fun switchProject(pid: Long): ToolResult {
@@ -217,5 +218,79 @@ object Tools {
         val outFile = File(outDir, name)
         outFile.writeText(body, Charsets.UTF_8)
         return ToolResult(true, "已导出 ${chs.size} 章到本地", "路径：${outFile.absolutePath}\n可使用文件管理器分享到起点/番茄/七猫等平台。")
+    }
+
+    // ---------- 章节移动 / 复制 ----------
+
+    /** 把第 fromIdx 章移动到 toIdx 位置（中间章节序号整体平移） */
+    suspend fun moveChapter(pid: Long, fromIdx: Int, toIdx: Int): ToolResult {
+        if (fromIdx == toIdx) return ToolResult(false, "位置相同，无需移动")
+        return withContext(Dispatchers.IO) {
+            val chs = Repo.dao.chapters(pid).toMutableList()
+            val from = chs.firstOrNull { it.chapterIndex == fromIdx }
+                ?: return@withContext ToolResult(false, "第 $fromIdx 章不存在")
+            val target = toIdx.coerceIn(1, chs.size)
+            // 摘出被移动章
+            val moved = chs.first { it.id == from.id }
+            val others = chs.filter { it.id != from.id }.sortedBy { it.chapterIndex }
+            // 重新编号并落库
+            val reordered = buildList {
+                addAll(others.filter { it.chapterIndex < target })
+                add(moved)
+                addAll(others.filter { it.chapterIndex >= target })
+            }.mapIndexed { i, c -> c.copy(chapterIndex = i + 1) }
+            reordered.forEach { Repo.dao.updateChapter(it) }
+            ToolResult(true, "已移动", "第 $fromIdx 章《${moved.title.ifBlank { "未命名" }}》已移动到第 $target 章")
+        }
+    }
+
+    /** 复制第 idx 章为新的一章（排在末尾） */
+    suspend fun copyChapter(pid: Long, idx: Int): ToolResult {
+        return withContext(Dispatchers.IO) {
+            val chs = Repo.dao.chapters(pid)
+            val src = chs.firstOrNull { it.chapterIndex == idx }
+                ?: return@withContext ToolResult(false, "第 $idx 章不存在")
+            val newIdx = (chs.maxOfOrNull { it.chapterIndex } ?: 0) + 1
+            val nid = Repo.dao.insertChapter(
+                src.copy(id = 0, chapterIndex = newIdx, title = (src.title.ifBlank { "未命名" }) + "（副本）", summary = "")
+            )
+            ToolResult(true, "已复制", "第 $idx 章 → 新的第 $newIdx 章（id=$nid）")
+        }
+    }
+
+    // ---------- 统一分发器（供 AI 工具协议 / IntentRouter 调用） ----------
+
+    /**
+     * AI 工具协议的分发入口。
+     * name/args 来自 AI 回复中的 <tool>{"name":..,"args":{..}}</tool> 块。
+     * 返回 null 表示未知工具名。
+     */
+    suspend fun dispatch(pid: Long, name: String, args: org.json.JSONObject, context: Context?): ToolResult? = try {
+        when (name) {
+            "createProject" -> createProject(
+                args.optString("title"), args.optString("genre"), args.optString("desc"),
+                args.optInt("totalCh", 300), args.optInt("chWords", 2500)
+            )
+            "addCard" -> addCard(
+                pid, args.optString("category"), args.optString("name"), args.optString("content"),
+                if (args.has("priority")) args.optInt("priority") else null
+            )
+            "deleteCard" -> deleteCard(pid, args.optLong("cardId"))
+            "writeNextChapter" -> writeNextChapter(pid)
+            "rewriteChapter" -> rewriteChapter(pid, args.optInt("index"))
+            "startAutoWrite" -> startAutoWrite(pid, args.optInt("from", 1), args.optInt("to", 300))
+            "stopAutoWrite" -> stopAutoWrite()
+            "generateOutlines" -> generateOutlines(pid)
+            "inspireFromText" -> inspireFromText(pid, args.optString("inspiration"))
+            "readChapter" -> readChapter(pid, args.optInt("index"))
+            "listCards" -> listCards(pid, args.optString("category").ifBlank { null })
+            "listChapters" -> listChapters(pid, args.optBoolean("onlyMissing", false))
+            "exportTxt" -> exportTxt(pid, context)
+            "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))
+            "copyChapter" -> copyChapter(pid, args.optInt("index"))
+            else -> null
+        }
+    } catch (e: Exception) {
+        ToolResult(false, "工具执行失败：${e.message?.take(200)}")
     }
 }

@@ -43,21 +43,15 @@ object ChatService {
         // 1. 持久化用户消息
         Repo.dao.insertMessage(Message(projectId = currentPid, role = "user", content = input))
 
-        // 2. 先尝试本地路由
+        // 2. 先尝试本地路由（确定性指令，不浪费 token）
         val tool = IntentRouter.handle(input, currentPid, context)
         if (tool != null) {
-            // 创建项目这种特殊指令：返回值里没有摘要文本，但项目已经写入；onProjectChange 由 chat 调用方读最新项目
             appendToolResult(currentPid, tool)
-            // 如果 IntentRouter 帮忙新建或切换了项目，主屏需要刷新当前选中
-            // 重新拉项目列表，更新 PID
-            val ps = Repo.dao.projectsFlow().first()
-            if (ps.isNotEmpty() && (currentPid == 0L || ps.none { it.id == currentPid })) {
-                onProjectChange(ps.first().id)
-            }
+            tool.newProjectId?.let { onProjectChange(it) }
             return
         }
 
-        // 3. 没命中 — AI 自然对话
+        // 3. 没命中 — AI 自然对话（AI 可在回复中携带工具调用块，由本地执行）
         val cfg = Repo.dao.activeApi()
         if (cfg == null) {
             val msg = "你还没启用任何 AI 模型。\n点击右上「AI 模型」→ 添加一个（推荐智谱 glm-4-flash 免费）→ 选好模型 → 设为启用。"
@@ -66,7 +60,30 @@ object ChatService {
         }
         try {
             val reply = aiChat(cfg, currentPid, input)
-            Repo.dao.insertMessage(Message(projectId = currentPid, role = "assistant", content = reply, kind = "text"))
+            // 解析并执行 AI 发起的工具调用
+            var pid = currentPid
+            val toolRegex = Regex("<tool>\\s*(\\{.*?\\})\\s*</tool>", RegexOption.DOT_MATCHES_ALL)
+            var executed = 0
+            toolRegex.findAll(reply).forEach { m ->
+                try {
+                    val obj = org.json.JSONObject(m.groupValues[1])
+                    val name = obj.optString("name")
+                    val args = obj.optJSONObject("args") ?: org.json.JSONObject()
+                    val r = com.lele.novelmaster.tools.Tools.dispatch(pid, name, args, context)
+                    if (r != null) {
+                        appendToolResult(pid, r)
+                        r.newProjectId?.let { np -> pid = np; onProjectChange(np) }
+                        executed++
+                    }
+                } catch (_: Exception) { /* 单个工具块解析失败不影响整体 */ }
+            }
+            // 剩余文字部分（去掉工具块）作为 AI 回复
+            val text = reply.replace(toolRegex, "").trim()
+            if (text.isNotBlank()) {
+                Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = text, kind = "text"))
+            } else if (executed == 0) {
+                Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = reply.take(2000), kind = "text"))
+            }
         } catch (e: Exception) {
             Repo.dao.insertMessage(
                 Message(
@@ -85,16 +102,36 @@ object ChatService {
         Repo.dao.insertMessage(Message(projectId = pid, role = "tool", content = text, kind = kind))
     }
 
-    /** AI 自然对话：注入项目核心上下文（不浪费 token）与最近的聊天记忆 */
+    /** AI 自然对话：注入项目核心上下文（不浪费 token）与最近的聊天记忆 + 工具协议 */
     private suspend fun aiChat(cfg: com.lele.novelmaster.data.ApiConfig, pid: Long, input: String): String {
         return withContext(Dispatchers.IO) {
             val sysText = buildString {
                 appendLine(
-                    "你是「乐乐」，一个专业网文写作 AI 助理。当前正与作者协作创作长篇小说。请遵循：\n" +
-                        "1) 用简洁、自然的中文回复，作者说的是中文你也用中文。\n" +
-                        "2) 不要重复作者说过的话；若作者正在讨论剧情/人物/情节，鼓励并给出具体建议。\n" +
-                        "3) 作者可能要求你：写下一章、修改某章、增删设定卡、查看设定卡、导出等；如果能直接执行会直接完成，无需你重复具体步骤。\n" +
-                        "4) 始终保持人物、世界观、伏笔的一致性。\n"
+                    "你是「乐乐」，一个专业网文写作 AI 助理，与作者协作创作长篇小说。请遵循：\n" +
+                        "1) 用简洁自然的中文回复；不重复作者的话；讨论剧情/人物时给出具体建议。\n" +
+                        "2) 始终保持人物、世界观、伏笔的一致性（参考下方核心设定）。\n"
+                )
+                appendLine(
+                    "【工具协议】当作者要求执行实际操作时（如创建新书、保存设定、写章节、导出等），" +
+                        "你必须同时输出工具调用块，格式严格为：\n" +
+                        "<tool>{\"name\":\"工具名\",\"args\":{\"参数名\":\"值\"}}</tool>\n" +
+                        "可用工具与参数（args 一律用 JSON）：\n" +
+                        "- createProject: {title,genre,desc,totalCh,chWords}（作者描述完新书想法就建）\n" +
+                        "- addCard: {category,name,content}（category 必须是：" + CardCategories.all.joinToString("/") + "；作者让你记住/保存任何设定时用）\n" +
+                        "- writeNextChapter: {}（写下一章）\n" +
+                        "- rewriteChapter: {index}\n" +
+                        "- startAutoWrite: {from,to}（自动写完一段章节）\n" +
+                        "- stopAutoWrite: {}\n" +
+                        "- generateOutlines: {}（补全缺失大纲）\n" +
+                        "- inspireFromText: {inspiration}（根据灵感生成整套设定卡）\n" +
+                        "- readChapter: {index}\n" +
+                        "- listCards: {category(可空)}\n" +
+                        "- listChapters: {onlyMissing}\n" +
+                        "- moveChapter: {from,to}\n" +
+                        "- copyChapter: {index}\n" +
+                        "- exportTxt: {}\n" +
+                        "规则：可以一次输出多个工具块；工具块之后再用一两句自然语言告诉作者已完成什么；" +
+                        "纯聊天/讨论剧情时不要输出任何工具块。"
                 )
                 appendLine()
                 if (pid > 0L) {
@@ -121,7 +158,7 @@ object ChatService {
                 if (m.kind == "text") chatMessages.add(ChatMsg(when (m.role) { "user" -> "user"; else -> "assistant" }, m.content))
             }
             chatMessages.add(ChatMsg("user", input))
-            AiClient.chat(cfg, chatMessages, temperature = 0.85, maxTokens = 1500)
+            AiClient.chat(cfg, chatMessages, temperature = 0.85, maxTokens = 2000)
         }
     }
 }
