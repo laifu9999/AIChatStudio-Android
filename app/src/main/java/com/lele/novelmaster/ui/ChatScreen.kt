@@ -57,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -439,18 +440,21 @@ private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, o
 
 @Composable
 private fun MessageBubble(m: Message) {
+    // 全屏显示，两侧只留小间距
+    val screenW = LocalConfiguration.current.screenWidthDp.dp
+    val bubbleMax = screenW - 28.dp
     when (m.role) {
-        "user" -> UserBubble(m)
-        "tool" -> ToolBubble(m)
-        "system" -> SystemBubble(m)
-        else -> AiBubble(m)
+        "user" -> UserBubble(m, bubbleMax)
+        "tool" -> ToolBubble(m, bubbleMax)
+        "system" -> SystemBubble(m, bubbleMax)
+        else -> AiBubble(m, bubbleMax)
     }
 }
 
 @Composable
-private fun UserBubble(m: Message) {
+private fun UserBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(max = 300.dp)) {
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(max = bubbleMax)) {
             Box(
                 modifier = Modifier
                     .background(BubbleUser, RoundedCornerShape(18.dp).copy(bottomEnd = RoundedCornerShape(4.dp).bottomEnd))
@@ -464,7 +468,7 @@ private fun UserBubble(m: Message) {
 }
 
 @Composable
-private fun AiBubble(m: Message) {
+private fun AiBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Box(
             modifier = Modifier
@@ -473,7 +477,7 @@ private fun AiBubble(m: Message) {
             contentAlignment = Alignment.Center
         ) { Text("乐", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.width(8.dp))
-        Column(horizontalAlignment = Alignment.Start, modifier = Modifier.widthIn(max = 300.dp)) {
+        Column(horizontalAlignment = Alignment.Start, modifier = Modifier.widthIn(max = bubbleMax)) {
             Box(
                 modifier = Modifier
                     .background(BubbleAi, RoundedCornerShape(18.dp).copy(bottomStart = RoundedCornerShape(4.dp).bottomStart))
@@ -487,13 +491,13 @@ private fun AiBubble(m: Message) {
 }
 
 @Composable
-private fun ToolBubble(m: Message) {
+private fun ToolBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp) {
     val lines = m.content.split("\n")
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
         Card(
             colors = CardDefaults.cardColors(containerColor = BubbleTool),
             shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.widthIn(max = 320.dp)
+            modifier = Modifier.widthIn(max = bubbleMax)
         ) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 Text(lines.firstOrNull() ?: "", color = Color(0xFF1B7A3D), fontWeight = FontWeight.Bold, fontSize = 14.sp)
@@ -507,13 +511,13 @@ private fun ToolBubble(m: Message) {
 }
 
 @Composable
-private fun SystemBubble(m: Message) {
+private fun SystemBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp) {
     val isErr = m.kind == "error"
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
         Card(
             colors = CardDefaults.cardColors(containerColor = if (isErr) BubbleErr else Color(0xFFFFF6D6)),
             shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.widthIn(max = 320.dp)
+            modifier = Modifier.widthIn(max = bubbleMax)
         ) {
             Text(m.content, color = if (isErr) Color(0xFFB91C1C) else Color(0xFF8A6E2F),
                 fontSize = 13.sp, lineHeight = 19.sp,
@@ -571,7 +575,6 @@ private fun AutoWriteCard(aw: com.lele.novelmaster.data.AutoWriteManager.Progres
 private fun QuickChipsRow(onPick: (String) -> Unit) {
     val items = listOf(
         "✍️ 写下一章",
-        "🗂 列出设定卡",
         "🔍 注入预览",
         "🚀 自动写作 1 到 300",
         "💎 全书体检"

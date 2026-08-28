@@ -14,37 +14,32 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /**
- * 聊天调度中枢。负责编排：
- *  1) 持久化用户消息（会话隔离：每本小说=一个会话，消息按 pid 分库存）
- *  2) 先走 IntentRouter（本地快速路由 → 不浪费 token）
- *  3) 路由未命中 → AI 自然对话；AI 可携带工具块（新旧模型兼容解析）由本地执行
- *  4) 结果与回复写回数据库
+ * 聊天调度中枢 v5.2：
+ *  - 会话隔离（每本小说=一个会话）
+ *  - 本地快速路由（确定性口令不耗 token）
+ *  - AI 对话：自然聊天优先，创作时才带工具块
+ *  - 工具解析三重容错（标准JSON / 工具名{参数} / ```json``` 块），执行失败也从回复中移除块
  */
 object ChatService {
 
-    /** 全部可被 AI 触发的工具名（用于校验与协议说明同步） */
+    /** 全部可被 AI 触发的工具名 */
     val KNOWN_TOOLS = setOf(
         "createProject", "addCard", "deleteCard", "writeNextChapter", "rewriteChapter",
         "startAutoWrite", "stopAutoWrite", "generateOutlines", "inspireFromText",
         "readChapter", "listCards", "listChapters", "exportTxt", "deleteProject",
         "contextPreview", "moveChapter", "copyChapter",
-        // 专家级写作功能
         "polishChapter", "expandDialogue", "styleRewrite", "hookChapter", "goldenLines",
         "plotBrainstorm", "characterCheck", "consistencyCheck", "nameGen", "genBlurb",
-        // 文件系统
         "createFolder", "deleteFolder", "renameFolder",
         "createFile", "writeFile", "appendFile", "readFile",
         "deleteFile", "renameFile", "listFiles"
     )
 
-    const val Welcome = "你好，我是乐乐 —— 你的小说写作 AI 助理 🪶\n\n" +
-        "点右上「＋」新建会话即新建一本小说；每个会话的设定、章节、聊天记录完全独立。\n\n" +
-        "你可以直接说：\n" +
-        "  • 「我想写一本玄幻小说，主角叫林墨…」→ 我自动建书+生成整套设定卡+分章大纲\n" +
-        "  • 「写下一章」「自动写作 1 到 600」→ 自动逐章写作并保存\n" +
-        "  • 「把这段存到人物设定卡」→ 分类保存\n" +
-        "  • 「给我看下一章会注入什么」→ 透明查看上下文\n\n" +
-        "先到右上「AI 模型」添加一个（推荐智谱 glm-4-flash，免费）✨"
+    const val Welcome = "你好，我是乐乐 🪶 可以陪你聊天，也可以帮你写小说。\n\n" +
+        "想写小说时直接说，比如：\n" +
+        "  「我想写一本穿越修仙的爱情小说」→ 我自动建书、编好全部设定和大纲、开始写\n" +
+        "  「写下一章」「自动写作」「把这段存到人物设定卡」\n\n" +
+        "先到右上「对接AI」添加一个模型（推荐智谱 glm-4-flash，免费）。平时随便聊，我都在 ✨"
 
     /** 对外入口 */
     suspend fun handle(
@@ -53,10 +48,9 @@ object ChatService {
         input: String,
         onProjectChange: (Long) -> Unit
     ) {
-        // 1. 持久化用户消息
         Repo.dao.insertMessage(Message(projectId = currentPid, role = "user", content = input))
 
-        // 2. 本地快速路由（确定性指令，不浪费 token）
+        // 1. 本地快速路由（确定性口令，不耗 token）
         val tool = IntentRouter.handle(input, currentPid, context)
         if (tool != null) {
             appendToolResult(currentPid, tool)
@@ -68,118 +62,161 @@ object ChatService {
             return
         }
 
-        // 3. AI 对话（可携带工具块，由本地执行）
+        // 2. AI 对话
         val cfg = Repo.dao.activeApi()
         if (cfg == null) {
-            val msg = "你还没启用任何 AI 模型。\n点右上「AI 模型」→ 添加一个（推荐智谱 glm-4-flash 免费）→ 选好模型 → 设为启用。"
-            Repo.dao.insertMessage(Message(projectId = currentPid, role = "system", content = msg, kind = "text"))
+            Repo.dao.insertMessage(
+                Message(projectId = currentPid, role = "system",
+                    content = "还没启用 AI 模型：点右上「对接AI」→ 添加（推荐智谱 glm-4-flash 免费）→ 选模型 → 设为启用。",
+                    kind = "text")
+            )
             return
         }
         try {
             val reply = aiChat(cfg, currentPid, input)
             var pid = currentPid
             var deletedCurrent = false
-            // 兼容两种格式：<tool>{...}</tool>（新模型）与 ```json {...} ```（老模型）
-            val strict = Regex("<tool>\\s*(\\{.*?\\})\\s*</tool>", RegexOption.DOT_MATCHES_ALL)
-            val fence = Regex("```(?:json)?\\s*(\\{[\\s\\S]*?\\})\\s*```")
-            val candidates = strict.findAll(reply).map { it.groupValues[1] } +
-                fence.findAll(reply).map { it.groupValues[1] }.filter { it.contains("\"name\"") }
+
+            // 提取所有工具块（<tool>…</tool> 与 ```json…``` 两种）
+            val blockRe = Regex("<tool>\\s*(.*?)\\s*</tool>", RegexOption.DOT_MATCHES_ALL)
+            val fenceRe = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```")
+            val blocks = blockRe.findAll(reply).map { it.groupValues[1] } +
+                fenceRe.findAll(reply).map { it.groupValues[1] }
+
             var executed = 0
-            val seen = mutableSetOf<String>()
-            candidates.forEach { jsonText ->
-                try {
-                    if (!seen.add(jsonText)) return@forEach
-                    val obj = org.json.JSONObject(jsonText)
-                    val name = obj.optString("name")
-                    if (name.isBlank() || name !in KNOWN_TOOLS) return@forEach
-                    val args = obj.optJSONObject("args") ?: org.json.JSONObject()
-                    val r = com.lele.novelmaster.tools.Tools.dispatch(pid, name, args, context)
-                    if (r != null) {
-                        appendToolResult(pid, r)
-                        r.newProjectId?.let { np -> pid = np; onProjectChange(np) }
-                        if (name == "deleteProject" && r.ok) deletedCurrent = true
-                        executed++
-                    }
-                } catch (_: Exception) { /* 单块失败不影响整体 */ }
+            var failed = 0
+            blocks.forEach { b ->
+                val parsed = parseToolBlock(b)
+                if (parsed == null) { failed++; return@forEach }
+                val (name, args) = parsed
+                if (name !in KNOWN_TOOLS) { failed++; return@forEach }
+                val r = com.lele.novelmaster.tools.Tools.dispatch(pid, name, args, context)
+                if (r != null) {
+                    appendToolResult(pid, r)
+                    r.newProjectId?.let { np -> pid = np; onProjectChange(np) }
+                    if (name == "deleteProject" && r.ok) deletedCurrent = true
+                    executed++
+                } else failed++
             }
             if (deletedCurrent) {
                 val ps = Repo.dao.projectsFlow().first()
                 pid = ps.firstOrNull()?.id ?: 0L
                 onProjectChange(pid)
             }
-            val text = reply.replace(strict, "").replace(fence) { m ->
-                if (m.groupValues[1].contains("\"name\"")) "" else m.value
-            }.trim()
-            if (text.isNotBlank()) {
-                Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = text, kind = "text"))
-            } else if (executed == 0) {
-                Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = reply.take(2000), kind = "text"))
+
+            // 工具块一律从正文移除（无论解析成败，绝不原样显示给用户）
+            val text = reply.replace(blockRe, "").replace(fenceRe, "").trim()
+            when {
+                text.isNotBlank() ->
+                    Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = text, kind = "text"))
+                executed > 0 -> { /* 全是工具块且都执行成功，不再多说 */ }
+                blocks.count() > 0 ->
+                    Repo.dao.insertMessage(
+                        Message(projectId = pid, role = "system",
+                            content = "⚠️ AI 返回的操作指令无法解析（可能是模型输出格式问题）。已显示原始回复：\n\n${reply.take(800)}",
+                            kind = "error")
+                    )
+                else ->
+                    Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = reply.take(2000), kind = "text"))
             }
         } catch (e: Exception) {
             Repo.dao.insertMessage(
-                Message(
-                    projectId = currentPid,
-                    role = "system",
-                    content = "⚠️ AI 调用失败：${e.message?.take(300)}",
-                    kind = "error"
-                )
+                Message(projectId = currentPid, role = "system",
+                    content = "⚠️ AI 调用失败：${e.message?.take(300)}", kind = "error")
             )
         }
     }
 
-    private suspend fun appendToolResult(pid: Long, r: ToolResult) {
-        val text = if (r.detail.isBlank()) r.summary else r.summary + "\n\n" + r.detail
-        val kind = if (r.ok) "tool" else "error"
-        Repo.dao.insertMessage(Message(projectId = pid, role = "tool", content = text, kind = kind))
+    /**
+     * 三重容错解析一个工具块，返回 (工具名, args)。
+     *  兼容：{"name":"x","args":{...}} / {"tool":"x","arguments":{...}} / x{...}（前缀工具名）
+     */
+    private fun parseToolBlock(block: String): Pair<String, org.json.JSONObject>? {
+        val t = block.trim()
+        if (t.isEmpty()) return null
+
+        // 形式1/3：JSON 带 name 或 tool 字段（name 必须是已知工具，避免把 addCard 的参数 name 误认）
+        try {
+            val obj = org.json.JSONObject(t)
+            val n = obj.optString("name", obj.optString("tool", ""))
+            if (n in KNOWN_TOOLS) {
+                val args = obj.optJSONObject("args")
+                    ?: obj.optJSONObject("arguments")
+                    ?: obj.optJSONObject("params")
+                    ?: org.json.JSONObject()
+                return n to args
+            }
+        } catch (_: Exception) { }
+
+        // 形式2：工具名{...} —— 例如 createProject{"title":"看",...}
+        val m = Regex("^([A-Za-z_][A-Za-z0-9_]*)\\s*\\{").find(t)
+        if (m != null && m.groupValues[1] in KNOWN_TOOLS) {
+            val name = m.groupValues[1]
+            val jsonStart = t.indexOf('{')
+            try {
+                val obj = org.json.JSONObject(t.substring(jsonStart))
+                // 显式 args 包装则取之；否则整个 JSON 就是参数
+                val args = obj.optJSONObject("args")
+                    ?: obj.optJSONObject("arguments")
+                    ?: obj
+                return name to args
+            } catch (_: Exception) { }
+        }
+        return null
     }
 
-    /** AI 自然对话：注入项目核心上下文（token 恒定）+ 工具协议 */
+    private suspend fun appendToolResult(pid: Long, r: ToolResult) {
+        val text = if (r.detail.isBlank()) r.summary else r.summary + "\n\n" + r.detail
+        Repo.dao.insertMessage(Message(projectId = pid, role = "tool", content = text, kind = if (r.ok) "tool" else "error"))
+    }
+
+    /** AI 对话：自然聊天优先 + 工具协议（创作时才带工具块） */
     private suspend fun aiChat(cfg: com.lele.novelmaster.data.ApiConfig, pid: Long, input: String): String {
         return withContext(Dispatchers.IO) {
             val sysText = buildString {
                 appendLine(
-                    "你是「乐乐」，一个**全自动**小说创作 Agent。工作原则（必须遵守）：\n" +
-                        "1) 作者只负责提供灵感与修改意见，所有规划与创作**由你完成**：世界观、人物、主线、支线、伏笔、核心冲突、大纲、章节结构等一律由你主动编写，**绝不反问作者、绝不要求作者制定或补充设定**。\n" +
-                        "2) 作者没提到、但小说必需的内容，你**自行创作补全**，并立即用工具保存，然后简短告知补了什么。\n" +
-                        "3) 收到灵感后的标准动作（不要问，直接做）：createProject 建书 → 用 addCard 逐张写好并保存设定卡（世界观/主要人物各一张/主线剧情/核心冲突/至少3条伏笔钩子/设定圣经）→ generateOutlines 生成分章大纲 → 然后直接开始写（writeNextChapter 或 startAutoWrite）。整个过程一气呵成。\n" +
-                        "4) 作者提修改意见时：先更新对应设定卡或文件，再按需 rewriteChapter 受影响的章节。\n" +
-                        "5) 章节之外的资料（角色小传、时间线、考据笔记等）用文件系统工具自主归类：如 createFolder「设定」、createFile「设定/主角-林墨.md」。\n" +
-                        "6) 回复简洁：说清楚做了什么、存到了哪里即可，不要长篇大论。\n" +
-                        "7) 保持人物、世界观、伏笔的一致性（参考下方核心设定）。"
+                    "你是「乐乐」，作者的智能助理：既能像朋友一样自然聊天，也是专业的小说创作专家。\n" +
+                        "【交流原则】\n" +
+                        "1) 作者打招呼、闲聊、问任何问题 → 像真人朋友一样自然回复，绝不强行拉回写小说，绝不自动建书、绝不自动生成设定。\n" +
+                        "2) 只有作者明确表达创作/管理意图时才执行对应动作：例如「我想写一本…」「写下一章」「自动写作」「保存这个设定」「建个文件夹」。\n" +
+                        "3) 作者的意图由你理解后直接执行——能执行的不要只说不做，直接调用工具完成，然后简洁告知结果。\n" +
+                        "4) 全自动创作时一气呵成：createProject 建书 → 自己编写全套设定卡（addCard，世界观/人物/主线/冲突/伏笔都由你创作）→ generateOutlines → 开始写，全程不反问作者；作者没提但必要的内容你补全并保存。\n" +
+                        "5) 作者要求修改时先改设定再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
+                        "6) 回复用自然中文、简洁，别输出内心分析过程，别复述本协议。"
                 )
                 appendLine()
                 appendLine(
-                    "【工具协议】执行操作时在回复中输出工具调用块：\n" +
+                    "【工具协议】需要执行操作时，在回复中输出工具块，格式必须是合法 JSON（两个字段缺一不可）：\n" +
                         "<tool>{\"name\":\"工具名\",\"args\":{\"参数\":\"值\"}}</tool>\n" +
-                        "可一次输出多个块按顺序执行。可用工具：\n" +
+                        "可用工具：\n" +
                         "— 项目/设定：createProject{title,genre,desc,totalCh,chWords} | addCard{category,name,content}(category:" +
                         CardCategories.all.joinToString("/") + ") | deleteCard{cardId} | listCards{category可空}\n" +
-                        "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to}(1~600写完自动停) | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
-                        "— 专家功能(不带index默认处理最新已写章)：polishChapter{index可空}润色 | expandDialogue{index可空}对话扩写 | styleRewrite{index可空,style}风格改写 | hookChapter{index可空}强化章末钩子 | goldenLines{index可空}生成金句 | plotBrainstorm{}推演3条剧情走向 | characterCheck{name}人物一致性体检 | consistencyCheck{}全书体检 | nameGen{kind,count}起名 | genBlurb{}生成发布简介书名\n" +
-                        "— 文件系统(路径相对当前会话独立文件夹，会话间完全隔离，绝不会存到别的会话)：createFolder{path} | deleteFolder{path} | renameFolder{path,newName} | createFile{path,content} | writeFile{path,content}(覆盖) | appendFile{path,content} | readFile{path} | deleteFile{path} | renameFile{path,newName} | listFiles{path可空}"
+                        "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to} | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
+                        "— 专家功能(index可空=最新章)：polishChapter | expandDialogue | styleRewrite{style} | hookChapter | goldenLines | plotBrainstorm{} | characterCheck{name} | consistencyCheck{} | nameGen{kind,count} | genBlurb{}\n" +
+                        "— 文件系统(path相对当前会话独立文件夹)：createFolder{path} | deleteFolder{path} | renameFolder{path,newName} | createFile{path,content} | writeFile{path,content} | appendFile{path,content} | readFile{path} | deleteFile{path} | renameFile{path,newName} | listFiles{path可空}\n" +
+                        "注意：可以一次输出多个工具块；闲聊/回答问题时不要输出任何工具块。"
                 )
                 appendLine()
                 if (pid > 0L) {
                     val project = Repo.dao.project(pid)
                     if (project != null) {
-                        appendLine("【当前会话/小说】《${project.title}》 类型：${project.genre} 目标 ${project.targetChapters} 章 / 每章 ${project.chapterWordTarget} 字")
-                        if (project.description.isNotBlank()) appendLine("简介：${project.description}")
+                        appendLine("【当前会话】《${project.title}》类型：${project.genre}，目标 ${project.targetChapters} 章")
                         val cards = Repo.dao.cards(pid)
-                        val coreCards = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
-                        if (coreCards.isNotEmpty()) {
-                            appendLine()
-                            appendLine("【核心设定（必保持一致）】")
-                            appendLine(Prompts.cardBlock(coreCards))
+                        val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
+                        if (core.isNotEmpty()) {
+                            appendLine("【本书核心设定】")
+                            appendLine(Prompts.cardBlock(core))
                         }
                     }
                 }
             }
-            // 上下文：最近 6 条聊天消息（会话隔离：只取当前 pid 的记录）
             val recent = Repo.dao.messagesFlow(pid).first().takeLast(6)
             val chatMessages = mutableListOf<ChatMsg>()
             chatMessages.add(ChatMsg("system", sysText))
             recent.forEach { m ->
-                if (m.kind == "text") chatMessages.add(ChatMsg(when (m.role) { "user" -> "user"; else -> "assistant" }, m.content))
+                if (m.kind == "text") chatMessages.add(
+                    ChatMsg(if (m.role == "user") "user" else "assistant", m.content)
+                )
             }
             chatMessages.add(ChatMsg("user", input))
             AiClient.chat(cfg, chatMessages, temperature = 0.85, maxTokens = 2000)
