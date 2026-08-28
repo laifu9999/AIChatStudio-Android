@@ -272,10 +272,154 @@ object Tools {
                 appendLine(); appendLine("第${c.chapterIndex}章 ${c.title}"); appendLine("-".repeat(30)); appendLine(c.content)
             }
         }
-        val outDir = File(context?.getExternalFilesDir(null)?.absolutePath ?: ".")
+        val ctx = context ?: return ToolResult(false, "导出需要文件系统支持，请重启APP后重试")
+        val outDir = File(FileTools.baseDir(ctx, pid), "导出").apply { mkdirs() }
         val outFile = File(outDir, name)
         outFile.writeText(body, Charsets.UTF_8)
-        return ToolResult(true, "已导出 ${chs.size} 章到本地", "路径：${outFile.absolutePath}\n可使用文件管理器分享到起点/番茄/七猫等平台。")
+        return ToolResult(true, "已导出 ${chs.size} 章到本会话文件夹", "路径：novels/$pid/files/导出/$name\n可在「项目文件」或系统文件管理里查看分享。")
+    }
+
+    // ---------- 专家级写作功能（10 项） ----------
+
+    /** 定位目标章：显式 idx，或 -1 表示最新已写章 */
+    private suspend fun locate(pid: Long, idx: Int): Pair<Int, com.lele.novelmaster.data.Chapter?> {
+        val chs = Repo.dao.chapters(pid)
+        val target = if (idx > 0) chs.firstOrNull { it.chapterIndex == idx }
+        else chs.lastOrNull { it.content.isNotBlank() }
+        return target?.chapterIndex ?: -1 to target
+    }
+
+    /** 1. 章节润色：提升文笔，不动剧情 */
+    suspend fun polishChapter(pid: Long, idx: Int): ToolResult {
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "没有可润色的章节")
+        val (err, _) = WriterEngine.chapterTask(
+            pid, n,
+            "请对以下正文进行润色：提升文笔与画面感、优化节奏、修正病句与重复用词，剧情、对白含义、人物性格一律不变，字数与原章相近。只输出润色后的完整正文。",
+            replace = true
+        )
+        return if (err == null) ToolResult(true, "✅ 第${n}章润色完成", "文笔已升级，剧情未变。可在章节列表查看。") else ToolResult(false, err)
+    }
+
+    /** 2. 对话扩写：把叙述改造成生动对话场景 */
+    suspend fun expandDialogue(pid: Long, idx: Int): ToolResult {
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "没有可扩写的章节")
+        val (err, _) = WriterEngine.chapterTask(
+            pid, n,
+            "把本章中过于依赖叙述的部分改写为生动的对话与动作场景：人物语气符合各自设定，加入微表情与小动作，剧情走向不变，字数增加30%~50%。只输出改写后的完整正文。",
+            replace = true
+        )
+        return if (err == null) ToolResult(true, "✅ 第${n}章对话扩写完成", "叙述已改造成对话场景，字数增加。") else ToolResult(false, err)
+    }
+
+    /** 3. 风格改写：模仿指定作家风格 */
+    suspend fun styleRewrite(pid: Long, idx: Int, style: String): ToolResult {
+        if (style.isBlank()) return ToolResult(false, "请说明想要的风格，如：模仿烽火戏诸侯/金庸/马尔克斯")
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "没有可改写的章节")
+        val (err, _) = WriterEngine.chapterTask(
+            pid, n,
+            "用「$style」的文风重写本章：吸收其句式节奏、比喻方式与叙事腔调，但剧情、人物、世界观必须完全保持本文设定。只输出重写后的完整正文。",
+            replace = true
+        )
+        return if (err == null) ToolResult(true, "✅ 第${n}章已按「$style」风格重写") else ToolResult(false, err)
+    }
+
+    /** 4. 章末钩子强化 */
+    suspend fun hookChapter(pid: Long, idx: Int): ToolResult {
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "没有可处理的章节")
+        val (err, _) = WriterEngine.chapterTask(
+            pid, n,
+            "保持本章前文不变，仅重写最后约500字的结尾：制造强烈悬念钩子（危机/反转/秘密揭露/意外来客任选最合适的一种），让读者迫切想看下一章。输出完整正文（前文原样+新结尾）。",
+            replace = true
+        )
+        return if (err == null) ToolResult(true, "✅ 第${n}章结尾钩子已强化", "章末悬念已重写。") else ToolResult(false, err)
+    }
+
+    /** 5. 金句生成 */
+    suspend fun goldenLines(pid: Long, idx: Int): ToolResult {
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "请先写完一章再生成金句")
+        val (err, out) = WriterEngine.chapterTask(
+            pid, n,
+            "基于本章剧情与人物，写出 6 句适合本章的金句/名场面台词（每句一行，不要编号不要解释）：可以是人物台词，也可以是叙述性金句，要有传播力。",
+            replace = false
+        )
+        return if (err == null) ToolResult(true, "第${n}章金句（可直接用于正文或宣传）：", out) else ToolResult(false, err)
+    }
+
+    /** 6. 剧情推演：3 条走向方案 */
+    suspend fun plotBrainstorm(pid: Long): ToolResult {
+        val chs = Repo.dao.chapters(pid)
+        val last = chs.lastOrNull { it.content.isNotBlank() } ?: return ToolResult(false, "还没有已写章节")
+        val (err, out) = WriterEngine.chapterTask(
+            pid, last.chapterIndex,
+            "基于本章结尾，推演后续剧情：给出 3 条走向方案，每条含【方案名】、剧情概要（150字内）、张力来源、风险与机会。三方案风格差异要大（如：热血推进/深挖暗线/引入新势力）。只输出方案。",
+            replace = false
+        )
+        return if (err == null) ToolResult(true, "后续剧情 3 条走向（选定后告诉我，我按方案推进并更新大纲）：", out) else ToolResult(false, err)
+    }
+
+    /** 7. 人物一致性检查 */
+    suspend fun characterCheck(pid: Long, name: String): ToolResult {
+        val cards = Repo.dao.cards(pid)
+        val c = cards.firstOrNull { it.category == "人物设定" && it.name.contains(name) }
+            ?: return ToolResult(false, "设定卡中找不到人物「$name」，可用 listCards 查看人物列表")
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：人物一致性体检。\n人物设定：${c.name} —— ${c.content}\n请对照各章摘要检查该人物：1) 行为/称谓/能力是否与设定矛盾（列出具体章号）；2) 性格是否前后不一；3) 成长弧线是否成立；4) 给出 2~3 条修补建议。无问题也要明确说【通过】。"
+        )
+        return if (err == null) ToolResult(true, "人物「${c.name}」体检报告：", out) else ToolResult(false, err)
+    }
+
+    /** 8. 全书一致性体检（设定矛盾/时间线/伏笔遗漏/敏感提示） */
+    suspend fun consistencyCheck(pid: Long): ToolResult {
+        val chs = Repo.dao.chapters(pid)
+        val written = chs.filter { it.content.isNotBlank() }
+        if (written.isEmpty()) return ToolResult(false, "还没有已写章节")
+        val sumBlock = written.joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary}" }
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：全书一致性体检。各章摘要如下：\n$sumBlock\n\n请检查：1) 设定矛盾（能力/称谓/人数/物品）；2) 时间线错误；3) 未回收或异常的伏笔；4) 平台敏感内容风险提示。逐条列出（注明章号）并给修复建议；没问题就明确说【通过】。"
+        )
+        return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out) else ToolResult(false, err)
+    }
+
+    /** 9. 起名器 */
+    suspend fun nameGen(pid: Long, kind: String, count: Int): ToolResult {
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：起名。为本小说生成 ${count.coerceIn(1, 20).coerceAtMost(20)} 个「${kind.ifBlank { "人物" } }」名字（人名/地名/功法/门派/法宝/势力等）。\n每行一个：名字 —— 一句话寓意/来源。要贴合本书世界观风格，避免烂大街。"
+        )
+        return if (err == null) ToolResult(true, "「${kind.ifBlank { "人物" }}」名字 $count 个：", out) else ToolResult(false, err)
+    }
+
+    /** 10. 简介+书名生成（发布用），并存入会话文件夹 */
+    suspend fun genBlurb(pid: Long, context: Context?): ToolResult {
+        val project = Repo.dao.project(pid) ?: return ToolResult(false, "项目不存在")
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：为本书生成发布资料。\n1) 3 个备选书名（吸引点击，不撞款）\n2) 一段 200 字内的发布简介（前50字必须抓人，突出核心冲突与爽点，结尾留悬念）\n3) 5 个分类/标签关键词。\n只输出这三部分。"
+        )
+        if (err != null) return ToolResult(false, err)
+        // 自动存到会话文件夹 + 设定卡
+        val ctx = context ?: return ToolResult(true, "发布资料已生成", out)
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = File(FileTools.baseDir(ctx, pid), "发布资料").apply { mkdirs() }
+                File(dir, "简介与书名.md").writeText(out, Charsets.UTF_8)
+            }
+            runCatching {
+                val exist = Repo.dao.findCard(pid, "辅助设定", "发布简介")
+                if (exist != null) Repo.dao.updateCard(exist.copy(content = out))
+                else Repo.dao.insertCard(
+                    com.lele.novelmaster.data.SettingCard(projectId = pid, category = "辅助设定", name = "发布简介", content = out, priority = 1)
+                )
+            }
+            ToolResult(true, "发布资料已生成并存档", out + "\n\n（已存入「项目文件/发布资料/简介与书名.md」和辅助设定卡）")
+        }
     }
 
     // ---------- 章节移动 / 复制 ----------
@@ -324,6 +468,11 @@ object Tools {
      * 返回 null 表示未知工具名。
      */
     suspend fun dispatch(pid: Long, name: String, args: org.json.JSONObject, context: Context?): ToolResult? = try {
+        // 文件系统工具优先（AI 自由建文件夹/文件，会话隔离）
+        if (context != null) {
+            val fr = com.lele.novelmaster.tools.FileTools.dispatch(context, pid, name, args)
+            if (fr != null) return fr
+        }
         when (name) {
             "createProject" -> createProject(
                 args.optString("title"), args.optString("genre"), args.optString("desc"),
@@ -346,6 +495,17 @@ object Tools {
             "exportTxt" -> exportTxt(pid, context)
             "deleteProject" -> deleteProject(pid)
             "contextPreview" -> contextPreview(pid)
+            // 专家级写作功能
+            "polishChapter" -> polishChapter(pid, args.optInt("index", -1))
+            "expandDialogue" -> expandDialogue(pid, args.optInt("index", -1))
+            "styleRewrite" -> styleRewrite(pid, args.optInt("index", -1), args.optString("style"))
+            "hookChapter" -> hookChapter(pid, args.optInt("index", -1))
+            "goldenLines" -> goldenLines(pid, args.optInt("index", -1))
+            "plotBrainstorm" -> plotBrainstorm(pid)
+            "characterCheck" -> characterCheck(pid, args.optString("name"))
+            "consistencyCheck" -> consistencyCheck(pid)
+            "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
+            "genBlurb" -> genBlurb(pid, context)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))
             "copyChapter" -> copyChapter(pid, args.optInt("index"))
             else -> null

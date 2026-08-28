@@ -167,6 +167,7 @@ fun MenuDrawer(
                     FunRow("🗂 设定卡管理") { onNav("cards/$currentPid") }
                     FunRow("📖 章节列表 / 阅读") { onNav("chapters/$currentPid") }
                     FunRow("🔍 上下文注入预览") { onNav("preview/$currentPid") }
+                    FunRow("📁 项目文件（AI 的资料库）") { onNav("files/$currentPid") }
                     FunRow("✍️ 自动写作控制台") { onNav("autowrite/$currentPid") }
                     FunRow("🤖 AI 模型（添加 / 测试）") { onNav("ai") }
                     FunRow("📤 导出 / 发布") { onNav("export/$currentPid") }

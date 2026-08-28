@@ -127,9 +127,18 @@ object AiClient {
             client.newCall(req).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
-                val content = JSONObject(body)
+                val msg = JSONObject(body)
                     .optJSONArray("choices")?.optJSONObject(0)
-                    ?.optJSONObject("message")?.optString("content").orEmpty()
+                    ?.optJSONObject("message")
+                // content 为空时回退 reasoning_content（DeepSeek-R1/V3-Flash 等推理模型把正文放这里）
+                var content = msg?.optString("content").orEmpty()
+                if (content.isBlank()) {
+                    content = msg?.optString("reasoning_content").orEmpty()
+                }
+                if (content.isBlank()) {
+                    // 兜底：拼接 reasoning_content（有的模型叫 reasoning）
+                    content = msg?.optString("reasoning").orEmpty()
+                }
                 if (content.isBlank()) throw RuntimeException("AI返回为空: ${body.take(300)}")
                 content
             }

@@ -158,6 +158,59 @@ object IntentRouter {
             return Tools.contextPreview(pid)
         }
 
+        // ------- 专家级写作功能 -------
+        val chapterNum = Regex("(?:第\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章)").find(raw)?.let { parseChineseNum(it.groupValues[1]) } ?: -1
+        if (Regex("润色").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.polishChapter(pid, chapterNum)
+        }
+        if (Regex("对话扩写|扩写对话|把.*改成对话|扩写").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.expandDialogue(pid, chapterNum)
+        }
+        Regex("(?:模仿|按|用)\\s*([^，。,]{2,15}?)\\s*(?:的)?风格|风格改写").find(raw)?.let { m ->
+            val style = m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() && !it.contains("风格") } ?: ""
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.styleRewrite(pid, chapterNum, style)
+        }
+        if (Regex("章末钩子|强化钩子|结尾钩子|优化钩子|钩子").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.hookChapter(pid, chapterNum)
+        }
+        if (Regex("金句|名场面台词").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.goldenLines(pid, chapterNum)
+        }
+        if (Regex("推演|剧情走向|后续剧情|接下来怎么写|接下来剧情").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.plotBrainstorm(pid)
+        }
+        Regex("人物?\\s*(体检|一致性)|检查(一下)?人物\\s*([^，。,\\s]{1,10})").find(raw)?.let { m ->
+            val name = m.groupValues.drop(1).lastOrNull { it.isNotEmpty() && !it.contains("体检") && !it.contains("一致性") }?.trim() ?: ""
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            if (name.isBlank()) return ToolResult(false, "请说明检查哪个人物，如：体检林墨")
+            return Tools.characterCheck(pid, name)
+        }
+        if (Regex("全书体检|一致性体检|一致性检查|体检|找矛盾|查矛盾").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.consistencyCheck(pid)
+        }
+        Regex("(起|取|来)\\s*([0-9]{0,3})\\s*[个组]?\\s*(人物名|人名|地名|功法|门派|法宝|势力|名字|名称)").find(raw)?.let { m ->
+            val kind = m.groupValues[3].removeSuffix("名").ifBlank { "人物" }
+            val count = m.groupValues[2].toIntOrNull() ?: 8
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.nameGen(pid, kind, count)
+        }
+        if (Regex("生成简介|写简介|发布简介|书名|简介").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.genBlurb(pid)
+        }
+        if (Regex("列出?文件|看看文件|打开文件|文件列表|项目文件").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val fr = context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "listFiles", org.json.JSONObject()) }
+            return fr ?: ToolResult(false, "文件系统不可用")
+        }
+
         // ------- 模糊匹配：删除 / 查卡号 -------
         Regex("删除(设定|卡|人物|世界观|伏笔)\\s*id\\s*([0-9]+)").find(raw)?.let { m ->
             val id = m.groupValues[2].toLong()

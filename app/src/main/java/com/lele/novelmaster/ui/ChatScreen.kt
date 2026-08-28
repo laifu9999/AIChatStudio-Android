@@ -99,6 +99,7 @@ fun ChatScreen(nav: NavHostController) {
     var showCreate by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var chatJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
     val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
@@ -126,10 +127,21 @@ fun ChatScreen(nav: NavHostController) {
         if (t.isEmpty() || busy) return
         input = ""
         busy = true
-        scope.launch {
+        chatJob = scope.launch {
             ChatService.handle(ctx, currentPid, t) { newPid -> if (newPid != 0L) currentPid = newPid }
             busy = false
         }
+    }
+
+    /** 发送键 = 停止键：转圈时点击立即中止 AI 回复（若自动写作在跑也一并停止） */
+    fun onSendClick() {
+        if (busy) {
+            chatJob?.cancel()
+            if (AutoWriteManager.state.value.running) AutoWriteManager.stop()
+            busy = false
+            return
+        }
+        send(input)
     }
 
     val currentTitle = projects.firstOrNull { it.id == currentPid }?.title
@@ -163,7 +175,7 @@ fun ChatScreen(nav: NavHostController) {
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         },
-        bottomBar = { InputBar(input, busy, { input = it }, { send(it) }) }
+        bottomBar = { InputBar(input, busy, { input = it }, { onSendClick() }) }
     ) { pad ->
         Column(
             modifier = Modifier
@@ -299,11 +311,15 @@ private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, o
                     modifier = Modifier
                         .size(46.dp)
                         .background(Brush.verticalGradient(listOf(BrandTop, BrandBottom)), CircleShape)
-                        .clickable(enabled = !busy) { onSend(input) },
+                        .clickable { onSend() },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (busy) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
-                    else Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Color.White, modifier = Modifier.size(20.dp))
+                    // 转圈中点击 = 停止；同时保留小方块指示可停
+                    if (busy) {
+                        CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+                    } else {
+                        Icon(Icons.AutoMirrored.Filled.Send, "发送", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
                 }
             }
         }
@@ -451,7 +467,7 @@ private fun QuickChipsRow(onPick: (String) -> Unit) {
         "🔍 注入预览",
         "🧭 补全大纲",
         "🚀 自动写作 1 到 300",
-        "⏹ 停止写作"
+        "💎 全书体检"
     )
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
@@ -461,9 +477,12 @@ private fun QuickChipsRow(onPick: (String) -> Unit) {
         items(items) { label ->
             AssistChip(
                 onClick = { onPick(label.substringAfter(" ").trim()) },
-                label = { Text(label, fontSize = 12.sp) },
-                colors = AssistChipDefaults.assistChipColors(containerColor = Color.White, labelColor = BrandTop),
-                border = null
+                label = { Text(label, fontSize = 12.sp, color = BrandTop, fontWeight = FontWeight.Medium) },
+                colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xFFFFFFFF)),
+                border = AssistChipDefaults.assistChipBorder(
+                    borderColor = BrandTop.copy(alpha = 0.45f),
+                    borderWidth = 1.dp
+                )
             )
         }
     }

@@ -27,7 +27,14 @@ object ChatService {
         "createProject", "addCard", "deleteCard", "writeNextChapter", "rewriteChapter",
         "startAutoWrite", "stopAutoWrite", "generateOutlines", "inspireFromText",
         "readChapter", "listCards", "listChapters", "exportTxt", "deleteProject",
-        "contextPreview", "moveChapter", "copyChapter"
+        "contextPreview", "moveChapter", "copyChapter",
+        // 专家级写作功能
+        "polishChapter", "expandDialogue", "styleRewrite", "hookChapter", "goldenLines",
+        "plotBrainstorm", "characterCheck", "consistencyCheck", "nameGen", "genBlurb",
+        // 文件系统
+        "createFolder", "deleteFolder", "renameFolder",
+        "createFile", "writeFile", "appendFile", "readFile",
+        "deleteFile", "renameFile", "listFiles"
     )
 
     const val Welcome = "你好，我是乐乐 —— 你的小说写作 AI 助理 🪶\n\n" +
@@ -131,34 +138,25 @@ object ChatService {
         return withContext(Dispatchers.IO) {
             val sysText = buildString {
                 appendLine(
-                    "你是「乐乐」，一个专业网文写作 AI 助理，与作者协作创作长篇小说。请遵循：\n" +
-                        "1) 用简洁自然的中文回复；不重复作者的话；讨论剧情/人物时给出具体、可执行的建议。\n" +
-                        "2) 始终保持人物、世界观、伏笔的一致性（参考下方核心设定）。\n"
+                    "你是「乐乐」，一个**全自动**小说创作 Agent。工作原则（必须遵守）：\n" +
+                        "1) 作者只负责提供灵感与修改意见，所有规划与创作**由你完成**：世界观、人物、主线、支线、伏笔、核心冲突、大纲、章节结构等一律由你主动编写，**绝不反问作者、绝不要求作者制定或补充设定**。\n" +
+                        "2) 作者没提到、但小说必需的内容，你**自行创作补全**，并立即用工具保存，然后简短告知补了什么。\n" +
+                        "3) 收到灵感后的标准动作（不要问，直接做）：createProject 建书 → 用 addCard 逐张写好并保存设定卡（世界观/主要人物各一张/主线剧情/核心冲突/至少3条伏笔钩子/设定圣经）→ generateOutlines 生成分章大纲 → 然后直接开始写（writeNextChapter 或 startAutoWrite）。整个过程一气呵成。\n" +
+                        "4) 作者提修改意见时：先更新对应设定卡或文件，再按需 rewriteChapter 受影响的章节。\n" +
+                        "5) 章节之外的资料（角色小传、时间线、考据笔记等）用文件系统工具自主归类：如 createFolder「设定」、createFile「设定/主角-林墨.md」。\n" +
+                        "6) 回复简洁：说清楚做了什么、存到了哪里即可，不要长篇大论。\n" +
+                        "7) 保持人物、世界观、伏笔的一致性（参考下方核心设定）。"
                 )
+                appendLine()
                 appendLine(
-                    "【工具协议】当作者要求执行实际操作时（创建新书、保存设定、写章节、删除会话、导出等），" +
-                        "在回复中输出工具调用块，格式：\n" +
-                        "<tool>{\"name\":\"工具名\",\"args\":{\"参数名\":\"值\"}}</tool>\n" +
-                        "可用工具（args 一律 JSON 对象）：\n" +
-                        "- createProject: {title,genre,desc,totalCh,chWords}（作者描述完新书想法就建，totalCh 默认300）\n" +
-                        "- addCard: {category,name,content}（category 必须是：" + CardCategories.all.joinToString("/") + "；作者让你记住/保存任何设定时用）\n" +
-                        "- deleteCard: {cardId}\n" +
-                        "- writeNextChapter: {}\n" +
-                        "- rewriteChapter: {index}\n" +
-                        "- startAutoWrite: {from,to}（1~600，自动写到实际最后一章自动停）\n" +
-                        "- stopAutoWrite: {}\n" +
-                        "- generateOutlines: {}\n" +
-                        "- inspireFromText: {inspiration}\n" +
-                        "- readChapter: {index}\n" +
-                        "- listCards: {category(可空)}\n" +
-                        "- listChapters: {onlyMissing}\n" +
-                        "- moveChapter: {from,to}\n" +
-                        "- copyChapter: {index}\n" +
-                        "- deleteProject: {}（删除当前会话/小说，需作者明确说删除时才用）\n" +
-                        "- contextPreview: {}（展示下一章将注入的上下文）\n" +
-                        "- exportTxt: {}\n" +
-                        "规则：可一次输出多个工具块；工具块后用一两句自然语言告诉作者已完成什么；" +
-                        "纯聊天/讨论剧情时不要输出工具块。"
+                    "【工具协议】执行操作时在回复中输出工具调用块：\n" +
+                        "<tool>{\"name\":\"工具名\",\"args\":{\"参数\":\"值\"}}</tool>\n" +
+                        "可一次输出多个块按顺序执行。可用工具：\n" +
+                        "— 项目/设定：createProject{title,genre,desc,totalCh,chWords} | addCard{category,name,content}(category:" +
+                        CardCategories.all.joinToString("/") + ") | deleteCard{cardId} | listCards{category可空}\n" +
+                        "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to}(1~600写完自动停) | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
+                        "— 专家功能(不带index默认处理最新已写章)：polishChapter{index可空}润色 | expandDialogue{index可空}对话扩写 | styleRewrite{index可空,style}风格改写 | hookChapter{index可空}强化章末钩子 | goldenLines{index可空}生成金句 | plotBrainstorm{}推演3条剧情走向 | characterCheck{name}人物一致性体检 | consistencyCheck{}全书体检 | nameGen{kind,count}起名 | genBlurb{}生成发布简介书名\n" +
+                        "— 文件系统(路径相对当前会话独立文件夹，会话间完全隔离，绝不会存到别的会话)：createFolder{path} | deleteFolder{path} | renameFolder{path,newName} | createFile{path,content} | writeFile{path,content}(覆盖) | appendFile{path,content} | readFile{path} | deleteFile{path} | renameFile{path,newName} | listFiles{path可空}"
                 )
                 appendLine()
                 if (pid > 0L) {

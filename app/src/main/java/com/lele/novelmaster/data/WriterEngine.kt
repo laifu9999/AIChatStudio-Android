@@ -205,6 +205,64 @@ object WriterEngine {
         )
         return null
     }
+
+    /**
+     * 通用章节任务引擎（专家级写作功能的基础设施）。
+     * instruction: 对本章做什么；replace: 是否用 AI 返回内容替换正文。
+     * 返回 null=成功（结果已应用/展示），否则返回错误信息。
+     */
+    suspend fun chapterTask(
+        projectId: Long,
+        chapterIndex: Int,
+        instruction: String,
+        replace: Boolean
+    ): Pair<String?, String> { // (err, output)
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型" to ""
+        val project = dao.project(projectId) ?: return "项目不存在" to ""
+        val chapters = dao.chapters(projectId)
+        val ch = chapters.firstOrNull { it.chapterIndex == chapterIndex }
+            ?: return "第 $chapterIndex 章不存在" to ""
+        val cards = dao.cards(projectId)
+        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
+        messages.add(ChatMsg("user", instruction))
+        val out = AiClient.chat(cfg, messages, temperature = 0.8, maxTokens = 4096).trim()
+        if (out.isBlank()) return "AI返回为空" to ""
+        if (replace && out.length >= 300) {
+            dao.updateChapter(
+                ch.copy(
+                    content = out,
+                    wordCount = out.length,
+                    status = 1,
+                    summary = "",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+        return null to out
+    }
+
+    /** 非章节类自由任务（起名/简介/体检等）：带核心设定上下文问 AI */
+    suspend fun freeTask(projectId: Long, instruction: String): Pair<String?, String> {
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型" to ""
+        val project = dao.project(projectId) ?: return "项目不存在" to ""
+        val cards = dao.cards(projectId)
+        val sys = buildString {
+            appendLine("你是资深网文主编。基于以下设定完成任务，只输出要求的内容。")
+            appendLine("《${project.title}》类型：${project.genre}")
+            val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS || it.category == "人物设定" }
+            if (core.isNotEmpty()) appendLine(Prompts.cardBlock(core))
+        }
+        val out = AiClient.chat(
+            cfg,
+            listOf(ChatMsg("system", sys), ChatMsg("user", instruction)),
+            temperature = 0.85,
+            maxTokens = 3000
+        ).trim()
+        if (out.isBlank()) return "AI返回为空" to ""
+        return null to out
+    }
 }
 
 /**
