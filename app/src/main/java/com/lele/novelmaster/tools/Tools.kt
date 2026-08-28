@@ -157,8 +157,11 @@ object Tools {
     // ---------- 自动写作 / 大纲 ----------
 
     suspend fun startAutoWrite(pid: Long, from: Int, to: Int): ToolResult {
-        AutoWriteManager.start(pid, from, to)
-        return ToolResult(true, "🚀 自动写作已开始", "范围：第 $from ~ $to 章，进度和日志会在聊天里实时播报。随时说「停止写作」可以中止。", navigateTo = "autowrite/$pid")
+        // 自定义范围 1~600；实际章节不足时按实际章节遍历，写完自动停
+        val f = from.coerceIn(1, 600)
+        val t = to.coerceIn(f, 600)
+        AutoWriteManager.start(pid, f, t)
+        return ToolResult(true, "🚀 自动写作已开始", "范围：第 $f ~ $t 章（实际章节不足时写到最后一章自动停）。进度在聊天里实时播报，随时说「停止写作」中止。", navigateTo = "autowrite/$pid")
     }
 
     suspend fun stopAutoWrite(): ToolResult { AutoWriteManager.stop(); return ToolResult(true, "已请求停止自动写作") }
@@ -174,8 +177,63 @@ object Tools {
         if (inspiration.isBlank()) return ToolResult(false, "请把你的灵感 / 需求发给我")
         return withContext(Dispatchers.IO) {
             val err = WriterEngine.generateCardsFromInspire(pid, inspiration)
-            if (err != null) ToolResult(false, err) else ToolResult(true, "已根据你的灵感生成完整设定卡", "可去「设定卡」查看，或继续在聊天里增删。")
+            if (err != null) return@withContext ToolResult(false, err)
+            // 灵感落地后自动补齐分章大纲，让"一个灵感发过去就自动完成"
+            val outlineErr = WriterEngine.ensureOutlines(pid)
+            ToolResult(true, "已根据你的灵感生成完整设定卡" + (if (outlineErr == null) "，并自动补齐了分章大纲" else ""),
+                "可以继续聊天修改设定，或直接说「写下一章」「自动写作」开写。")
         }
+    }
+
+    /** 删除会话（= 删除小说项目，级联删章节/设定卡/聊天记录） */
+    suspend fun deleteProject(pid: Long): ToolResult {
+        val p = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "会话不存在")
+        withContext(Dispatchers.IO) {
+            Repo.dao.deleteChaptersOf(pid)
+            Repo.dao.deleteCardsOf(pid)
+            Repo.dao.clearMessages(pid)
+            Repo.dao.deleteProject(p)
+        }
+        return ToolResult(true, "已删除会话《${p.title}》", "其章节、设定卡、聊天记录已一并清除。")
+    }
+
+    /**
+     * 上下文注入预览：查看「写下一章」时 AI 将看到什么（豆包式透明化）。
+     * 与 Prompts.buildChapterMessages 完全同源，保证所见即所发。
+     */
+    suspend fun contextPreview(pid: Long): ToolResult {
+        val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
+        val cards = withContext(Dispatchers.IO) { Repo.dao.cards(pid) }
+        val chapters = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
+        val next = chapters.firstOrNull { it.content.isBlank() }
+            ?: return ToolResult(false, "全部章节已写完，无下一章可预览")
+
+        val selected = com.lele.novelmaster.data.Prompts.selectCards(cards, next.outline + next.title)
+        val recent = chapters.filter { it.chapterIndex < next.chapterIndex && it.summary.isNotBlank() }.takeLast(5)
+        val prev = chapters.firstOrNull { it.chapterIndex == next.chapterIndex - 1 }
+        val neighbors = chapters
+            .filter { it.chapterIndex in (next.chapterIndex - 1)..(next.chapterIndex + 1) && it.outline.isNotBlank() }
+            .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》:${it.outline.take(60)}" }
+
+        val chars = com.lele.novelmaster.data.Prompts.buildChapterMessages(project, cards, chapters, next)
+            .sumOf { it.content.length }
+        val detail = buildString {
+            appendLine("▶ 目标：第 ${next.chapterIndex} 章《${next.title.ifBlank { "未命名" }}》")
+            appendLine()
+            appendLine("【必发设定卡 + 未回收伏笔 + 相关卡】${selected.size} 张")
+            selected.forEach { appendLine("  • ${it.category}/${it.name}（${it.content.length}字）") }
+            appendLine()
+            appendLine("【前5章剧情摘要】${recent.size} 条")
+            recent.forEach { appendLine("  • 第${it.chapterIndex}章：${it.summary.take(50)}…") }
+            appendLine()
+            appendLine("【上一章结尾】${if (prev != null && prev.content.isNotBlank()) "${prev.content.takeLast(600).length} 字（取结尾600字）" else "无"}")
+            appendLine()
+            appendLine("【相邻章节大纲】")
+            appendLine(if (neighbors.isBlank()) "  无" else neighbors)
+            appendLine()
+            append("本次注入合计约 $chars 字（≈${chars * 4 / 10}0 tokens），正文不随历史章节数膨胀。")
+        }
+        return ToolResult(true, "下一章（第${next.chapterIndex}章）将注入的上下文：", detail)
     }
 
     // ---------- AI / 模型 ----------
@@ -286,6 +344,8 @@ object Tools {
             "listCards" -> listCards(pid, args.optString("category").ifBlank { null })
             "listChapters" -> listChapters(pid, args.optBoolean("onlyMissing", false))
             "exportTxt" -> exportTxt(pid, context)
+            "deleteProject" -> deleteProject(pid)
+            "contextPreview" -> contextPreview(pid)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))
             "copyChapter" -> copyChapter(pid, args.optInt("index"))
             else -> null

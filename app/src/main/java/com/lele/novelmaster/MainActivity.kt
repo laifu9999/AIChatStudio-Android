@@ -18,6 +18,7 @@ import com.lele.novelmaster.ui.AutoWriteScreen
 import com.lele.novelmaster.ui.CardsScreen
 import com.lele.novelmaster.ui.ChatScreen
 import com.lele.novelmaster.ui.ChaptersScreen
+import com.lele.novelmaster.ui.ContextPreviewScreen
 import com.lele.novelmaster.ui.EditorScreen
 import com.lele.novelmaster.ui.ExportScreen
 import com.lele.novelmaster.ui.NovelTheme
@@ -67,6 +68,9 @@ fun AppNav() {
         }
         composable("chapters/{id}") { e ->
             ChaptersScreen(nav, e.arguments?.getString("id")?.toLongOrNull() ?: 0L)
+        }
+        composable("preview/{id}") { e ->
+            ContextPreviewScreen(nav, e.arguments?.getString("id")?.toLongOrNull() ?: 0L)
         }
         composable("editor/{chapterId}") { e ->
             EditorScreen(nav, e.arguments?.getString("chapterId")?.toLongOrNull() ?: 0L)

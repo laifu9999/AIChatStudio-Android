@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AssistChip
@@ -33,8 +34,6 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -66,9 +65,10 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import com.lele.novelmaster.data.AutoWriteManager
 import com.lele.novelmaster.data.Message
-import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
 import com.lele.novelmaster.engine.ChatService
+import com.lele.novelmaster.tools.Tools
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -85,8 +85,8 @@ private val TextMain = Color(0xFF1F1B2E)
 private val TextSub = Color(0xFF8A8698)
 
 /**
- * 主界面 v2 —— 聊天即操作（豆包/元宝风格）
- * 修复：无项目时消息流 pid 统一为 0；键盘 imePadding 不遮挡输入框。
+ * 主界面 v3 —— 豆包式：会话=小说，数据完全隔离。
+ * 顶栏：☰ 会话历史 | 当前书名 | ＋ 新会话
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,9 +94,9 @@ fun ChatScreen(nav: NavHostController) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // currentPid = 0 表示"未选择项目"，聊天统一存到 0，读写一致
     var currentPid by remember { mutableStateOf(0L) }
     var drawerOpen by remember { mutableStateOf(false) }
+    var showCreate by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
@@ -105,7 +105,6 @@ fun ChatScreen(nav: NavHostController) {
     val aw by AutoWriteManager.state.collectAsState()
     val listState = rememberLazyListState()
 
-    // 默认选中第一本书；无书时展示欢迎语（pid=0 与消息流一致）
     LaunchedEffect(projects) {
         if (currentPid == 0L && projects.isNotEmpty()) currentPid = projects.first().id
         if (currentPid == 0L && projects.isEmpty()) {
@@ -133,36 +132,32 @@ fun ChatScreen(nav: NavHostController) {
         }
     }
 
+    val currentTitle = projects.firstOrNull { it.id == currentPid }?.title
+
     Scaffold(
         containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = { drawerOpen = true }) {
+                        Icon(Icons.Filled.Menu, "会话历史", tint = Color.White)
+                    }
+                },
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .background(Color.White.copy(alpha = 0.22f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) { Text("乐", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text("乐乐写小说", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                            Text(
-                                if (currentPid == 0L) "还没选书 · 先聊一本新的" else "《${projects.firstOrNull { it.id == currentPid }?.title ?: ""}》",
-                                color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp
-                            )
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        ProjectMenu(currentPid, projects) { currentPid = it }
+                    Column {
+                        Text(currentTitle ?: "新会话", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1)
+                        Text(
+                            if (currentPid == 0L) "聊一个灵感，开一本新书" else "会话隔离 · 设定/章节/聊天独立",
+                            color = Color.White.copy(alpha = 0.8f), fontSize = 10.sp, maxLines = 1
+                        )
                     }
                 },
                 actions = {
                     TextButton(onClick = { nav.navigate("ai") }) {
-                        Text("AI 模型", color = Color.White, fontSize = 13.sp)
+                        Text("AI", color = Color.White, fontSize = 13.sp)
                     }
-                    IconButton(onClick = { drawerOpen = true }) {
-                        Icon(Icons.Filled.Menu, "菜单", tint = Color.White)
+                    IconButton(onClick = { showCreate = true }) {
+                        Icon(Icons.Filled.Add, "新会话", tint = Color.White)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
@@ -176,7 +171,7 @@ fun ChatScreen(nav: NavHostController) {
                 .padding(pad)
                 .background(Brush.verticalGradient(listOf(PageBgTop, PageBgBottom)))
         ) {
-            if (aw.running) AutoWriteCard(aw) { AutoWriteManager.stop() }
+            if (aw.running && aw.projectId == currentPid) AutoWriteCard(aw) { AutoWriteManager.stop() }
 
             QuickChipsRow { send(it) }
 
@@ -201,43 +196,71 @@ fun ChatScreen(nav: NavHostController) {
         }
 
         if (drawerOpen) {
-            MenuDrawer(onClose = { drawerOpen = false }, onNav = { r -> drawerOpen = false; nav.navigate(r) })
+            MenuDrawer(
+                currentPid = currentPid,
+                onClose = { drawerOpen = false },
+                onSelect = { pid -> drawerOpen = false; currentPid = pid },
+                onNav = { r -> drawerOpen = false; nav.navigate(r) },
+                onNewSession = { drawerOpen = false; showCreate = true }
+            )
+        }
+        if (showCreate) {
+            CreateSessionDialog(
+                onDismiss = { showCreate = false },
+                onCreated = { pid -> showCreate = false; currentPid = pid }
+            )
         }
     }
 }
 
-/* ---------------- 顶栏项目切换 ---------------- */
+/* ---------------- 新建会话对话框（= 新建小说） ---------------- */
 
 @Composable
-private fun ProjectMenu(currentPid: Long, projects: List<Project>, onPick: (Long) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = Color.White.copy(alpha = 0.20f),
-        modifier = Modifier.clickable { open = true }
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-        ) {
-            Text("切换书籍 ▾", color = Color.White, fontSize = 12.sp)
-        }
-    }
-    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-        if (projects.isEmpty()) {
-            DropdownMenuItem(text = { Text("暂无书籍 · 在聊天里说「我想写一本…」即可创建") }, onClick = { open = false })
-        } else {
-            projects.forEach { p ->
-                DropdownMenuItem(
-                    text = { Text("《${p.title}》· ${p.targetChapters}章") },
-                    onClick = { open = false; onPick(p.id) }
+private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var title by remember { mutableStateOf("") }
+    var genre by remember { mutableStateOf("玄幻") }
+    var total by remember { mutableStateOf("300") }
+    var creating by remember { mutableStateOf(false) }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建会话（新小说）", fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text("也可以稍后在聊天里直接描述灵感，AI 会自动完善设定。", fontSize = 12.sp, color = TextSub)
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(value = title, onValueChange = { title = it }, modifier = Modifier.fillMaxWidth(), label = { Text("书名") }, singleLine = true)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = genre, onValueChange = { genre = it }, modifier = Modifier.fillMaxWidth(), label = { Text("类型") }, singleLine = true)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = total, onValueChange = { total = it.filter { c -> c.isDigit() }.take(3) },
+                    modifier = Modifier.fillMaxWidth(), label = { Text("目标章数（1~600）") }, singleLine = true
                 )
             }
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !creating && title.isNotBlank(),
+                onClick = {
+                    creating = true
+                    scope.launch(Dispatchers.IO) {
+                        val r = Tools.createProject(
+                            title = title.trim(), genre = genre.trim(), desc = "",
+                            totalCh = (total.toIntOrNull() ?: 300).coerceIn(1, 600), chWords = 2500
+                        )
+                        val np = r.newProjectId ?: 0L
+                        kotlinx.coroutines.withContext(Dispatchers.Main) { onCreated(np) }
+                    }
+                }
+            ) { Text(if (creating) "创建中…" else "创建") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
-/* ---------------- 输入栏（防键盘遮挡关键：imePadding） ---------------- */
+/* ---------------- 输入栏（防键盘遮挡：imePadding） ---------------- */
 
 @Composable
 private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, onSend: (String) -> Unit) {
@@ -275,10 +298,7 @@ private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, o
                 Box(
                     modifier = Modifier
                         .size(46.dp)
-                        .background(
-                            Brush.verticalGradient(listOf(BrandTop, BrandBottom)),
-                            CircleShape
-                        )
+                        .background(Brush.verticalGradient(listOf(BrandTop, BrandBottom)), CircleShape)
                         .clickable(enabled = !busy) { onSend(input) },
                     contentAlignment = Alignment.Center
                 ) {
@@ -304,22 +324,14 @@ private fun MessageBubble(m: Message) {
 
 @Composable
 private fun UserBubble(m: Message) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End
-    ) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(max = 300.dp)) {
             Box(
                 modifier = Modifier
                     .background(BubbleUser, RoundedCornerShape(18.dp).copy(bottomEnd = RoundedCornerShape(4.dp).bottomEnd))
             ) {
-                Text(
-                    m.content,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
+                Text(m.content, color = Color.White, fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
             }
             Text(timeFmt(m.createdAt), color = TextSub, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, end = 4.dp))
         }
@@ -341,13 +353,8 @@ private fun AiBubble(m: Message) {
                 modifier = Modifier
                     .background(BubbleAi, RoundedCornerShape(18.dp).copy(bottomStart = RoundedCornerShape(4.dp).bottomStart))
             ) {
-                Text(
-                    m.content,
-                    color = TextMain,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
+                Text(m.content, color = TextMain, fontSize = 15.sp, lineHeight = 22.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
             }
             Text(timeFmt(m.createdAt), color = TextSub, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, start = 4.dp))
         }
@@ -383,13 +390,9 @@ private fun SystemBubble(m: Message) {
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier.widthIn(max = 320.dp)
         ) {
-            Text(
-                m.content,
-                color = if (isErr) Color(0xFFB91C1C) else Color(0xFF8A6E2F),
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
+            Text(m.content, color = if (isErr) Color(0xFFB91C1C) else Color(0xFF8A6E2F),
+                fontSize = 13.sp, lineHeight = 19.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
         }
     }
 }
@@ -438,15 +441,16 @@ private fun AutoWriteCard(aw: com.lele.novelmaster.data.AutoWriteManager.Progres
     }
 }
 
-/* ---------------- 快捷指令（横向滚动，不挤爆屏） ---------------- */
+/* ---------------- 快捷指令 ---------------- */
 
 @Composable
 private fun QuickChipsRow(onPick: (String) -> Unit) {
     val items = listOf(
         "✍️ 写下一章",
         "🗂 列出设定卡",
+        "🔍 注入预览",
         "🧭 补全大纲",
-        "🚀 自动写作 1 到 30",
+        "🚀 自动写作 1 到 300",
         "⏹ 停止写作"
     )
     LazyRow(
@@ -458,10 +462,7 @@ private fun QuickChipsRow(onPick: (String) -> Unit) {
             AssistChip(
                 onClick = { onPick(label.substringAfter(" ").trim()) },
                 label = { Text(label, fontSize = 12.sp) },
-                colors = AssistChipDefaults.assistChipColors(
-                    containerColor = Color.White,
-                    labelColor = BrandTop
-                ),
+                colors = AssistChipDefaults.assistChipColors(containerColor = Color.White, labelColor = BrandTop),
                 border = null
             )
         }

@@ -152,6 +152,12 @@ object IntentRouter {
             return Tools.exportTxt(pid, context)
         }
 
+        // ------- 上下文注入预览 -------
+        if (Regex("注入预览|预览上下文|看注入|注入什么|会注入|上下文预览").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.contextPreview(pid)
+        }
+
         // ------- 模糊匹配：删除 / 查卡号 -------
         Regex("删除(设定|卡|人物|世界观|伏笔)\\s*id\\s*([0-9]+)").find(raw)?.let { m ->
             val id = m.groupValues[2].toLong()
