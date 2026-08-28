@@ -1,5 +1,6 @@
 package com.lele.novelmaster.data
 
+import android.content.Context
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -8,17 +9,31 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * 写作引擎：大纲生成 / 设定卡生成 / 单章写作 / 续写 / 重写
+ * 写作引擎：大纲生成 / 设定卡生成 / 单章写作 / 续写 / 重写。
+ * v5：每次注入都在聊天里播报「📥 已注入内容」；正文/大纲/设定卡全部同步保存到会话项目文件夹。
  */
 object WriterEngine {
 
+    /** 会话项目子文件夹（正文/大纲/设定卡…），context 为空时返回 null（仅跳过落盘，不影响写作） */
+    private fun dir(context: Context?, pid: Long, sub: String): File? {
+        if (context == null) return null
+        return try {
+            val base = File(context.filesDir, "novels/$pid/files/$sub")
+            base.mkdirs()
+            base
+        } catch (e: Exception) { null }
+    }
+
+    private fun safeName(s: String) = s.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
+
     /** 补齐缺失的分章大纲（只处理 from..to 范围内） */
-    suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE): String? {
+    suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         val dao = Repo.dao
         val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
         val project = dao.project(projectId) ?: return "项目不存在"
@@ -40,6 +55,23 @@ object WriterEngine {
             )
             applyOutlines(dao, chapters, reply)
         }
+
+        // 大纲全量落盘：files/大纲/分章大纲.md
+        try {
+            dir(context, projectId, "大纲")?.let { d ->
+                val fresh = dao.chapters(projectId)
+                val md = buildString {
+                    appendLine("# 《${project.title}》分章大纲")
+                    appendLine()
+                    fresh.filter { it.outline.isNotBlank() }.forEach {
+                        appendLine("## 第${it.chapterIndex}章 ${it.title}")
+                        appendLine(it.outline)
+                        appendLine()
+                    }
+                }
+                File(d, "分章大纲.md").writeText(md, Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
         return null
     }
 
@@ -69,8 +101,8 @@ object WriterEngine {
         }
     }
 
-    /** 灵感分析：根据用户输入自动生成一整套设定卡 */
-    suspend fun generateCardsFromInspire(projectId: Long, inspiration: String): String? {
+    /** 灵感分析：根据用户输入自动生成一整套设定卡（并全部落盘到 files/设定卡/） */
+    suspend fun generateCardsFromInspire(projectId: Long, inspiration: String, context: Context? = null): String? {
         val dao = Repo.dao
         val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
         val project = dao.project(projectId) ?: return "项目不存在"
@@ -93,26 +125,54 @@ object WriterEngine {
             if (cat !in CardCategories.all) continue
             val name = parts[1].take(50)
             if (name.isBlank()) continue
+            val content = parts.drop(2).joinToString("｜")
             dao.insertCard(
                 SettingCard(
                     projectId = projectId,
                     category = cat,
                     name = name,
-                    content = parts.drop(2).joinToString("｜"),
+                    content = content,
                     priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
                     status = if (cat == "伏笔钩子") "埋设中" else ""
                 )
             )
+            // 落盘 files/设定卡/{分类}/{名称}.md
+            try {
+                dir(context, projectId, "设定卡/$cat")?.let { d ->
+                    File(d, safeName(name) + ".md").writeText("# $cat · $name\n\n$content\n", Charsets.UTF_8)
+                }
+            } catch (_: Exception) { }
             count++
         }
         return if (count == 0) "AI未能生成可识别的设定，回复片段：${reply.take(200)}" else null
     }
 
-    /** 写单章：生成正文 → 保存 → 生成摘要 → 自动记录剧情进度 → 自动标记已回收伏笔 */
-    suspend fun writeOne(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter) {
+    /**
+     * 写单章：
+     *  1) 写前在聊天播报「📥 已注入内容」（必发卡/伏笔/摘要/结尾/相邻大纲摘要）
+     *  2) 生成正文 → 存库 → 同时落盘 files/正文/第N章-标题.txt
+     *  3) 摘要 / 剧情进度 / 伏笔回收
+     */
+    suspend fun writeOne(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter, context: Context? = null) {
         val cards = dao.cards(project.id)
         val chapters = dao.chapters(project.id)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0)
+
+        // 播报本次注入内容（每章都提示）
+        try {
+            val selected = Prompts.selectCards(cards, ch0.outline + ch0.title)
+            val recent = chapters.filter { it.chapterIndex < ch0.chapterIndex && it.summary.isNotBlank() }.takeLast(5)
+            val inject = buildString {
+                append("📥 已注入本章上下文：")
+                append("设定卡 ${selected.size} 张")
+                if (selected.any { it.category == "伏笔钩子" }) append("（含未回收伏笔 ${selected.count { it.category == "伏笔钩子" }} 条）")
+                if (recent.isNotEmpty()) append(" · 前${recent.size}章摘要")
+                append(" · 上一章结尾600字 · 相邻大纲")
+                append(" · 合计约 ${messages.sumOf { it.content.length }} 字")
+            }
+            dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
+        } catch (_: Exception) { }
+
         val content = AiClient.chat(cfg, messages, maxTokens = 4096).trim()
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")
 
@@ -123,6 +183,14 @@ object WriterEngine {
             updatedAt = System.currentTimeMillis()
         )
         dao.updateChapter(ch)
+
+        // 正文落盘 files/正文/第N章-标题.txt
+        try {
+            dir(context, project.id, "正文")?.let { d ->
+                File(d, safeName("第${ch.chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + ".txt")
+                    .writeText("第${ch.chapterIndex}章 ${ch.title}\n\n$content\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
 
         // 摘要 + 伏笔回收检测
         try {
@@ -291,7 +359,7 @@ object AutoWriteManager {
         it.copy(logs = (listOf("${fmt.format(Date())} $msg") + it.logs).take(120))
     }
 
-    fun start(projectId: Long, from: Int, to: Int) {
+    fun start(projectId: Long, from: Int, to: Int, context: Context? = null) {
         if (state.value.running) return
         job = scope.launch {
             state.value = Progress(running = true, projectId = projectId)
@@ -303,7 +371,7 @@ object AutoWriteManager {
 
                 // 1) 先补齐范围内缺失的大纲
                 state.value = state.value.copy(currentChapter = "生成缺失大纲中…")
-                val err = WriterEngine.ensureOutlines(projectId, from, to)
+                val err = WriterEngine.ensureOutlines(projectId, from, to, context)
                 if (err != null) { log(err); return@launch }
                 log("大纲已就绪")
 
@@ -323,7 +391,7 @@ object AutoWriteManager {
                             state.value = state.value.copy(done = done)
                             continue
                         }
-                        WriterEngine.writeOne(project, cfg, dao, fresh)
+                        WriterEngine.writeOne(project, cfg, dao, fresh, context)
                         fail = 0
                         done++
                         state.value = state.value.copy(done = done)

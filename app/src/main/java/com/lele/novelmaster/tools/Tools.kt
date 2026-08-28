@@ -84,7 +84,7 @@ object Tools {
         return ToolResult(true, "设定卡共 ${filtered.size} 张：", detail)
     }
 
-    suspend fun addCard(pid: Long, category: String, name: String, content: String, priority: Int? = null): ToolResult {
+    suspend fun addCard(pid: Long, category: String, name: String, content: String, priority: Int? = null, context: Context? = null): ToolResult {
         if (category !in CardCategories.all) return ToolResult(false, "未知分类「$category」", "可选：" + CardCategories.all.joinToString("、"))
         if (name.isBlank() || content.isBlank()) return ToolResult(false, "名称和内容不能为空")
         val prio = priority ?: when (category) {
@@ -104,7 +104,16 @@ object Tools {
                 )
             }
         }
-        return ToolResult(true, "✅ 已存入设定卡", "「$category / $name」已保存（id=$id）")
+        // 同步落盘 files/设定卡/{分类}/{名称}.md
+        if (context != null) {
+            try {
+                val d = com.lele.novelmaster.tools.FileTools.baseDir(context, pid).resolve("设定卡/$category")
+                d.mkdirs()
+                java.io.File(d, name.replace(Regex("[\\/:*?\"<>|]"), "_").take(40) + ".md")
+                    .writeText("# $category · $name\n\n$content\n", Charsets.UTF_8)
+            } catch (_: Exception) { }
+        }
+        return ToolResult(true, "✅ 已存入设定卡", "「$category / $name」已保存（id=$id），并同步到项目文件夹。")
     }
 
     suspend fun deleteCard(pid: Long, cardId: Long): ToolResult {
@@ -133,13 +142,13 @@ object Tools {
         return ToolResult(true, "第${idx}章《${c.title}》", c.content.ifBlank { c.outline }, navigateTo = "editor/${c.id}")
     }
 
-    suspend fun writeNextChapter(pid: Long): ToolResult {
+    suspend fun writeNextChapter(pid: Long, context: Context? = null): ToolResult {
         val cfg = withContext(Dispatchers.IO) { Repo.dao.activeApi() } ?: return ToolResult(false, "请先在【AI模型】中添加并启用一个模型")
         val chs = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
         val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val next = chs.firstOrNull { it.content.isBlank() } ?: return ToolResult(false, "全部章节都已写完 ✅")
         return try {
-            WriterEngine.writeOne(project, cfg, Repo.dao, next)
+            WriterEngine.writeOne(project, cfg, Repo.dao, next, context)
             val fresh = withContext(Dispatchers.IO) { Repo.dao.chapter(next.id) }!!
             ToolResult(true, "✅ 第${fresh.chapterIndex}章《${fresh.title}》已写入", "${fresh.wordCount} 字 · 摘要：${fresh.summary}", navigateTo = "editor/${fresh.id}")
         } catch (e: Exception) {
@@ -156,27 +165,27 @@ object Tools {
 
     // ---------- 自动写作 / 大纲 ----------
 
-    suspend fun startAutoWrite(pid: Long, from: Int, to: Int): ToolResult {
+    suspend fun startAutoWrite(pid: Long, from: Int, to: Int, context: Context? = null): ToolResult {
         // 自定义范围 1~600；实际章节不足时按实际章节遍历，写完自动停
         val f = from.coerceIn(1, 600)
         val t = to.coerceIn(f, 600)
-        AutoWriteManager.start(pid, f, t)
+        AutoWriteManager.start(pid, f, t, context)
         return ToolResult(true, "🚀 自动写作已开始", "范围：第 $f ~ $t 章（实际章节不足时写到最后一章自动停）。进度在聊天里实时播报，随时说「停止写作」中止。", navigateTo = "autowrite/$pid")
     }
 
     suspend fun stopAutoWrite(): ToolResult { AutoWriteManager.stop(); return ToolResult(true, "已请求停止自动写作") }
 
-    suspend fun generateOutlines(pid: Long): ToolResult {
+    suspend fun generateOutlines(pid: Long, context: Context? = null): ToolResult {
         return withContext(Dispatchers.IO) {
-            val err = WriterEngine.ensureOutlines(pid)
+            val err = WriterEngine.ensureOutlines(pid, context = context)
             if (err != null) ToolResult(false, err) else ToolResult(true, "已补齐缺失的分章大纲")
         }
     }
 
-    suspend fun inspireFromText(pid: Long, inspiration: String): ToolResult {
+    suspend fun inspireFromText(pid: Long, inspiration: String, context: Context? = null): ToolResult {
         if (inspiration.isBlank()) return ToolResult(false, "请把你的灵感 / 需求发给我")
         return withContext(Dispatchers.IO) {
-            val err = WriterEngine.generateCardsFromInspire(pid, inspiration)
+            val err = WriterEngine.generateCardsFromInspire(pid, inspiration, context)
             if (err != null) return@withContext ToolResult(false, err)
             // 灵感落地后自动补齐分章大纲，让"一个灵感发过去就自动完成"
             val outlineErr = WriterEngine.ensureOutlines(pid)
@@ -482,15 +491,15 @@ object Tools {
             )
             "addCard" -> addCard(
                 pid, args.optString("category"), args.optString("name"), args.optString("content"),
-                if (args.has("priority")) args.optInt("priority") else null
+                if (args.has("priority")) args.optInt("priority") else null, context
             )
             "deleteCard" -> deleteCard(pid, args.optLong("cardId"))
-            "writeNextChapter" -> writeNextChapter(pid)
+            "writeNextChapter" -> writeNextChapter(pid, context)
             "rewriteChapter" -> rewriteChapter(pid, args.optInt("index"))
-            "startAutoWrite" -> startAutoWrite(pid, args.optInt("from", 1), args.optInt("to", 300))
+            "startAutoWrite" -> startAutoWrite(pid, args.optInt("from", 1), args.optInt("to", 300), context)
             "stopAutoWrite" -> stopAutoWrite()
-            "generateOutlines" -> generateOutlines(pid)
-            "inspireFromText" -> inspireFromText(pid, args.optString("inspiration"))
+            "generateOutlines" -> generateOutlines(pid, context)
+            "inspireFromText" -> inspireFromText(pid, args.optString("inspiration"), context)
             "readChapter" -> readChapter(pid, args.optInt("index"))
             "listCards" -> listCards(pid, args.optString("category").ifBlank { null })
             "listChapters" -> listChapters(pid, args.optBoolean("onlyMissing", false))

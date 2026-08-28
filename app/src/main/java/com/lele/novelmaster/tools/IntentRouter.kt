@@ -55,7 +55,7 @@ object IntentRouter {
         // ------- 章节操作 -------
         if (Regex("^(写下?一?章|继续写|接着写|写吧|开写)").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我你要写哪本书，先创建或选一本。")
-            return Tools.writeNextChapter(pid)
+            return Tools.writeNextChapter(pid, context)
         }
 
         Regex("(?:写|写好|生成|产?出|第)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章(?!.*重写)").find(raw)?.let { m ->
@@ -116,7 +116,7 @@ object IntentRouter {
                 val b = parseChineseNum(rangePair.groupValues[5])
                 Pair(if (a in 1..100000) a else 1, if (b in 1..100000) b else 300)
             } else Pair(1, 300)
-            return Tools.startAutoWrite(pid, from, to)
+            return Tools.startAutoWrite(pid, from, to, context)
         }
         if (Regex("^(停止|暂停|中止|停).*(写|自动)|停止写作|别写了|暂停写作").containsMatchIn(raw)) {
             return Tools.stopAutoWrite()
@@ -128,12 +128,12 @@ object IntentRouter {
                 .removePrefix("我想写：").removePrefix("我想写:").removePrefix("帮我构思：").removePrefix("帮我构思:")
                 .removePrefix("根据以下灵感：").removePrefix("根据以下灵感:")
             val pid = needPid() ?: return ToolResult(false, "请先创建一本书或告诉我写哪一本")
-            return Tools.inspireFromText(pid, text)
+            return Tools.inspireFromText(pid, text, context)
         }
 
         if (Regex("(补|写|生成|生)(全|所有)?大纲|大纲生成|自动大纲").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我看哪本书")
-            return Tools.generateOutlines(pid)
+            return Tools.generateOutlines(pid, context)
         }
 
         // ------- 模型 -------

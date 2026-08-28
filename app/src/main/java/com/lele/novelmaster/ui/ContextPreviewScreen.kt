@@ -29,6 +29,7 @@ import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
 import com.lele.novelmaster.tools.ToolResult
 import com.lele.novelmaster.tools.Tools
+import kotlinx.coroutines.flow.firstOrNull
 
 /**
  * 上下文注入预览 —— 实时查看「写下一章」时 AI 将收到什么：
@@ -42,10 +43,15 @@ fun ContextPreviewScreen(nav: NavController, pid: Long) {
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(pid, project?.id) {
-        if (pid > 0L) {
+        // 当前会话优先；没有会话时自动取第一本（不让用户再选）
+        val target = if (pid > 0L) pid else Repo.dao.projectsFlow().firstOrNull()?.firstOrNull()?.id ?: 0L
+        if (target > 0L) {
             loading = true
-            result = Tools.contextPreview(pid)
+            result = Tools.contextPreview(target)
             loading = false
+        } else {
+            loading = false
+            result = com.lele.novelmaster.tools.ToolResult(false, "还没有任何小说。回聊天页发一个灵感即可自动建书。")
         }
     }
 
