@@ -71,6 +71,22 @@ data class ApiConfig(
     val isActive: Boolean = false
 )
 
+/**
+ * 聊天消息（像豆包/元宝一样持久化所有对话）
+ * role: user | assistant | system | tool
+ * projectId: 0 = 通用对话（无当前项目），其余对应小说项目
+ * kind: text | action（操作摘要卡片） | divider | error
+ */
+@Entity(tableName = "messages", indices = [Index("projectId"), Index("createdAt")])
+data class Message(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val projectId: Long,
+    val role: String,
+    val content: String,
+    val kind: String = "text",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
 object CardCategories {
     val all = listOf(
         "全书大纲", "世界观", "人物设定", "主线剧情", "支线任务",
@@ -162,11 +178,21 @@ interface NovelDao {
 
     @Query("UPDATE api_configs SET isActive = 0")
     suspend fun clearActiveApi()
+
+    // 聊天消息
+    @Query("SELECT * FROM messages WHERE projectId = :pid ORDER BY createdAt ASC, id ASC")
+    fun messagesFlow(pid: Long): Flow<List<Message>>
+
+    @Insert
+    suspend fun insertMessage(m: Message): Long
+
+    @Query("DELETE FROM messages WHERE projectId = :pid")
+    suspend fun clearMessages(pid: Long)
 }
 
 @Database(
-    entities = [Project::class, Chapter::class, SettingCard::class, ApiConfig::class],
-    version = 1,
+    entities = [Project::class, Chapter::class, SettingCard::class, ApiConfig::class, Message::class],
+    version = 2,
     exportSchema = false
 )
 abstract class AppDb : RoomDatabase() {

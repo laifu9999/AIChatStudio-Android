@@ -11,10 +11,10 @@ import androidx.navigation.compose.rememberNavController
 import com.lele.novelmaster.ui.AiScreen
 import com.lele.novelmaster.ui.AutoWriteScreen
 import com.lele.novelmaster.ui.CardsScreen
+import com.lele.novelmaster.ui.ChatScreen
 import com.lele.novelmaster.ui.ChaptersScreen
 import com.lele.novelmaster.ui.EditorScreen
 import com.lele.novelmaster.ui.ExportScreen
-import com.lele.novelmaster.ui.HomeScreen
 import com.lele.novelmaster.ui.NovelTheme
 import com.lele.novelmaster.ui.ProjectScreen
 
@@ -31,8 +31,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppNav() {
     val nav = rememberNavController()
-    NavHost(nav, startDestination = "home") {
-        composable("home") { HomeScreen(nav) }
+    NavHost(nav, startDestination = "chat") {
+        // 主入口：豆包/元宝风格聊天界面
+        composable("chat") { ChatScreen(nav) }
         composable("project/{id}") { e ->
             ProjectScreen(nav, e.arguments?.getString("id")?.toLongOrNull() ?: 0L)
         }
