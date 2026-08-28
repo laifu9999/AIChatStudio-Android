@@ -275,7 +275,7 @@ private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit
 /* ---------------- 输入栏（防键盘遮挡：imePadding） ---------------- */
 
 @Composable
-private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, onSend: (String) -> Unit) {
+private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, onSend: () -> Unit) {
     Surface(color = Color.Transparent) {
         Column(
             modifier = Modifier
@@ -479,10 +479,7 @@ private fun QuickChipsRow(onPick: (String) -> Unit) {
                 onClick = { onPick(label.substringAfter(" ").trim()) },
                 label = { Text(label, fontSize = 12.sp, color = BrandTop, fontWeight = FontWeight.Medium) },
                 colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xFFFFFFFF)),
-                border = AssistChipDefaults.assistChipBorder(
-                    borderColor = BrandTop.copy(alpha = 0.45f),
-                    borderWidth = 1.dp
-                )
+                border = androidx.compose.foundation.BorderStroke(1.dp, BrandTop.copy(alpha = 0.45f))
             )
         }
     }

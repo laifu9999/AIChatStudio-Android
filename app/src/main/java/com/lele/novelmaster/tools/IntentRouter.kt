@@ -203,7 +203,7 @@ object IntentRouter {
         }
         if (Regex("生成简介|写简介|发布简介|书名|简介").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
-            return Tools.genBlurb(pid)
+            return Tools.genBlurb(pid, context)
         }
         if (Regex("列出?文件|看看文件|打开文件|文件列表|项目文件").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")

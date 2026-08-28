@@ -286,7 +286,8 @@ object Tools {
         val chs = Repo.dao.chapters(pid)
         val target = if (idx > 0) chs.firstOrNull { it.chapterIndex == idx }
         else chs.lastOrNull { it.content.isNotBlank() }
-        return target?.chapterIndex ?: -1 to target
+        val n = target?.chapterIndex ?: -1
+        return n to target
     }
 
     /** 1. 章节润色：提升文笔，不动剧情 */
@@ -467,13 +468,14 @@ object Tools {
      * name/args 来自 AI 回复中的 <tool>{"name":..,"args":{..}}</tool> 块。
      * 返回 null 表示未知工具名。
      */
-    suspend fun dispatch(pid: Long, name: String, args: org.json.JSONObject, context: Context?): ToolResult? = try {
+    suspend fun dispatch(pid: Long, name: String, args: org.json.JSONObject, context: Context?): ToolResult? {
         // 文件系统工具优先（AI 自由建文件夹/文件，会话隔离）
         if (context != null) {
             val fr = com.lele.novelmaster.tools.FileTools.dispatch(context, pid, name, args)
             if (fr != null) return fr
         }
-        when (name) {
+        return try {
+            when (name) {
             "createProject" -> createProject(
                 args.optString("title"), args.optString("genre"), args.optString("desc"),
                 args.optInt("totalCh", 300), args.optInt("chWords", 2500)
