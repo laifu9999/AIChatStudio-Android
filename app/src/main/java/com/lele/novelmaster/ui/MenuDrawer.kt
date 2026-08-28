@@ -2,7 +2,6 @@ package com.lele.novelmaster.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -47,10 +46,8 @@ private val BrandTop = Color(0xFF6750A4)
 private val BrandBottom = Color(0xFF8B5CF6)
 
 /**
- * 豆包式会话历史抽屉：
- *  - ＋ 新会话（= 新建小说）
- *  - 会话列表：点按切换（每个会话=一本小说，数据完全隔离），🗑 删除（级联清数据）
- *  - 功能入口：仪表盘/设定卡/章节/上下文预览/自动写作/AI模型/导出
+ * 会话抽屉 v5.1：会话列表 + 功能全部放在一个可滚动列表里（小屏也不截断）。
+ * 点击遮罩关闭；会话可切换/删除；入口含书架与阅读器。
  */
 @Composable
 fun MenuDrawer(
@@ -75,15 +72,14 @@ fun MenuDrawer(
                 .fillMaxSize()
                 .padding(end = 64.dp)
                 .background(Color(0xFFF7F5FC))
-                .clickable(enabled = false) { }
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // 顶部渐变头
+                // 头部（渐变 + 新会话）
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Brush.verticalGradient(listOf(BrandTop, BrandBottom)))
-                        .padding(horizontal = 16.dp, vertical = 18.dp)
+                        .padding(horizontal = 16.dp, vertical = 14.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("乐乐写小说", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
@@ -91,7 +87,6 @@ fun MenuDrawer(
                         IconButton(onClick = onClose) { Icon(Icons.Filled.Close, null, tint = Color.White) }
                     }
                     Spacer(Modifier.height(10.dp))
-                    // 新会话按钮
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -102,13 +97,17 @@ fun MenuDrawer(
                     ) { Text("＋  新建会话（新小说）", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
                 }
 
-                // 会话列表
-                Text(
-                    "  会话记录（${projects.size}）",
-                    color = Color(0xFF8A8698), fontSize = 12.sp,
-                    modifier = Modifier.padding(start = 8.dp, top = 10.dp, bottom = 4.dp)
-                )
-                LazyColumn(Modifier.weight(1f)) {
+                // 全部内容：一个 LazyColumn，显示不完可滚动
+                LazyColumn(Modifier.fillMaxSize()) {
+                    // 书架 / 阅读
+                    item {
+                        SectionLabel("书架与阅读")
+                        FunRow("📚  小说书架（自动生成）") { onNav("shelf") }
+                        FunRow("🔎  注入预览（当前会话）") { onNav("preview/$currentPid") }
+                    }
+
+                    // 会话列表
+                    item { SectionLabel("会话记录（${projects.size}） · 每个会话=一本书") }
                     if (projects.isEmpty()) {
                         item {
                             Text(
@@ -143,47 +142,38 @@ fun MenuDrawer(
                                         fontSize = 15.sp, color = Color(0xFF1F1B2E),
                                         maxLines = 1, overflow = TextOverflow.Ellipsis
                                     )
-                                    Text(
-                                        "${p.genre} · ${p.targetChapters}章",
-                                        fontSize = 11.sp, color = Color(0xFF8A8698)
-                                    )
+                                    Text("${p.genre} · ${p.targetChapters}章", fontSize = 11.sp, color = Color(0xFF8A8698))
                                 }
-                                IconButton(onClick = { deleteTarget = p.id }) {
-                                    Text("🗑", fontSize = 15.sp)
+                                TextButton(onClick = { deleteTarget = p.id }) {
+                                    Text("删除", color = Color(0xFFB91C1C), fontSize = 12.sp)
                                 }
                             }
                         }
                     }
-                }
 
-                // 功能入口
-                Column(Modifier.padding(bottom = 16.dp)) {
-                    Text(
-                        "  功能",
-                        color = Color(0xFF8A8698), fontSize = 12.sp,
-                        modifier = Modifier.padding(start = 8.dp, top = 8.dp, bottom = 4.dp)
-                    )
-                    FunRow("📚 项目仪表盘") { onNav("project/$currentPid") }
-                    FunRow("🗂 设定卡管理") { onNav("cards/$currentPid") }
-                    FunRow("📖 章节列表 / 阅读") { onNav("chapters/$currentPid") }
-                    FunRow("🔍 上下文注入预览") { onNav("preview/$currentPid") }
-                    FunRow("📁 项目文件（AI 的资料库）") { onNav("files/$currentPid") }
-                    FunRow("✍️ 自动写作控制台") { onNav("autowrite/$currentPid") }
-                    FunRow("🤖 AI 模型（添加 / 测试）") { onNav("ai") }
-                    FunRow("📤 导出 / 发布") { onNav("export/$currentPid") }
+                    // 功能
+                    item {
+                        SectionLabel("功能")
+                        FunRow("🗂  设定卡管理") { onNav("cards/$currentPid") }
+                        FunRow("📖  章节列表 / 编辑") { onNav("chapters/$currentPid") }
+                        FunRow("📁  项目文件（AI 的资料库）") { onNav("files/$currentPid") }
+                        FunRow("✍️  自动写作控制台") { onNav("autowrite/$currentPid") }
+                        FunRow("🤖  AI 模型（添加 / 测试）") { onNav("ai") }
+                        FunRow("📤  导出 / 发布") { onNav("export/$currentPid") }
+                        Spacer(Modifier.height(28.dp))
+                    }
                 }
             }
         }
     }
 
-    // 删除会话确认
     if (deleteTarget != null) {
         val pid = deleteTarget!!
         val name = projects.firstOrNull { it.id == pid }?.title ?: ""
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除会话") },
-            text = { Text("确定删除《$name》？\n该会话的章节、设定卡、聊天记录将一并删除，不可恢复。") },
+            text = { Text("确定删除《$name》？\n该会话的章节、设定卡、聊天记录、项目文件夹将一并删除，不可恢复。") },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch(Dispatchers.IO) { Tools.deleteProject(pid) }
@@ -193,6 +183,15 @@ fun MenuDrawer(
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } }
         )
     }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        "  $text",
+        color = Color(0xFF8A8698), fontSize = 12.sp,
+        modifier = Modifier.padding(start = 8.dp, top = 12.dp, bottom = 4.dp)
+    )
 }
 
 @Composable

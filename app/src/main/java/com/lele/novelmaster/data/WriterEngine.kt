@@ -158,20 +158,15 @@ object WriterEngine {
         val chapters = dao.chapters(project.id)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0)
 
-        // 播报本次注入内容（每章都提示）
-        try {
-            val selected = Prompts.selectCards(cards, ch0.outline + ch0.title)
-            val recent = chapters.filter { it.chapterIndex < ch0.chapterIndex && it.summary.isNotBlank() }.takeLast(5)
-            val inject = buildString {
-                append("📥 已注入本章上下文：")
-                append("设定卡 ${selected.size} 张")
-                if (selected.any { it.category == "伏笔钩子" }) append("（含未回收伏笔 ${selected.count { it.category == "伏笔钩子" }} 条）")
-                if (recent.isNotEmpty()) append(" · 前${recent.size}章摘要")
-                append(" · 上一章结尾600字 · 相邻大纲")
-                append(" · 合计约 ${messages.sumOf { it.content.length }} 字")
-            }
-            dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
-        } catch (_: Exception) { }
+        // 播报本次注入内容（每章都提示；插入失败=记录不可靠，抛错让自动写作立即停止）
+        val inject = buildString {
+            append("📥 已注入本章上下文：")
+            append("设定卡 ${cards.size} 张（选中 ${Prompts.selectCards(cards, ch0.outline + ch0.title).size} 张）")
+            append(" · 未回收伏笔 ${cards.count { it.category == "伏笔钩子" && it.status != "已回收" }} 条")
+            append(" · 前5章摘要+上一章结尾600字+相邻大纲")
+            append(" · 合计约 ${messages.sumOf { it.content.length }} 字")
+        }
+        dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
 
         val content = AiClient.chat(cfg, messages, maxTokens = 4096).trim()
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")

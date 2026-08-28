@@ -29,7 +29,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Card
@@ -45,6 +44,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -86,6 +86,7 @@ private val TextSub = Color(0xFF8A8698)
  * 顶栏实色渐变（☰ 会话 / 书名 / AI模型 / ＋ / ⠇功能面板），全部可见。
  * 功能面板 = 卡片网格弹出层，展示不完的功能全在这里。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(nav: NavHostController) {
     val ctx = LocalContext.current
@@ -185,15 +186,28 @@ fun ChatScreen(nav: NavHostController) {
             IconButton(onClick = { showCreate = true }) {
                 Icon(Icons.Filled.Add, "新会话", tint = Color.White)
             }
-            IconButton(onClick = { showPanel = true }) {
-                Icon(Icons.Filled.Apps, "功能面板", tint = Color.White)
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color.White.copy(alpha = 0.22f),
+                modifier = Modifier.clickable { showPanel = true }
+            ) {
+                Text(
+                    "⠿ 功能",
+                    color = Color.White, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                )
             }
         }
 
         // ============ 主体 ============
         Scaffold(
             containerColor = Color.Transparent,
-            bottomBar = { InputBar(input, busy, { input = it }, { onSendClick() }) }
+            bottomBar = {
+                // 不在会话窗口时（抽屉/面板/对话框打开）隐藏输入框
+                if (!drawerOpen && !showPanel && !showCreate) {
+                    InputBar(input, busy, { input = it }, { onSendClick() })
+                }
+            }
         ) { pad ->
             Column(
                 modifier = Modifier
@@ -272,6 +286,7 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit) {
         Triple("💬", "生成金句", FRun("生成金句")),
         Triple("📝", "简介书名", FRun("生成简介和书名")),
         Triple("🏷", "起名器", FRun("起8个人物名")),
+        Triple("📚", "小说书架", FNav("shelf")),
         Triple("📤", "导出发布", FNav("export/{pid}")),
         Triple("🤖", "AI 模型", FNav("ai"))
     )

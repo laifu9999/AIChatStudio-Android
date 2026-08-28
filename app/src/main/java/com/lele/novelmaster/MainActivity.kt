@@ -15,6 +15,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.lele.novelmaster.ui.AiScreen
 import com.lele.novelmaster.ui.AutoWriteScreen
+import com.lele.novelmaster.ui.BookshelfScreen
 import com.lele.novelmaster.ui.CardsScreen
 import com.lele.novelmaster.ui.ChatScreen
 import com.lele.novelmaster.ui.ChaptersScreen
@@ -24,6 +25,7 @@ import com.lele.novelmaster.ui.ExportScreen
 import com.lele.novelmaster.ui.FilesScreen
 import com.lele.novelmaster.ui.NovelTheme
 import com.lele.novelmaster.ui.ProjectScreen
+import com.lele.novelmaster.ui.ReaderScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -75,6 +77,10 @@ fun AppNav() {
         }
         composable("files/{id}") { e ->
             FilesScreen(nav, e.arguments?.getString("id")?.toLongOrNull() ?: 0L)
+        }
+        composable("shelf") { BookshelfScreen(nav) }
+        composable("reader/{id}") { e ->
+            ReaderScreen(nav, e.arguments?.getString("id")?.toLongOrNull() ?: 0L)
         }
         composable("editor/{chapterId}") { e ->
             EditorScreen(nav, e.arguments?.getString("chapterId")?.toLongOrNull() ?: 0L)
