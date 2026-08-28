@@ -63,6 +63,7 @@ import com.lele.novelmaster.data.Message
 import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
 import com.lele.novelmaster.engine.ChatService
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**

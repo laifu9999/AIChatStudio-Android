@@ -114,7 +114,7 @@ object IntentRouter {
             val (from, to) = if (rangePair != null) {
                 val a = parseChineseNum(rangePair.groupValues[2])
                 val b = parseChineseNum(rangePair.groupValues[5])
-                Pair(a.ifEmpty { 1 }, b.ifEmpty { 300 })
+                Pair(if (a in 1..100000) a else 1, if (b in 1..100000) b else 300)
             } else Pair(1, 300)
             return Tools.startAutoWrite(pid, from, to)
         }
