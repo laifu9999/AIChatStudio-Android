@@ -1,0 +1,151 @@
+package com.lele.novelmaster.data
+
+/**
+ * 提示词与上下文组装器 —— 本App的"记忆核心"。
+ *
+ * 设计目标：写 300 章不跑题、不浪费 token。
+ * 策略：
+ *  1. 不发送全部历史正文，只发送「前5章摘要 + 上一章结尾600字」→ 用摘要代替全文，token 恒定不随章节数膨胀
+ *  2. 设定卡按优先级与关键词相关度智能挑选：每章必发卡 + 未回收伏笔全发；常规卡按与本章大纲的关键词重合度排序取前14张
+ *  3. 低频卡（priority=0）不参与注入
+ */
+object Prompts {
+
+    fun cardBlock(cards: List<SettingCard>): String =
+        cards.joinToString("\n") { "【${it.category}·${it.name}】${it.content}${if (it.category == "伏笔钩子") "（状态：${it.status.ifBlank { "埋设中" }}）" else ""}" }
+
+    /** 按优先级与关键词相关度挑选要注入的设定卡 */
+    fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
+        val always = all.filter { it.priority == 2 }
+        val foreshadow = all.filter { it.category == "伏笔钩子" && it.status != "已回收" }
+        val normal = all.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
+
+        fun score(c: SettingCard): Int {
+            var s = if (c.category in CardCategories.KEY_CATS) 1 else 0
+            val text = c.name + c.content
+            var hits = 0
+            var i = 0
+            while (i < focusText.length - 1) {
+                val g = focusText.substring(i, i + 2)
+                if (!g.any { it == '，' || it == '。' || it == '、' || it == ' ' || it == '：' } && text.contains(g)) hits++
+                i++
+            }
+            return s + minOf(hits, 6)
+        }
+
+        val ranked = normal.sortedByDescending { score(it) }.take(14)
+        return (always + foreshadow + ranked).distinctBy { it.id }
+    }
+
+    fun writerSystem(selected: List<SettingCard>): String = buildString {
+        appendLine("你是一位顶级网络小说作家，正在按大纲逐章写作。严格遵守：")
+        appendLine("1. 人物性格、能力、称谓、世界观必须与设定资料完全一致，绝不能自相矛盾。")
+        appendLine("2. 与前情摘要、上一章结尾自然衔接；不重复已写过的情节，不另起炉灶。")
+        appendLine("3. 伏笔规则：【伏笔钩子】中状态为“埋设中”的伏笔要按计划推进；“已回收”的不可再当新伏笔。需要埋新伏笔时自然埋下。")
+        appendLine("4. 每章必须有推进、有冲突、章末留钩子（悬念）。多用场景与对话，少干巴巴的旁白。")
+        appendLine("5. 只输出正文本身：不要输出章节标题、章节号、序号、解释、总结或任何多余内容。")
+        appendLine()
+        appendLine("【设定资料】")
+        append(cardBlock(selected))
+    }
+
+    /** 组装写章所需的完整消息 */
+    fun buildChapterMessages(
+        project: Project,
+        cards: List<SettingCard>,
+        chapters: List<Chapter>,
+        chapter: Chapter
+    ): List<ChatMsg> {
+        val selected = selectCards(cards, chapter.outline + chapter.title)
+        val recent = chapters
+            .filter { it.chapterIndex < chapter.chapterIndex && it.summary.isNotBlank() }
+            .takeLast(5)
+        val prev = chapters.firstOrNull { it.chapterIndex == chapter.chapterIndex - 1 }
+        val neighbors = chapters
+            .filter { it.chapterIndex in (chapter.chapterIndex - 1)..(chapter.chapterIndex + 1) && it.outline.isNotBlank() }
+            .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》:${it.outline}" }
+
+        val user = buildString {
+            appendLine("【书名】${project.title}　【类型】${project.genre}")
+            if (project.description.isNotBlank()) appendLine("【简介】${project.description}")
+            if (recent.isNotEmpty()) {
+                appendLine()
+                appendLine("【前情摘要】")
+                recent.forEach { appendLine("第${it.chapterIndex}章《${it.title}》：${it.summary}") }
+            }
+            if (prev != null && prev.content.isNotBlank()) {
+                appendLine()
+                appendLine("【上一章结尾（本章开头要自然衔接）】")
+                appendLine(prev.content.takeLast(600))
+            }
+            if (neighbors.isNotBlank()) {
+                appendLine()
+                appendLine("【相邻章节大纲（保持连贯）】")
+                appendLine(neighbors)
+            }
+            appendLine()
+            appendLine("【本章任务】第${chapter.chapterIndex}章")
+            if (chapter.title.isNotBlank()) appendLine("章节名：${chapter.title}")
+            if (chapter.outline.isNotBlank()) {
+                appendLine("本章大纲：${chapter.outline}")
+            } else {
+                appendLine("本章大纲未给出，请根据前情与相邻章节大纲自然推进剧情。")
+            }
+            appendLine()
+            append("请写出本章完整正文，约${project.chapterWordTarget}字。只输出正文。")
+        }
+        return listOf(ChatMsg("system", writerSystem(selected)), ChatMsg("user", user))
+    }
+
+    /** 大纲生成的系统提示 */
+    const val OUTLINE_SYSTEM = "你是资深网文主编，擅长设计连贯、有张力、有长线伏笔的分章大纲。只输出要求格式的内容，不要任何解释。"
+
+    fun buildOutlineUser(
+        project: Project,
+        cards: List<SettingCard>,
+        existing: List<Chapter>,
+        from: Int,
+        to: Int,
+        count: Int
+    ): String = buildString {
+        appendLine("【书名】${project.title}　【类型】${project.genre}")
+        if (project.description.isNotBlank()) appendLine("【简介】${project.description}")
+        val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
+        if (core.isNotEmpty()) {
+            appendLine("【核心设定】")
+            appendLine(cardBlock(core))
+        }
+        val lastOutlines = existing.filter { it.outline.isNotBlank() }.takeLast(20)
+        if (lastOutlines.isNotEmpty()) {
+            appendLine("【已有大纲（保持连贯，不要重复已写内容）】")
+            lastOutlines.forEach { appendLine("第${it.chapterIndex}章《${it.title}》:${it.outline}") }
+        }
+        appendLine()
+        append("请为第${from}章到第${to}章编写分章大纲，共${count}行。每章严格一行，格式：第N章《标题》：剧情要点（包含出场人物、关键事件、本章钩子，重要处注明埋设/回收的伏笔）。")
+    }
+
+    /** 灵感分析 → 生成设定卡 */
+    const val INSPIRE_SYSTEM = "你是资深网文策划师。根据用户的灵感与需求输出结构化设定。严格按行输出，每行格式：分类｜名称｜内容。分类只能用：全书大纲、世界观、人物设定、主线剧情、支线任务、伏笔钩子、核心冲突、设定圣经、辅助设定。不要输出其他任何内容。"
+
+    fun buildInspireUser(project: Project, inspiration: String): String = buildString {
+        appendLine("书名：${project.title}（类型：${project.genre}）")
+        if (project.description.isNotBlank()) appendLine("已有简介：${project.description}")
+        appendLine()
+        appendLine("用户的灵感与需求：")
+        appendLine(inspiration)
+        appendLine()
+        append("请生成完整设定：世界观、主角与主要人物（各一行）、主线剧情、核心冲突、2~4个支线任务、至少3个伏笔钩子（名称简短便于追踪）、设定圣经摘要、全书大纲（分阶段）。")
+    }
+
+    /** 编辑器内续写 */
+    suspend fun continueMessages(project: Project, cards: List<SettingCard>, chapter: Chapter, currentText: String): List<ChatMsg> {
+        val selected = selectCards(cards, chapter.outline)
+        val user = buildString {
+            appendLine("【本章任务】${chapter.outline.ifBlank { chapter.title }}")
+            appendLine("【已有正文（结尾部分）】")
+            appendLine(currentText.takeLast(1500))
+            append("请从上文结尾处自然续写约800字。只输出续写内容，不要重复已有内容，不要输出标题或解释。")
+        }
+        return listOf(ChatMsg("system", writerSystem(selected)), ChatMsg("user", user))
+    }
+}

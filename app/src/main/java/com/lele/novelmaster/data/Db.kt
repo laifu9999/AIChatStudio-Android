@@ -1,0 +1,188 @@
+package com.lele.novelmaster.data
+
+import android.content.Context
+import androidx.room.Dao
+import androidx.room.Database
+import androidx.room.Delete
+import androidx.room.Entity
+import androidx.room.Index
+import androidx.room.Insert
+import androidx.room.PrimaryKey
+import androidx.room.Query
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
+
+/** 小说项目 */
+@Entity(tableName = "projects")
+data class Project(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val genre: String = "",
+    val description: String = "",
+    val targetChapters: Int = 300,
+    val chapterWordTarget: Int = 2500,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+/** 章节 */
+@Entity(tableName = "chapters", indices = [Index("projectId")])
+data class Chapter(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val projectId: Long,
+    val chapterIndex: Int,
+    val title: String = "",
+    val outline: String = "",
+    val content: String = "",
+    val summary: String = "",
+    val status: Int = 0, // 0待写 1 AI稿 2已编辑
+    val wordCount: Int = 0,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+/**
+ * 设定卡：小说所有设定内容的分类保存单元
+ * category: 全书大纲/世界观/人物设定/主线剧情/支线任务/伏笔钩子/核心冲突/设定圣经/剧情进度/辅助设定
+ * priority: 0低频(几乎不发) 1常规(智能匹配) 2每章必发
+ * status:   伏笔钩子专用：埋设中 / 已回收
+ */
+@Entity(tableName = "setting_cards", indices = [Index("projectId")])
+data class SettingCard(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val projectId: Long,
+    val category: String,
+    val name: String,
+    val content: String,
+    val priority: Int = 1,
+    val status: String = "",
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+/** AI 接口配置 */
+@Entity(tableName = "api_configs")
+data class ApiConfig(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val provider: String = "openai", // openai兼容 | gemini
+    val baseUrl: String,
+    val apiKey: String,
+    val model: String = "",
+    val isActive: Boolean = false
+)
+
+object CardCategories {
+    val all = listOf(
+        "全书大纲", "世界观", "人物设定", "主线剧情", "支线任务",
+        "伏笔钩子", "核心冲突", "设定圣经", "剧情进度", "辅助设定"
+    )
+    val KEY_CATS = setOf("全书大纲", "世界观", "主线剧情", "核心冲突", "设定圣经", "剧情进度")
+}
+
+@Dao
+interface NovelDao {
+    // 项目
+    @Query("SELECT * FROM projects ORDER BY id DESC")
+    fun projectsFlow(): Flow<List<Project>>
+
+    @Query("SELECT * FROM projects WHERE id = :id")
+    suspend fun project(id: Long): Project?
+
+    @Insert
+    suspend fun insertProject(p: Project): Long
+
+    @Update
+    suspend fun updateProject(p: Project)
+
+    @Delete
+    suspend fun deleteProject(p: Project)
+
+    // 章节
+    @Query("SELECT * FROM chapters WHERE projectId = :pid ORDER BY chapterIndex")
+    fun chaptersFlow(pid: Long): Flow<List<Chapter>>
+
+    @Query("SELECT * FROM chapters WHERE projectId = :pid ORDER BY chapterIndex")
+    suspend fun chapters(pid: Long): List<Chapter>
+
+    @Query("SELECT * FROM chapters WHERE id = :id")
+    suspend fun chapter(id: Long): Chapter?
+
+    @Insert
+    suspend fun insertChapter(c: Chapter): Long
+
+    @Insert
+    suspend fun insertChapters(cs: List<Chapter>)
+
+    @Update
+    suspend fun updateChapter(c: Chapter)
+
+    @Delete
+    suspend fun deleteChapter(c: Chapter)
+
+    @Query("DELETE FROM chapters WHERE projectId = :pid")
+    suspend fun deleteChaptersOf(pid: Long)
+
+    // 设定卡
+    @Query("SELECT * FROM setting_cards WHERE projectId = :pid ORDER BY category, id")
+    fun cardsFlow(pid: Long): Flow<List<SettingCard>>
+
+    @Query("SELECT * FROM setting_cards WHERE projectId = :pid")
+    suspend fun cards(pid: Long): List<SettingCard>
+
+    @Query("SELECT * FROM setting_cards WHERE projectId = :pid AND category = :cat AND name = :name LIMIT 1")
+    suspend fun findCard(pid: Long, cat: String, name: String): SettingCard?
+
+    @Insert
+    suspend fun insertCard(c: SettingCard): Long
+
+    @Update
+    suspend fun updateCard(c: SettingCard)
+
+    @Delete
+    suspend fun deleteCard(c: SettingCard)
+
+    @Query("DELETE FROM setting_cards WHERE projectId = :pid")
+    suspend fun deleteCardsOf(pid: Long)
+
+    // AI 配置
+    @Query("SELECT * FROM api_configs ORDER BY id")
+    fun apiConfigsFlow(): Flow<List<ApiConfig>>
+
+    @Query("SELECT * FROM api_configs WHERE isActive = 1 LIMIT 1")
+    suspend fun activeApi(): ApiConfig?
+
+    @Insert
+    suspend fun insertApi(c: ApiConfig): Long
+
+    @Update
+    suspend fun updateApi(c: ApiConfig)
+
+    @Delete
+    suspend fun deleteApi(c: ApiConfig)
+
+    @Query("UPDATE api_configs SET isActive = 0")
+    suspend fun clearActiveApi()
+}
+
+@Database(
+    entities = [Project::class, Chapter::class, SettingCard::class, ApiConfig::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class AppDb : RoomDatabase() {
+    abstract fun dao(): NovelDao
+}
+
+object Repo {
+    lateinit var dao: NovelDao
+        private set
+
+    fun init(context: Context) {
+        if (!::dao.isInitialized) {
+            dao = Room.databaseBuilder(context, AppDb::class.java, "novel_master.db")
+                .fallbackToDestructiveMigration()
+                .build()
+                .dao()
+        }
+    }
+}
