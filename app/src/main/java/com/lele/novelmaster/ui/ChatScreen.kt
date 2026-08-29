@@ -83,11 +83,16 @@ import kotlinx.coroutines.launch
  * 这里补一段溢出量滚动，保证最新消息始终可见。
  */
 private suspend fun scrollToBottom(state: androidx.compose.foundation.lazy.LazyListState) {
-    repeat(2) {
-        kotlinx.coroutines.delay(60)
-        val info = state.layoutInfo.visibleItemsInfo.lastOrNull() ?: return
-        val overflow = (info.offset + info.size) - state.layoutInfo.viewportEndOffset
-        if (overflow > 0) state.animateScrollBy(overflow.toFloat())
+    repeat(3) {
+        kotlinx.coroutines.delay(80)
+        val info = state.layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull() ?: return
+        val overflow = (last.offset + last.size) - info.viewportEndOffset
+        if (overflow <= 8) return
+        // 把最后一条消息的"底部"对齐到可视区底部
+        val target = (last.size - info.viewportEndOffset).coerceAtLeast(0)
+        if (target <= 0) return
+        state.animateScrollToItem(last.index, target)
     }
 }
 
