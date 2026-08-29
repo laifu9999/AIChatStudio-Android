@@ -140,13 +140,12 @@ object ChatService {
                 val json = extractBalancedJson(work, m.range.last)
                 if (json != null && executedJson.add(json.trim())) {
                     val parsed = parseToolBlock(name + json)
-                    if (parsed != null && runTool(parsed.first, parsed.second)) {
+                                        if (parsed != null && runTool(parsed.first, parsed.second)) {
                         executed++
                         val startIdx = m.range.first
-                        val endIdx = m.range.last + json.length  // name + '{'..'}'
+                        val endIdx = m.range.last + json.length
                         if (endIdx <= work.length) work = work.removeRange(startIdx, endIdx)
                     }
-                }
             }
 
             if (deletedCurrent) {

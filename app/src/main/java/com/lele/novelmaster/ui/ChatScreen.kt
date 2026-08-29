@@ -445,7 +445,7 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
     }
 }
 
-private sealed class FAction2(val go: () -> Unit) : FAction()
+private open class FAction2(val go: () -> Unit) : FAction()
 
 /* ---------------- 新建会话对话框 ---------------- */
 
