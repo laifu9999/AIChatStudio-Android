@@ -122,7 +122,24 @@ object ChatService {
         val executedKeys = mutableSetOf<String>()
         var createdPid: Long? = null
 
-        suspend fun runTool(name: String, args: JSONObject): Boolean {
+        /** JSON null 参数 -> ""（org.json 的 optString 会把 JSON null 变成字面量 "null"，必须拦在工具层之前） */
+        fun cleanArgs(a: JSONObject): JSONObject {
+            val out = JSONObject()
+            val keys = a.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                when (val v = a.opt(k)) {
+                    null, org.json.JSONObject.NULL -> out.put(k, "")
+                    is String -> out.put(k, if (v == "null") "" else v)
+                    else -> out.put(k, v)
+                }
+            }
+            return out
+        }
+
+        suspend fun runTool(rawName: String, rawArgs: JSONObject): Boolean {
+            val name = rawName.trim()
+            val args = cleanArgs(rawArgs)
             if (name !in KNOWN_TOOLS) return false
             val key = name + "|" + args.toString()
             // 只对"带参数"的调用去重（无参工具如 writeNextChapter 允许连发多次）
@@ -259,13 +276,18 @@ object ChatService {
                 }
                 val text = visibleOf(work).trim()
 
-                if (text.isNotBlank()) {
+                // v5.8：防重复——模型续跑时把前面写过的内容原样再输出一遍，就立刻停，不再循环
+                val prevSoFar = shown.toString()
+                val dup = text.isNotBlank() && prevSoFar.length > 60 &&
+                    (prevSoFar.contains(text.take(80)) || text.length <= prevSoFar.length && text.take(60) == prevSoFar.takeLast(60))
+
+                if (text.isNotBlank() && !dup) {
                     if (shown.isNotEmpty()) shown.append("\n\n")
                     shown.append(text)
                 }
                 emit(true)
 
-                if (canceled) break
+                if (canceled || dup) break
 
                 // ---------- 判断是否要自动续跑 ----------
                 val truncatedByLength = stopReason == "length"
@@ -562,6 +584,8 @@ object ChatService {
         // v5.4：完整回显保存的内容（上限 8000 字），让用户"看得见"而不是只看到一句"已保存"
         val d = if (r.detail.length > 8000) r.detail.take(8000) + "\n…（内容过长已折叠，全文已完整保存）" else r.detail
         val text = if (d.isBlank()) r.summary else r.summary + "\n\n" + d
+        // v5.8：空内容不落库，避免出现没有文字的空白气泡
+        if (text.isBlank()) return
         Repo.dao.insertMessage(Message(projectId = pid, role = "tool", content = text, kind = if (r.ok) "tool" else "error"))
     }
 }

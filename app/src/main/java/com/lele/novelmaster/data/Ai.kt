@@ -184,6 +184,17 @@ object AiClient {
             m.contains("maximum context") || m.contains("greater than")
     }
 
+
+    /** 安全取字符串：org.json 的 optString 遇到 JSON null 会返回字面量 "null"，必须拦截 */
+    private fun jstr(o: JSONObject?, key: String): String {
+        if (o == null || !o.has(key)) return ""
+        return when (val v = o.opt(key)) {
+            null, JSONObject.NULL -> ""
+            is String -> v
+            else -> v.toString()
+        }
+    }
+
     // ---------- OpenAI 兼容 ----------
 
     private fun openaiBody(
@@ -237,13 +248,11 @@ object AiClient {
                     runCatching {
                         val obj = JSONObject(payload)
                         val ch = obj.optJSONArray("choices")?.optJSONObject(0)
-                        ch?.optString("finish_reason")
-                            ?.takeIf { it.isNotBlank() && it != "null" }
-                            ?.let { finish = it }
+                        jstr(ch, "finish_reason").takeIf { it.isNotBlank() }?.let { finish = it }
                         val d = ch?.optJSONObject("delta")
-                        var piece = d?.optString("content").orEmpty()
-                        if (piece.isEmpty()) piece = d?.optString("reasoning_content").orEmpty()
-                        if (piece.isEmpty()) piece = d?.optString("reasoning").orEmpty()
+                        var piece = jstr(d, "content")
+                        if (piece.isEmpty()) piece = jstr(d, "reasoning_content")
+                        if (piece.isEmpty()) piece = jstr(d, "reasoning")
                         if (piece.isNotEmpty()) {
                             sb.append(piece)
                             onDelta(piece)
@@ -278,9 +287,9 @@ object AiClient {
                 .optJSONArray("choices")?.optJSONObject(0)
                 ?.optJSONObject("message")
             // content 为空时回退 reasoning_content（DeepSeek-R1 等推理模型把正文放这里）
-            var content = msg?.optString("content").orEmpty()
-            if (content.isBlank()) content = msg?.optString("reasoning_content").orEmpty()
-            if (content.isBlank()) content = msg?.optString("reasoning").orEmpty()
+            var content = jstr(msg, "content")
+            if (content.isBlank()) content = jstr(msg, "reasoning_content")
+            if (content.isBlank()) content = jstr(msg, "reasoning")
             if (content.isBlank()) throw RuntimeException("AI返回为空: ${body.take(300)}")
             content
         }
@@ -347,11 +356,11 @@ object AiClient {
                     runCatching {
                         val obj = JSONObject(payload)
                         val cand = obj.optJSONArray("candidates")?.optJSONObject(0)
-                        cand?.optString("finishReason")?.takeIf { it.isNotBlank() }?.let { finish = it }
+                        jstr(cand, "finishReason").takeIf { it.isNotBlank() }?.let { finish = it }
                         val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
                         if (parts != null) {
                             for (i in 0 until parts.length()) {
-                                val piece = parts.optJSONObject(i)?.optString("text").orEmpty()
+                                val piece = jstr(parts.optJSONObject(i), "text")
                                 if (piece.isNotEmpty()) {
                                     sb.append(piece)
                                     onDelta(piece)
@@ -389,7 +398,7 @@ object AiClient {
             val sb = StringBuilder()
             if (parts != null) {
                 for (i in 0 until parts.length()) {
-                    sb.append(parts.optJSONObject(i)?.optString("text").orEmpty())
+                    sb.append(jstr(parts.optJSONObject(i), "text"))
                 }
             }
             val content = sb.toString()

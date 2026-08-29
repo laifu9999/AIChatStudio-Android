@@ -78,37 +78,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/** v5.6：逐字/逐词打字机效果。对长消息按 chunk 分段，既看得见流动，又不会等太久。 */
-private suspend fun typewriterDisplay(
-    text: String,
-    onUpdate: (String) -> Unit,
-    onScroll: suspend () -> Unit
-) {
-    if (text.length <= 1) { onUpdate(text); return }
-    val step = when {
-        text.length < 300 -> 1
-        text.length < 1500 -> 3
-        else -> 6
-    }
-    val delayMs = when {
-        text.length < 300 -> 16L
-        text.length < 1500 -> 10L
-        else -> 6L
-    }
-    var i = 0
-    var scrollCounter = 0
-    while (i < text.length) {
-        val end = minOf(i + step, text.length)
-        onUpdate(text.substring(0, end))
-        i = end
-        delay(delayMs)
-        scrollCounter++
-        if (scrollCounter % 4 == 0) onScroll()
-    }
-    onUpdate(text)
-    onScroll()
-}
-
 /* ---------------- 聊天外观设置（持久化） ---------------- */
 
 data class ChatStyle(
@@ -176,13 +145,9 @@ fun ChatScreen(nav: NavHostController) {
     var chatJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var style by remember { mutableStateOf(ChatStylePrefs.load(ctx)) }
     // v5.5：打字机效果当前显示到的位置（key=message id）
-    var typedContents by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var creatingSession by remember { mutableStateOf(false) }
-    // v5.7：AI 流式输出的实时文本（null = 没在流式）
+    // v5.7/v5.8：AI 流式输出的实时文本（自带打字效果）；聊天记录一律静态显示，不再重播逐字动画
     var streamingText by remember { mutableStateOf<String?>(null) }
-    // v5.7：已经实时显示过、不需要再跑打字机的消息 id
-    var liveShownId by remember { mutableStateOf<Long?>(null) }
-    var typeJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
     val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
@@ -208,36 +173,25 @@ fun ChatScreen(nav: NavHostController) {
     }
     LaunchedEffect(currentPid) { ChatSessionMemory.lastPid = currentPid }
 
+    // v5.8：空内容的消息一律不显示（不会再出现没有文字的空白模块）
+    val visibleMsgs = remember(messages) { messages.filter { it.content.isNotBlank() } }
+
     // v5.7：消息区用正常顺序（最新在下面），内容少时紧贴顶栏，不浪费上方空间；
     //      有新消息/流式输出时自动跟随到底部，不用手动滑。
-    suspend fun scrollToBottomIfNear() {
-        val total = messages.size + (if (streamingText != null) 1 else 0)
+    suspend fun scrollToBottomIfNear(force: Boolean = false) {
+        val total = visibleMsgs.size + (if (streamingText != null) 1 else 0)
         if (total <= 0) return
         val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        if (messages.size <= 3 || total - 1 - lastVisible <= 3) {
+        if (force || visibleMsgs.size <= 3 || total - 1 - lastVisible <= 3) {
             listState.scrollToItem(total - 1)
         }
     }
 
     LaunchedEffect(currentPid) {
-        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
+        if (visibleMsgs.isNotEmpty()) listState.scrollToItem(visibleMsgs.lastIndex)
     }
-    LaunchedEffect(messages.size) { scrollToBottomIfNear() }
+    LaunchedEffect(visibleMsgs.size) { scrollToBottomIfNear() }
     LaunchedEffect(streamingText) { scrollToBottomIfNear() }
-
-    LaunchedEffect(messages.size, messages.lastOrNull()?.id, busy) {
-        val last = messages.lastOrNull()
-        if (last != null && last.role != "user" && last.id != liveShownId && typedContents[last.id] != last.content) {
-            typeJob?.cancel()
-            typeJob = scope.launch {
-                typewriterDisplay(
-                    last.content,
-                    onUpdate = { typedContents = typedContents + (last.id to it) },
-                    onScroll = { scrollToBottomIfNear() }
-                )
-            }
-        }
-    }
 
     fun newDefaultSession() {
         if (creatingSession) return
@@ -259,22 +213,15 @@ fun ChatScreen(nav: NavHostController) {
         busy = true
         streamingText = ""
         chatJob = scope.launch {
-            var insertedId: Long? = null
             try {
-                insertedId = ChatService.handle(ctx, currentPid, t, { newPid -> if (newPid != 0L) currentPid = newPid }) { s ->
+                ChatService.handle(ctx, currentPid, t, { newPid -> if (newPid != 0L) currentPid = newPid }) { s ->
                     streamingText = s
                 }
             } finally {
-                // v5.7：AI 已经在界面上逐字显示过了，落库后不再重播打字机动画
-                val finalText = streamingText
-                liveShownId = insertedId
-                if (insertedId != null && !finalText.isNullOrBlank()) {
-                    typedContents = typedContents + (insertedId to finalText)
-                }
-                typeJob?.cancel()
-                typeJob = null
+                // v5.8：AI 回复的打字效果由流式实时呈现；落库后聊天记录静态显示，不再重播逐字动画
                 streamingText = null
                 busy = false
+                scrollToBottomIfNear(force = true)
             }
         }
     }
@@ -367,9 +314,8 @@ fun ChatScreen(nav: NavHostController) {
                     // v5.7：只跟顶栏留 4dp 间距，把剩下的空间全部给聊天
                     contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp)
                 ) {
-                    items(messages, key = { it.id }) { m ->
-                        val displayed = typedContents[m.id] ?: m.content
-                        MessageBubble(m.copy(content = displayed), th, msgFont, msgSize)
+                    items(visibleMsgs, key = { it.id }) { m ->
+                        MessageBubble(m, th, msgFont, msgSize)
                     }
                     val st = streamingText
                     if (st != null) {
