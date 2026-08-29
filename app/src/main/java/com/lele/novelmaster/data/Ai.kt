@@ -82,6 +82,15 @@ object AiClient {
     const val MAX_TOKENS_HUGE = 16384
     private val TOKEN_LADDER = listOf(16384, 8192, 4096, 2048, 1024)
 
+    /** v5.9：记住每个模型实测可用的 max_tokens，下次直接命中，不再从头降级重试（省 1~2 次往返延迟） */
+    private val okMaxTokens = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private fun ladderFor(cfg: ApiConfig, maxTokens: Int): List<Int> {
+        val cached = okMaxTokens[cfg.model]
+        return (listOfNotNull(cached?.takeIf { it <= maxTokens }, maxTokens) + TOKEN_LADDER)
+            .distinct().filter { it >= 512 }
+    }
+
     /**
      * 流式对话：拿到第一个字就回调，界面立刻能看到内容在增长。
      * 流式不被支持时自动回退到普通对话。
@@ -93,7 +102,7 @@ object AiClient {
         maxTokens: Int = MAX_TOKENS_HUGE,
         onDelta: suspend (String) -> Unit
     ): AiResult {
-        val ladder = (listOf(maxTokens) + TOKEN_LADDER).distinct().filter { it >= 512 }
+        val ladder = ladderFor(cfg, maxTokens)
         var lastErr: Exception? = null
         for (mt in ladder) {
             try {
@@ -101,7 +110,10 @@ object AiClient {
                     streamGemini(cfg, messages, temperature, mt, onDelta)
                 else
                     streamOpenai(cfg, messages, temperature, mt, onDelta)
-                if (r.text.isNotBlank()) return r
+                if (r.text.isNotBlank()) {
+                    okMaxTokens[cfg.model] = mt
+                    return r
+                }
                 // 流式拿到空内容（部分老模型 stream 支持不全）→ 回退普通对话
                 val plain = chat(cfg, messages, temperature, mt)
                 if (plain.isNotBlank()) {
@@ -125,7 +137,7 @@ object AiClient {
         temperature: Double = 0.85,
         maxTokens: Int = MAX_TOKENS_HUGE
     ): String = withContext(Dispatchers.IO) {
-        val ladder = (listOf(maxTokens) + TOKEN_LADDER).distinct().filter { it >= 512 }
+        val ladder = ladderFor(cfg, maxTokens)
         var lastErr: Exception? = null
         for (mt in ladder) {
             try {
@@ -133,7 +145,10 @@ object AiClient {
                     chatGemini(cfg, messages, temperature, mt)
                 else
                     chatOpenai(cfg, messages, temperature, mt)
-                if (r.isNotBlank()) return@withContext r
+                if (r.isNotBlank()) {
+                    okMaxTokens[cfg.model] = mt
+                    return@withContext r
+                }
                 lastErr = RuntimeException("AI返回为空")
             } catch (e: Exception) {
                 if (e is CancellationException) throw e

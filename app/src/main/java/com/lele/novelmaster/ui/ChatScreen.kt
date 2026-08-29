@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -191,7 +192,8 @@ fun ChatScreen(nav: NavHostController) {
         if (visibleMsgs.isNotEmpty()) listState.scrollToItem(visibleMsgs.lastIndex)
     }
     LaunchedEffect(visibleMsgs.size) { scrollToBottomIfNear() }
-    LaunchedEffect(streamingText) { scrollToBottomIfNear() }
+    // v5.9：AI 输出期间无条件实时跟随，界面始终能看到最新生成的字
+    LaunchedEffect(streamingText) { scrollToBottomIfNear(force = true) }
 
     fun newDefaultSession() {
         if (creatingSession) return
@@ -290,9 +292,10 @@ fun ChatScreen(nav: NavHostController) {
             }
         }
 
-        // ============ 主体（所有功能只在「功能」面板，聊天区留最大空间） ============
+        // ============ 主体（v5.9：contentWindowInsets 清零，聊天区顶到功能栏正下方，没有任何空隙） ============
         Scaffold(
             containerColor = Color.Transparent,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             bottomBar = {
                 if (!drawerOpen && !showPanel) {
                     InputBar(input, busy, { input = it }, { onSendClick() })
@@ -311,8 +314,8 @@ fun ChatScreen(nav: NavHostController) {
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
-                    // v5.7：只跟顶栏留 4dp 间距，把剩下的空间全部给聊天
-                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp)
+                    // v5.9：与功能栏零间距
+                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 0.dp, bottom = 6.dp)
                 ) {
                     items(visibleMsgs, key = { it.id }) { m ->
                         MessageBubble(m, th, msgFont, msgSize)

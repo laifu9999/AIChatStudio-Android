@@ -230,15 +230,22 @@ object ChatService {
                 recent.removeAt(recent.lastIndex)
             }
             recent.forEach { m ->
-                if (m.kind == "text") {
-                    msgs.add(ChatMsg(if (m.role == "user") "user" else "assistant", m.content.take(8000)))
+                when {
+                    m.kind == "text" ->
+                        msgs.add(ChatMsg(if (m.role == "user") "user" else "assistant", m.content.take(8000)))
+                    // v5.9：把已执行的工具记录也喂给 AI —— 否则「继续」时它不知道已经存过什么，
+                    // 会从世界观/人物设定重新开始生成，永远走不出来
+                    m.kind == "tool" && m.role == "tool" ->
+                        msgs.add(ChatMsg("user", "[系统执行记录·已成功，勿重复] " + m.content.lines().first().take(150)))
+                    m.kind == "error" ->
+                        msgs.add(ChatMsg("user", "[系统执行记录·失败，请修正后重试] " + m.content.take(150)))
                 }
             }
             msgs.add(
                 ChatMsg(
                     "user",
                     if (isContinue(input))
-                        "继续。请严格接着你上一条回复的最后一句话继续往下输出，不要重复已写过的内容，不要写「（续）」「接上文」这类开场白，直接接着写完整。"
+                        "继续。对照系统提示里的「已保存的设定卡清单」，只补还没生成的分类和内容，已保存的严禁重复生成；输出量不要吝啬，一次做完不要停。"
                     else input
                 )
             )
@@ -362,16 +369,17 @@ object ChatService {
         )
         appendLine()
         appendLine(
-            "【长内容分批输出规则（极其重要，必须遵守）】\n" +
-                "· 一次性要写很多内容（多张设定卡、超长正文）时，**必须分批**：本轮只输出 1~3 个工具块，输出完就停。\n" +
-                "· 系统检测到你没写完，会自动让你「继续」，那时再输出下一批；**永远不要为了一次写完而截断 JSON**。\n" +
-                "· 每个工具块的 JSON 必须完整闭合，content 里的换行用 \\n，引号用 \\\" 转义，不要用中文引号。\n" +
-                "· 严禁写「（略）」「（以下省略）」「未完待续」「由于篇幅限制」这类偷懒的话，也不要事后解释自己省略了什么。\n" +
-                "· 分批时的顺序：先世界观/人物/主线等核心设定，再支线/伏笔/大纲，最后补充说明。每想好一批就先存住，别等全部想完才存。\n"
+            "【输出与保存规则（重要）】\n" +
+                "· 你一次可以输出很长很多的内容，想写多少写多少，绝对不要故意少写、不要输出几条就停、不要停下来等待确认。\n" +
+                "· 需要保存的内容：想好一条就用一个工具块保存一条。系统是**边接收边执行保存**的，保存不会打断你的输出，输出与保存同时进行。\n" +
+                "· 一个工具块输出完，紧接着继续输出下一个工具块，中间不要停、不要问、不要等确认。\n" +
+                "· 收到「继续」时：只补还没生成的部分，**严禁重复生成已保存过的设定卡**（已保存清单见下方），直接从缺失的分类接着做。\n" +
+                "· 严禁「（略）」「（以下省略）」「未完待续」「由于篇幅限制」这类偷懒输出，也不要解释自己省略了什么。\n" +
+                "· 每个工具块的 JSON 必须完整闭合，content 里换行用 \\n、引号用 \\\" 转义，不要用中文引号。\n"
         )
         if (continuing) {
             appendLine()
-            appendLine("【本次是「继续」指令】请严格接着上一条回复的最后一句话继续输出，不要重复、不要重新开头、不要总结上文。")
+            appendLine("【本次是「继续」指令】对照下方「已保存清单」，把还没生成的分类和内容接着做完，已存在的卡绝对不要重做。")
         }
         appendLine()
         appendLine(
@@ -391,12 +399,19 @@ object ChatService {
             if (project != null) {
                 appendLine("【当前会话】《${project.title}》类型：${project.genre}，目标 ${project.targetChapters} 章，每章约 ${project.chapterWordTarget} 字")
                 val cards = Repo.dao.cards(pid)
-                val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
-                if (core.isNotEmpty()) {
-                    appendLine("【本书核心设定】")
-                    appendLine(Prompts.cardBlock(core))
+                if (cards.isNotEmpty()) {
+                    // v5.9：已保存清单——「继续」时 AI 据此只补缺失项，不再重复生成世界观/人物设定
+                    appendLine("【已保存的设定卡清单（这些已存在，严禁重复生成）】")
+                    cards.groupBy { it.category }.forEach { (cat, list) ->
+                        appendLine("· $cat：${list.joinToString("、") { it.name }}")
+                    }
+                    val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
+                    if (core.isNotEmpty()) {
+                        appendLine("【本书核心设定】")
+                        appendLine(Prompts.cardBlock(core))
+                    }
                 } else {
-                    appendLine("【本书核心设定】尚未创建。作者给出灵感后，你要用 addCard 分批把设定建全。")
+                    appendLine("【本书核心设定】尚未创建。作者给出灵感后，你要用 addCard 一条条把设定建全，一次做完不要停。")
                 }
                 val done = Repo.dao.chapters(pid).count { it.content.isNotBlank() }
                 appendLine("【进度】已写完 $done / ${project.targetChapters} 章")

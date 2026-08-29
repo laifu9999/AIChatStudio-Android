@@ -132,8 +132,8 @@ object WriterEngine {
 
     /**
      * 灵感分析：自动生成一整套设定卡（并全部落盘到 files/设定卡/）
-     * v5.7：按"还缺哪些分类"分批下单 + 自动补齐（最多 3 轮），
-     *      一次 AI 输出不完就再要下一批，彻底解决「设定卡只建了一两张就断 / 内容被截断」。
+     * v5.9：改为流式生成——AI 每写完一行就立即落库落盘并在聊天里显示一张，
+     *      边输出边保存边显示，不再"卡很久然后突然全部显示"。
      */
     suspend fun generateCardsFromInspire(projectId: Long, inspiration: String, context: Context? = null): String? {
         val dao = Repo.dao
@@ -151,79 +151,102 @@ object WriterEngine {
             val need = required.filter { cat -> have.none { c -> c.category == cat } }
             if (need.isEmpty()) break
             pass++
-            val reply = try {
-                AiClient.chat(
-                    cfg,
-                    listOf(
-                        ChatMsg("system", Prompts.INSPIRE_SYSTEM),
-                        ChatMsg("user", Prompts.buildInspireUser(project, inspiration, need, have))
-                    ),
-                    temperature = 0.8,
-                    maxTokens = 8192
-                )
+            val msgs = listOf(
+                ChatMsg("system", Prompts.INSPIRE_SYSTEM),
+                ChatMsg("user", Prompts.buildInspireUser(project, inspiration, need, have))
+            )
+            val sb = StringBuilder()
+            var processed = 0
+            var passCount = 0
+            try {
+                AiClient.chatStream(cfg, msgs, temperature = 0.8, maxTokens = 8192) { delta ->
+                    sb.append(delta)
+                    // 每凑齐一行就立刻解析保存一张 —— 输出的同时保存并显示
+                    while (true) {
+                        val nl = sb.indexOf('\n', processed)
+                        if (nl < 0) break
+                        val line = sb.substring(processed, nl)
+                        processed = nl + 1
+                        passCount += applyInspireLine(projectId, line, context)
+                    }
+                }
+                // 最后一行可能没有换行结尾
+                passCount += applyInspireLine(projectId, sb.substring(processed), context)
             } catch (e: Exception) {
-                if (count == 0) return "AI 生成设定失败：${e.message?.take(200)}"
+                if (count == 0 && passCount == 0) return "AI 生成设定失败：${e.message?.take(200)}"
                 break
             }
-            lastSnippet = reply.take(200)
-            val added = applyInspireLines(projectId, reply, context)
-            count += added
-            if (added == 0) break
+            count += passCount
+            if (passCount == 0) {
+                lastSnippet = sb.toString().take(200)
+                break
+            }
         }
         return if (count == 0)
             "AI未能生成可识别的设定（回复片段：$lastSnippet）。建议换一个模型，或把灵感说得更具体一点。"
         else null
     }
 
-    /** 解析「分类｜名称｜内容」行并落库落盘，返回新增条数 */
-    private suspend fun applyInspireLines(projectId: Long, reply: String, context: Context?): Int {
+    /** 解析一行「分类｜名称｜内容」，落库落盘并立即在聊天里显示，返回 1/0 */
+    private suspend fun applyInspireLine(projectId: Long, rawLine: String, context: Context?): Int {
         val dao = Repo.dao
-        var count = 0
-        for (raw in reply.lines()) {
-            var line = raw.trim()
-                .trimStart('-', '*', '·', '•', '#', '>')
-                .trim()
-            // 去掉行首的 1. / 1、/ (1) 之类编号
-            line = line.replace(Regex("^[0-9]{1,2}[.、)）]\\s*"), "").trim()
-            val parts = when {
-                line.contains("｜") -> line.split("｜")
-                line.contains("|") -> line.split("|")
-                line.contains("：") && line.indexOf("：") < 12 -> line.split("：", limit = 3)
-                else -> continue
-            }
-            if (parts.size < 3) continue
-            var cat = parts[0].trim().removeSurrounding("【", "】").removeSurrounding("[", "]").trim()
-            // 兼容 「人物设定 - 林墨」/「人物设定：林墨」这类写法
-            if (cat !in CardCategories.all) {
-                val hit = CardCategories.all.firstOrNull { cat.contains(it) }
-                if (hit != null) {
-                    cat = hit
-                } else continue
-            }
-            val name = parts[1].trim().trim('《', '》', '「', '」', '"', '\'').take(50)
-            if (name.isBlank() || name.length > 50) continue
-            val content = parts.drop(2).joinToString("｜").trim()
-            if (content.length < 4) continue
-            // 同名同分类视为已存在，跳过，避免重复建卡
-            if (dao.findCard(projectId, cat, name) != null) continue
-            dao.insertCard(
-                SettingCard(
-                    projectId = projectId,
-                    category = cat,
-                    name = name,
-                    content = content,
-                    priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
-                    status = if (cat == "伏笔钩子") "埋设中" else ""
-                )
-            )
-            // 落盘 files/设定卡/{分类}/{名称}.md
-            try {
-                dir(context, projectId, "设定卡/$cat")?.let { d ->
-                    File(d, safeName(name) + ".md").writeText("# $cat · $name\n\n$content\n", Charsets.UTF_8)
-                }
-            } catch (_: Exception) { }
-            count++
+        var line = rawLine.trim()
+            .trimStart('-', '*', '·', '•', '#', '>')
+            .trim()
+        // 去掉行首的 1. / 1、/ (1) 之类编号
+        line = line.replace(Regex("^[0-9]{1,2}[.、)）]\\s*"), "").trim()
+        val parts = when {
+            line.contains("｜") -> line.split("｜")
+            line.contains("|") -> line.split("|")
+            line.contains("：") && line.indexOf("：") < 12 -> line.split("：", limit = 3)
+            else -> return 0
         }
+        if (parts.size < 3) return 0
+        var cat = parts[0].trim().removeSurrounding("【", "】").removeSurrounding("[", "]").trim()
+        // 兼容 「人物设定 - 林墨」/「人物设定：林墨」这类写法
+        if (cat !in CardCategories.all) {
+            val hit = CardCategories.all.firstOrNull { cat.contains(it) }
+            if (hit != null) {
+                cat = hit
+            } else return 0
+        }
+        val name = parts[1].trim().trim('《', '》', '「', '」', '"', '\'').take(50)
+        if (name.isBlank() || name.length > 50) return 0
+        val content = parts.drop(2).joinToString("｜").trim()
+        if (content.length < 4) return 0
+        // 同名同分类视为已存在，跳过，避免重复建卡
+        if (dao.findCard(projectId, cat, name) != null) return 0
+        dao.insertCard(
+            SettingCard(
+                projectId = projectId,
+                category = cat,
+                name = name,
+                content = content,
+                priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
+                status = if (cat == "伏笔钩子") "埋设中" else ""
+            )
+        )
+        // 落盘 files/设定卡/{分类}/{名称}.md
+        try {
+            dir(context, projectId, "设定卡/$cat")?.let { d ->
+                File(d, safeName(name) + ".md").writeText("# $cat · $name\n\n$content\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+        // v5.9：生成一张立即在聊天里显示一张（保存的同时不隐藏内容）
+        val show = if (content.length > 600) content.take(600) + "\n…（全文共 ${content.length} 字，已完整保存）" else content
+        dao.insertMessage(
+            Message(
+                projectId = projectId, role = "tool", kind = "tool",
+                content = "✅ 已生成设定卡：$cat / $name（${content.length} 字）\n\n$show"
+            )
+        )
+        return 1
+    }
+
+    /** 整段解析（供非流式路径复用） */
+    private suspend fun applyInspireLines(projectId: Long, reply: String, context: Context?): Int {
+        var count = 0
+        for (raw in reply.lines()) count += applyInspireLine(projectId, raw, context)
         return count
     }
 
