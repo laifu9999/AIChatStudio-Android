@@ -337,7 +337,7 @@ fun ChatScreen(nav: NavHostController) {
                     reverseLayout = true,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     // v5.6：reverseLayout 下 padding 仍是物理方向；顶部只留 2dp，去掉气泡上方空白
-                    contentPadding = PaddingValues(horizontal = 8.dp, top = 2.dp, bottom = 8.dp)
+                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 8.dp)
                 ) {
                     // index 0 = 最新消息（显示在底部）
                     val shown = messages.asReversed()
