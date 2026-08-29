@@ -2,6 +2,7 @@ package com.lele.novelmaster.data
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -223,7 +224,7 @@ object AiClient {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
                 throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
             }
-            val reader = resp.body?.charStream() ?: return@use AiResult("", "stop")
+            val reader = java.io.BufferedReader(resp.body?.charStream() ?: return@use AiResult("", "stop"))
             val sb = StringBuilder()
             var finish = "stop"
             try {
@@ -251,7 +252,7 @@ object AiClient {
                 }
             } catch (io: java.io.IOException) {
                 // 用户点「停止」时 Call 被 cancel，读流会抛 IOException —— 转成正常取消，别报成失败
-                if (!currentCoroutineContext().isActive) throw CancellationException("用户停止")
+                if (currentCoroutineContext()[Job]?.isActive == false) throw CancellationException("用户停止")
                 throw io
             }
             AiResult(sb.toString(), finish)
@@ -333,7 +334,7 @@ object AiClient {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
                 throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
             }
-            val reader = resp.body?.charStream() ?: return@use AiResult("", "stop")
+            val reader = java.io.BufferedReader(resp.body?.charStream() ?: return@use AiResult("", "stop"))
             val sb = StringBuilder()
             var finish = "stop"
             try {
@@ -360,7 +361,7 @@ object AiClient {
                     }
                 }
             } catch (io: java.io.IOException) {
-                if (!currentCoroutineContext().isActive) throw CancellationException("用户停止")
+                if (currentCoroutineContext()[Job]?.isActive == false) throw CancellationException("用户停止")
                 throw io
             }
             AiResult(sb.toString(), if (finish == "MAX_TOKENS") "length" else finish)
