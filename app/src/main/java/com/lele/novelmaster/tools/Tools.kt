@@ -121,8 +121,9 @@ object Tools {
             if (needChapters) {
                 // 补齐缺失的章节骨架；不删除已有章节
                 val maxIdx = oldChapters.maxOfOrNull { it.chapterIndex } ?: 0
-                if (newTotal > maxIdx) {
-                    val add = ((maxIdx + 1)..newTotal).map { Chapter(projectId = pid, chapterIndex = it) }
+                val nt = newTotal
+                if (nt != null && nt > maxIdx) {
+                    val add = ((maxIdx + 1)..nt).map { Chapter(projectId = pid, chapterIndex = it) }
                     Repo.dao.insertChapters(add)
                 }
             }
