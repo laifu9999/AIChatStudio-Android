@@ -146,6 +146,7 @@ object ChatService {
                         val endIdx = m.range.last + json.length
                         if (endIdx <= work.length) work = work.removeRange(startIdx, endIdx)
                     }
+                }
             }
 
             if (deletedCurrent) {
