@@ -48,7 +48,8 @@ object IntentRouter {
         var resuming = false
         if (cont && currentPid != null && currentPid > 0L) {
             val last = Repo.dao.messagesFlow(currentPid).first()
-                .lastOrNull { it.role == "assistant" || it.role == "tool" }
+                .lastOrNull { (it.role == "assistant" || it.role == "tool") &&
+                    !it.content.startsWith("📖") && !it.content.startsWith("✍️") }
             val s = last?.content?.trimEnd().orEmpty()
             resuming = s.isNotEmpty() && s.last() !in "。！？…」』”\"!?~）)】"
         }

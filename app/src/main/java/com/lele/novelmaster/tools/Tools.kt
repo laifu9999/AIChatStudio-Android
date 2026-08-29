@@ -227,7 +227,9 @@ object Tools {
         return try {
             WriterEngine.writeOne(project, cfg, Repo.dao, next, context)
             val fresh = withContext(Dispatchers.IO) { Repo.dao.chapter(next.id) }!!
-            ToolResult(true, "✅ 第${fresh.chapterIndex}章《${fresh.title}》已写入", "${fresh.wordCount} 字 · 摘要：${fresh.summary}", navigateTo = "editor/${fresh.id}")
+            ToolResult(true, "✅ 第${fresh.chapterIndex}章《${fresh.title}》已写入（${fresh.wordCount} 字）",
+                "完整正文已在上方聊天里实时显示，并已保存到章节库和正文文件，不会重复输出。\n摘要：${fresh.summary.take(120)}",
+                navigateTo = "editor/${fresh.id}")
         } catch (e: Exception) {
             ToolResult(false, "写作失败：${e.message?.take(200)}")
         }

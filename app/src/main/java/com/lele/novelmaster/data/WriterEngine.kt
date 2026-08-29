@@ -274,13 +274,38 @@ object WriterEngine {
             append("📥 已注入本章上下文：")
             append("设定卡 ${cards.size} 张（选中 ${Prompts.selectCards(cards, ch0.outline + ch0.title).size} 张）")
             append(" · 未回收伏笔 ${cards.count { it.category == "伏笔钩子" && it.status != "已回收" }} 条")
-            append(" · 前5章摘要+上一章结尾600字+相邻大纲")
+            append(" · 前5章摘要+上一章结尾300字+相邻大纲")
             append(" · 合计约 ${messages.sumOf { it.content.length }} 字")
         }
         dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
 
-        // v5.7：字数上限开到最大（16384），让 AI 一气写完，不再"写一小段就停"
-        var content = cleanBody(AiClient.chat(cfg, messages).trim(), ch0.chapterIndex, ch0.title)
+        // v6.1：流式写章——正文边生成边实时显示在聊天里（不再"注入完就没下文"）；
+        // 之前非流式 + 60s 读超时，章节生成要 1~3 分钟必然超时，这就是"只注入不写"的根因
+        val liveTitle = ch0.title.ifBlank { "未命名" }
+        var liveId = 0L
+        var lastUi = 0L
+        val live = StringBuilder()
+        val streamed = try {
+            AiClient.chatStream(cfg, messages, temperature = 0.85) { delta ->
+                live.append(delta)
+                val now = System.currentTimeMillis()
+                if (liveId == 0L) {
+                    liveId = dao.insertMessage(
+                        Message(projectId = project.id, role = "assistant", kind = "text",
+                            content = "✍️ 第${ch0.chapterIndex}章《$liveTitle》生成中…\n\n" + live.toString())
+                    )
+                    lastUi = now
+                } else if (now - lastUi > 400) {
+                    lastUi = now
+                    dao.updateMessageContent(liveId, "📖 第${ch0.chapterIndex}章《$liveTitle》\n\n" + live.toString())
+                }
+            }.text
+        } catch (e: Exception) {
+            if (liveId != 0L) dao.updateMessageContent(liveId, "⚠️ 第${ch0.chapterIndex}章生成失败：${e.message?.take(200)}")
+            throw e
+        }
+
+        var content = cleanBody(streamed.trim(), ch0.chapterIndex, ch0.title)
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")
 
         // v5.6/v5.7：完整性保障——太短或结尾没有收束标点时续写补完（最多5次，保证每章都写完整）
@@ -310,6 +335,11 @@ object WriterEngine {
             updatedAt = System.currentTimeMillis()
         )
         dao.updateChapter(ch)
+
+        // v6.1：聊天里显示完整正文（不藏摘要后面）；同时已保存到章节库 + files/正文/
+        val fullText = "📖 第${ch.chapterIndex}章《${ch.title.ifBlank { "未命名" }}》（${content.length} 字，已保存）\n\n$content"
+        if (liveId != 0L) dao.updateMessageContent(liveId, fullText)
+        else dao.insertMessage(Message(projectId = project.id, role = "assistant", kind = "text", content = fullText))
 
         // 正文落盘 files/正文/第N章-标题.txt（只存正文，不加标题头）
         try {

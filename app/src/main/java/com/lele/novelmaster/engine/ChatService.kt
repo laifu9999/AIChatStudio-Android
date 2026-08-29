@@ -236,7 +236,7 @@ object ChatService {
             if (recent.lastOrNull()?.role == "user" && recent.lastOrNull()?.content == input) {
                 recent.removeAt(recent.lastIndex)
             }
-            val lastAssistant = recent.lastOrNull { it.role == "assistant" }?.content?.trimEnd().orEmpty()
+            val lastAssistant = recent.lastOrNull { it.role == "assistant" && !it.content.startsWith("📖") && !it.content.startsWith("✍️") }?.content?.trimEnd().orEmpty()
             val resumeMidSentence = isContinue(input) && lastAssistant.isNotEmpty() &&
                 lastAssistant.last() !in "。！？…」』”\"!?~）)】"
 

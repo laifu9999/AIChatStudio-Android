@@ -186,6 +186,10 @@ interface NovelDao {
     @Insert
     suspend fun insertMessage(m: Message): Long
 
+    /** v6.1：流式写章时实时更新同一条消息（正文边生成边显示在聊天里） */
+    @Query("UPDATE messages SET content = :content WHERE id = :id")
+    suspend fun updateMessageContent(id: Long, content: String)
+
     @Query("DELETE FROM messages WHERE projectId = :pid")
     suspend fun clearMessages(pid: Long)
 }

@@ -68,11 +68,23 @@ object AiClient {
      * v5.7：连接 20s / 单次读 60s（流式下=两个数据包之间的最长间隔）。
      * 老版本 readTimeout=600s 会让界面"假死"十几分钟——用户感觉就是"卡住、回复不了"。
      */
-    private val client = OkHttpClient.Builder()
+    /**
+     * v6.1：两个客户端分开 ——
+     *  流式：60s 读超时即可（只要 60s 内有新字到达就算活着）；
+     *  非流式：整段生成往往要 1~3 分钟，60s 会把"写章/大纲/摘要"全部超时掉
+     *  （正是「已注入上下文却没有正文」的根因），必须放宽到 600s。
+     */
+    private val streamingClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
-        .callTimeout(0, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    private val plainClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(600, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -245,7 +257,7 @@ object AiClient {
             .post(openaiBody(cfg, messages, temperature, maxTokens, true).toRequestBody(JSON_TYPE))
             .build()
 
-        executeCall(req).use { resp ->
+        executeCall(req, useStreaming = true).use { resp ->
             if (!resp.isSuccessful) {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
                 throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
@@ -357,7 +369,7 @@ object AiClient {
             .header("Accept", "text/event-stream")
             .post(geminiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
             .build()
-        executeCall(req).use { resp ->
+        executeCall(req, useStreaming = true).use { resp ->
             if (!resp.isSuccessful) {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
                 throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
@@ -429,9 +441,9 @@ object AiClient {
     // ---------- HTTP 基础 ----------
 
     /** v5.7：可取消的 execute —— 用户点「停止」时真正断开连接，不再"卡住没反应" */
-    private suspend fun executeCall(req: Request): Response =
+    private suspend fun executeCall(req: Request, useStreaming: Boolean = false): Response =
         suspendCancellableCoroutine { cont ->
-            val call = client.newCall(req)
+            val call = (if (useStreaming) streamingClient else plainClient).newCall(req)
             cont.invokeOnCancellation { runCatching { call.cancel() } }
             try {
                 val r = call.execute()
@@ -444,7 +456,7 @@ object AiClient {
     private fun httpGet(url: String, auth: String?): String {
         val b = Request.Builder().url(url)
         if (auth != null) b.header("Authorization", auth)
-        client.newCall(b.build()).execute().use { resp ->
+        streamingClient.newCall(b.build()).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
             return body
