@@ -6,6 +6,7 @@ import com.lele.novelmaster.data.CardCategories
 import com.lele.novelmaster.data.Chapter
 import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
+import com.lele.novelmaster.data.Message
 import com.lele.novelmaster.data.SettingCard
 import com.lele.novelmaster.data.WriterEngine
 import kotlinx.coroutines.Dispatchers
