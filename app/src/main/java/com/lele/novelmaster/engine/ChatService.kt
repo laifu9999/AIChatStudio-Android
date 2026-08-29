@@ -77,47 +77,96 @@ object ChatService {
             var pid = currentPid
             var deletedCurrent = false
 
-            // 提取所有工具块（<tool>…</tool> 与 ```json…``` 两种）
+            // ---------- 工具提取（四级容错） ----------
             val blockRe = Regex("<tool>\\s*(.*?)\\s*</tool>", RegexOption.DOT_MATCHES_ALL)
             val fenceRe = Regex("```(?:json)?\\s*([\\s\\S]*?)\\s*```")
-            val blocks = blockRe.findAll(reply).map { it.groupValues[1] } +
-                fenceRe.findAll(reply).map { it.groupValues[1] }
-
+            var work = reply
             var executed = 0
-            var failed = 0
-            blocks.forEach { b ->
-                val parsed = parseToolBlock(b)
-                if (parsed == null) { failed++; return@forEach }
-                val (name, args) = parsed
-                if (name !in KNOWN_TOOLS) { failed++; return@forEach }
+            var truncated = false
+            val executedJson = mutableSetOf<String>()
+
+            suspend fun runTool(name: String, args: org.json.JSONObject): Boolean {
+                if (name !in KNOWN_TOOLS) return false
                 val r = com.lele.novelmaster.tools.Tools.dispatch(pid, name, args, context)
-                if (r != null) {
-                    appendToolResult(pid, r)
-                    r.newProjectId?.let { np -> pid = np; onProjectChange(np) }
-                    if (name == "deleteProject" && r.ok) deletedCurrent = true
-                    executed++
-                } else failed++
+                if (r == null) return false
+                appendToolResult(pid, r)
+                r.newProjectId?.let { np -> pid = np; onProjectChange(np) }
+                if (name == "deleteProject" && r.ok) deletedCurrent = true
+                return true
             }
+
+            // ① 标准闭合块 <tool>...</tool>
+            blockRe.findAll(work).toList().forEach { m ->
+                val parsed = parseToolBlock(m.groupValues[1])
+                if (parsed != null && executedJson.add(m.groupValues[1].trim())) {
+                    if (runTool(parsed.first, parsed.second)) executed++
+                }
+            }
+            work = blockRe.replace(work, "")
+
+            // ② ```json``` 围栏块
+            fenceRe.findAll(work).toList().forEach { m ->
+                val parsed = parseToolBlock(m.groupValues[1])
+                if (parsed != null && executedJson.add(m.groupValues[1].trim())) {
+                    if (runTool(parsed.first, parsed.second)) executed++
+                }
+            }
+            work = fenceRe.replace(work, "")
+
+            // ③ 未闭合的 <tool>（AI 长回复被截断）：括号配对尽力提取执行
+            val openIdx = work.lastIndexOf("<tool>")
+            if (openIdx >= 0 && !work.substring(openIdx).contains("</tool>")) {
+                val brace = work.indexOf('{', openIdx)
+                if (brace >= 0) {
+                    val maybe = extractBalancedJson(work, brace)
+                        ?: run {
+                            val lastBrace = work.lastIndexOf('}')
+                            if (lastBrace > brace) work.substring(brace, lastBrace + 1) else null
+                        }
+                    if (maybe != null) {
+                        val parsed = parseToolBlock(maybe)
+                        if (parsed != null && runTool(parsed.first, parsed.second)) executed++
+                    }
+                }
+                truncated = true
+                work = work.substring(0, openIdx)
+            }
+
+            // ④ 裸工具名 + JSON（无包裹、可能跨行）：如 createProject\n{"title":...}
+            val bareRe = Regex("(" + KNOWN_TOOLS.sortedByDescending { it.length }.joinToString("|") + ")\\s*\\{")
+            val bareMatches = bareRe.findAll(work).toList().reversed()
+            for (m in bareMatches) {
+                val name = m.groupValues[1]
+                val json = extractBalancedJson(work, m.range.last)
+                if (json != null && executedJson.add(json.trim())) {
+                    val parsed = parseToolBlock(name + json)
+                    if (parsed != null && runTool(parsed.first, parsed.second)) {
+                        executed++
+                        val startIdx = m.range.first
+                        val endIdx = m.range.last + json.length  // name + '{'..'}'
+                        if (endIdx <= work.length) work = work.removeRange(startIdx, endIdx)
+                    }
+                }
+            }
+
             if (deletedCurrent) {
                 val ps = Repo.dao.projectsFlow().first()
                 pid = ps.firstOrNull()?.id ?: 0L
                 onProjectChange(pid)
             }
 
-            // 工具块一律从正文移除（无论解析成败，绝不原样显示给用户）
-            val text = reply.replace(blockRe, "").replace(fenceRe, "").trim()
+            // ---------- 正文显示（工具块绝不原样显示） ----------
+            var text = work
+                .replace(Regex("<tool>[\\s\\S]*$"), "")
+                .replace(Regex("\\n{3,}"), "\n\n")
+                .trim()
+            if (truncated) text += "\n\n（AI 回复较长被截断，回复「继续」可让它接着完成）"
             when {
                 text.isNotBlank() ->
                     Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = text, kind = "text"))
-                executed > 0 -> { /* 全是工具块且都执行成功，不再多说 */ }
-                blocks.count() > 0 ->
-                    Repo.dao.insertMessage(
-                        Message(projectId = pid, role = "system",
-                            content = "⚠️ AI 返回的操作指令无法解析（可能是模型输出格式问题）。已显示原始回复：\n\n${reply.take(800)}",
-                            kind = "error")
-                    )
+                executed > 0 -> { /* 全是工具块且执行成功 */ }
                 else ->
-                    Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = reply.take(2000), kind = "text"))
+                    Repo.dao.insertMessage(Message(projectId = pid, role = "assistant", content = reply.take(3000), kind = "text"))
             }
         } catch (e: Exception) {
             Repo.dao.insertMessage(
@@ -125,6 +174,25 @@ object ChatService {
                     content = "⚠️ AI 调用失败：${e.message?.take(300)}", kind = "error")
             )
         }
+    }
+
+    /** 从 start（须指向 '{'）做括号配对提取完整 JSON；字符串内的括号忽略 */
+    private fun extractBalancedJson(s: String, start: Int): String? {
+        if (start !in s.indices || s[start] != '{') return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (i in start until s.length) {
+            val c = s[i]
+            if (esc) { esc = false; continue }
+            when {
+                c == '\\' && inStr -> esc = true
+                c == '"' -> inStr = !inStr
+                !inStr && c == '{' -> depth++
+                !inStr && c == '}' -> { depth--; if (depth == 0) return s.substring(start, i + 1) }
+            }
+        }
+        return null
     }
 
     /**
@@ -182,7 +250,9 @@ object ChatService {
                         "3) 作者的意图由你理解后直接执行——能执行的不要只说不做，直接调用工具完成，然后简洁告知结果。\n" +
                         "4) 全自动创作时一气呵成：createProject 建书 → 自己编写全套设定卡（addCard，世界观/人物/主线/冲突/伏笔都由你创作）→ generateOutlines → 开始写，全程不反问作者；作者没提但必要的内容你补全并保存。\n" +
                         "5) 作者要求修改时先改设定再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
-                        "6) 回复用自然中文、简洁，别输出内心分析过程，别复述本协议。"
+                        "6) 回复用自然中文，发挥你的才华与创意，字数不限；别输出内心分析过程，别复述本协议。\n" +
+                        "7) 生成的任何设定/资料内容，必须同时用 addCard 或文件工具保存，光说不存等于没做。\n" +
+                        "8) 设定内容较长时分成多批输出，每次回复最多 2~3 个工具块，确保每块 JSON 完整闭合。"
                 )
                 appendLine()
                 appendLine(
@@ -219,7 +289,7 @@ object ChatService {
                 )
             }
             chatMessages.add(ChatMsg("user", input))
-            AiClient.chat(cfg, chatMessages, temperature = 0.85, maxTokens = 2000)
+            AiClient.chat(cfg, chatMessages, temperature = 0.85, maxTokens = 4096)
         }
     }
 }

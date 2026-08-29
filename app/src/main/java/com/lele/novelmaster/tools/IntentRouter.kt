@@ -211,6 +211,49 @@ object IntentRouter {
             return fr ?: ToolResult(false, "文件系统不可用")
         }
 
+        // ------- 自然语言文件操作：保存/读取/删除/修改 -------
+        Regex("^保存到\\s*([^\\s:：]+)\\s*[:：]\\s*([\\s\\S]+)").find(raw)?.let { m ->
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val path = m.groupValues[1]
+            val content = m.groupValues[2]
+            val args = org.json.JSONObject().put("path", path).put("content", content)
+            return context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "writeFile", args) }
+                ?: ToolResult(false, "文件系统不可用")
+        }
+        Regex("^保存[:：]\\s*([\\s\\S]+)").find(raw)?.let { m ->
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val content = m.groupValues[1]
+            val name = java.text.SimpleDateFormat("MMdd_HHmm", java.util.Locale.CHINA).format(java.util.Date())
+            val args = org.json.JSONObject().put("path", "手动保存/保存_$name.md").put("content", content)
+            return context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "createFile", args) }
+                ?: ToolResult(false, "文件系统不可用")
+        }
+        Regex("^(读取|查看|打开)\\s*(文件\\s*)?([^\\s:：]+\\.(md|txt|json)|设定卡/.+|大纲/.+|正文/.+)").find(raw)?.let { m ->
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val path = m.groupValues[3]
+            val args = org.json.JSONObject().put("path", path)
+            return context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "readFile", args) }
+                ?: ToolResult(false, "文件系统不可用")
+        }
+        Regex("^删除文件\\s*([^\\s:：]+)").find(raw)?.let { m ->
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val args = org.json.JSONObject().put("path", m.groupValues[1])
+            return context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "deleteFile", args) }
+                ?: ToolResult(false, "文件系统不可用")
+        }
+        Regex("^(新建文件夹|创建文件夹)\\s*([^\\s:：]+)").find(raw)?.let { m ->
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val args = org.json.JSONObject().put("path", m.groupValues[2])
+            return context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "createFolder", args) }
+                ?: ToolResult(false, "文件系统不可用")
+        }
+        Regex("^(新建文件|创建文件)\\s*([^\\s:：]+)\\s*[:：]?\\s*([\\s\\S]*)").find(raw)?.let { m ->
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val args = org.json.JSONObject().put("path", m.groupValues[2]).put("content", m.groupValues[3])
+            return context?.let { com.lele.novelmaster.tools.FileTools.dispatch(it, pid, "createFile", args) }
+                ?: ToolResult(false, "文件系统不可用")
+        }
+
         // ------- 模糊匹配：删除 / 查卡号 -------
         Regex("删除(设定|卡|人物|世界观|伏笔)\\s*id\\s*([0-9]+)").find(raw)?.let { m ->
             val id = m.groupValues[2].toLong()
