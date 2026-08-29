@@ -127,7 +127,7 @@ object WriterEngine {
                 appendLine("【第${vi + 1}卷】第${from}~${to}章")
                 list.forEach { ch ->
                     val title = ch.title.ifBlank { "未命名" }
-                    val core = ch.outline.replace(Regex("\s+"), " ").take(40)
+                    val core = ch.outline.replace(Regex("\\s+"), " ").take(40)
                     appendLine("  第${ch.chapterIndex}章《$title》：${core.ifBlank { "（待补大纲）" }}")
                 }
                 appendLine()
