@@ -633,10 +633,11 @@ private fun JumpButton(label: String, th: ChatThemeColors, onClick: () -> Unit) 
         shadowElevation = 3.dp,
         modifier = Modifier
             .size(34.dp)
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
+            .clickable { onClick() }
     ) {
-        Text(label, color = th.userText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(label, color = th.userText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
