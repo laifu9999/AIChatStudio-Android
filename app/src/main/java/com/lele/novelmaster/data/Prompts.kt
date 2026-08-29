@@ -14,6 +14,19 @@ object Prompts {
     fun cardBlock(cards: List<SettingCard>): String =
         cards.joinToString("\n") { "【${it.category}·${it.name}】${it.content}${if (it.category == "伏笔钩子") "（状态：${it.status.ifBlank { "埋设中" }}）" else ""}" }
 
+    /** v5.6：带字数预算的设定卡注入（单卡截断，整体不超预算），保证 600 章注入恒定 ~3000 字 */
+    fun budgetCardBlock(cards: List<SettingCard>, budget: Int = 1900, perCard: Int = 450): String {
+        val sb = StringBuilder()
+        for (c in cards) {
+            val status = if (c.category == "伏笔钩子") "（状态：${c.status.ifBlank { "埋设中" }}）" else ""
+            val content = if (c.content.length > perCard) c.content.take(perCard) + "…" else c.content
+            val line = "【${c.category}·${c.name}】$content$status\n"
+            if (sb.length + line.length > budget + perCard) break
+            sb.append(line)
+        }
+        return sb.toString().trim()
+    }
+
     /** 按优先级与关键词相关度挑选要注入的设定卡 */
     fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
         val always = all.filter { it.priority == 2 }
@@ -44,9 +57,10 @@ object Prompts {
         appendLine("3. 伏笔规则：【伏笔钩子】中状态为“埋设中”的伏笔要按计划推进；“已回收”的不可再当新伏笔。需要埋新伏笔时自然埋下。")
         appendLine("4. 每章必须有推进、有冲突、章末留钩子（悬念）。多用场景与对话，少干巴巴的旁白。")
         appendLine("5. 只输出正文本身：不要输出章节标题、章节号、序号、解释、总结或任何多余内容。")
+        appendLine("6. 必须一次性写完整一章：从开头一路写到章末钩子，情节自然收束，绝不允许中途停笔、省略或写“未完待续/下半部分”。")
         appendLine()
         appendLine("【设定资料】")
-        append(cardBlock(selected))
+        append(budgetCardBlock(selected))
     }
 
     /** 组装写章所需的完整消息 */
@@ -67,16 +81,16 @@ object Prompts {
 
         val user = buildString {
             appendLine("【书名】${project.title}　【类型】${project.genre}")
-            if (project.description.isNotBlank()) appendLine("【简介】${project.description}")
+            if (project.description.isNotBlank()) appendLine("【简介】${project.description.take(150)}")
             if (recent.isNotEmpty()) {
                 appendLine()
                 appendLine("【前情摘要】")
-                recent.forEach { appendLine("第${it.chapterIndex}章《${it.title}》：${it.summary}") }
+                recent.forEach { appendLine("第${it.chapterIndex}章《${it.title}》：${it.summary.take(120)}") }
             }
             if (prev != null && prev.content.isNotBlank()) {
                 appendLine()
                 appendLine("【上一章结尾（本章开头要自然衔接）】")
-                appendLine(prev.content.takeLast(600))
+                appendLine(prev.content.takeLast(400))
             }
             if (neighbors.isNotBlank()) {
                 appendLine()
@@ -87,12 +101,15 @@ object Prompts {
             appendLine("【本章任务】第${chapter.chapterIndex}章")
             if (chapter.title.isNotBlank()) appendLine("章节名：${chapter.title}")
             if (chapter.outline.isNotBlank()) {
-                appendLine("本章大纲：${chapter.outline}")
+                appendLine("本章大纲：${chapter.outline.take(300)}")
             } else {
                 appendLine("本章大纲未给出，请根据前情与相邻章节大纲自然推进剧情。")
             }
             appendLine()
-            append("请写出本章完整正文，约${project.chapterWordTarget}字。只输出正文。")
+            val wt = project.chapterWordTarget
+            val lo = (wt * 0.85).toInt()
+            val hi = (wt * 1.15).toInt()
+            append("请写出本章完整正文，字数 ${lo}~${hi} 字，必须写完整一章（含章末钩子收束），不要中途停笔。只输出正文。")
         }
         return listOf(ChatMsg("system", writerSystem(selected)), ChatMsg("user", user))
     }
@@ -137,14 +154,20 @@ object Prompts {
         append("请生成完整设定：世界观、主角与主要人物（各一行）、主线剧情、核心冲突、2~4个支线任务、至少3个伏笔钩子（名称简短便于追踪）、设定圣经摘要、全书大纲（分阶段）。")
     }
 
-    /** 编辑器内续写 */
-    suspend fun continueMessages(project: Project, cards: List<SettingCard>, chapter: Chapter, currentText: String): List<ChatMsg> {
+    /** 编辑器内续写（也用于章节补完）；words=期望续写字数 */
+    fun continueMessages(
+        project: Project,
+        cards: List<SettingCard>,
+        chapter: Chapter,
+        currentText: String,
+        words: Int = 800
+    ): List<ChatMsg> {
         val selected = selectCards(cards, chapter.outline)
         val user = buildString {
             appendLine("【本章任务】${chapter.outline.ifBlank { chapter.title }}")
             appendLine("【已有正文（结尾部分）】")
             appendLine(currentText.takeLast(1500))
-            append("请从上文结尾处自然续写约800字。只输出续写内容，不要重复已有内容，不要输出标题或解释。")
+            append("请从上文结尾处自然续写约${words.coerceIn(200, 2000)}字。只输出续写内容，不要重复已有内容，不要输出标题或解释；若本章剧情已可收束，就写到章末钩子为止。")
         }
         return listOf(ChatMsg("system", writerSystem(selected)), ChatMsg("user", user))
     }

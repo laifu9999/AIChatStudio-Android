@@ -37,6 +37,11 @@ object IntentRouter {
         val t = raw.lowercase()
         val noAi = t.replace(Regex("\\s"), "")
 
+        // v5.6：疑问句一律交给 AI 按上一轮信息回答，绝不本地执行"写章/读章"等动作
+        // 例："都好了吗，可以开始写第一章了没有" → AI 回答准备状态，而不是真的开写
+        val asking = Regex("[??？]|吗\\s*$|好了没有|好了吗|可以了吗|准备好了|是不是|能不能|可不可以|什么时候").containsMatchIn(raw) ||
+            raw.trimEnd().endsWith("没有")
+
         // ------- 项目管理 -------
         if (Regex("^(开新书|新建小说|创建项目|新写一本|新开一本)").containsMatchIn(raw)) {
             // 让 AI 处理（更智能地抽取书名/类型）
@@ -73,6 +78,7 @@ object IntentRouter {
         }
 
         Regex("(?:写|写好|生成|产?出|第)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章(?!.*重写)").find(raw)?.let { m ->
+            if (asking) return null   // 疑问句：让 AI 回答，不执行
             val idx = parseChineseNum(m.groupValues[1])
             if (idx in 1..100000) {
                 val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
@@ -122,7 +128,7 @@ object IntentRouter {
         }
 
         // ------- 自动写作 -------
-        if (Regex("自动写作|一键写完|自动写完|自动写下去|全部?自动|开始自动").containsMatchIn(raw)) {
+        if (!asking && Regex("自动写作|一键写完|自动写完|自动写下去|全部?自动|开始自动").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
             val rangePair = Regex("(从第)?([0-9零一二三四五六七八九十百千]{1,4})(章?)?(到|~|至|\\-)?第?([0-9零一二三四五六七八九十百千]{1,4})章?").find(noAi)
             val (from, to) = if (rangePair != null) {

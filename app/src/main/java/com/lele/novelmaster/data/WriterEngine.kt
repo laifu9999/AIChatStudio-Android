@@ -176,6 +176,14 @@ object WriterEngine {
         return if (count == 0) "AI未能生成可识别的设定，回复片段：${reply.take(200)}" else null
     }
 
+    /** v5.6：结尾是否已收束（以句号/叹号/问号/省略号/引号等结尾），用于判断章节是否写完 */
+    private fun endsWell(s: String): Boolean {
+        val t = s.trimEnd()
+        if (t.isEmpty()) return false
+        val last = t.last()
+        return last in "。！？…」』”\"!?~"
+    }
+
     /**
      * 写单章：
      *  1) 写前在聊天播报「📥 已注入内容」（必发卡/伏笔/摘要/结尾/相邻大纲摘要）
@@ -197,8 +205,27 @@ object WriterEngine {
         }
         dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
 
-        val content = cleanBody(AiClient.chat(cfg, messages, maxTokens = 4096).trim(), ch0.chapterIndex, ch0.title)
+        var content = cleanBody(AiClient.chat(cfg, messages, maxTokens = 4096).trim(), ch0.chapterIndex, ch0.title)
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")
+
+        // v5.6：完整性保障——太短或结尾没有收束标点时续写补完（最多2次，只在需要时才多花 token）
+        val target = project.chapterWordTarget
+        var fixUps = 0
+        while (fixUps < 2 && (content.length < target * 55 / 100 || !endsWell(content))) {
+            fixUps++
+            try {
+                val words = (target - content.length).coerceIn(300, 1500)
+                val cont = AiClient.chat(
+                    cfg,
+                    Prompts.continueMessages(project, cards, ch0, content, words),
+                    temperature = 0.85,
+                    maxTokens = 3000
+                ).trim()
+                if (cont.isBlank()) break
+                content = cleanBody(content + "\n" + cont, ch0.chapterIndex, ch0.title)
+                if (endsWell(content) && content.length >= target * 55 / 100) break
+            } catch (_: Exception) { break }
+        }
 
         var ch = ch0.copy(
             content = content,

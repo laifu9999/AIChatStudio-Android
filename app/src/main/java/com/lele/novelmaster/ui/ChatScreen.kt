@@ -78,26 +78,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/**
- * v5.4：把最后一条消息的"底部"拉进可视区。
- * 只 scrollToItem(last) 时会把长消息的开头对齐顶部，导致看不到最新内容；
- * 这里补一段溢出量滚动，保证最新消息始终可见。
- */
-private suspend fun scrollToBottom(state: androidx.compose.foundation.lazy.LazyListState) {
-    repeat(3) {
-        delay(80)
-        val info = state.layoutInfo
-        val last = info.visibleItemsInfo.lastOrNull() ?: return
-        val overflow = (last.offset + last.size) - info.viewportEndOffset
-        if (overflow <= 8) return
-        // 把最后一条消息的"底部"对齐到可视区底部
-        val target = (last.size - info.viewportEndOffset).coerceAtLeast(0)
-        if (target <= 0) return
-        state.animateScrollToItem(last.index, target)
-    }
-}
-
-/** v5.5：逐字/逐词打字机效果。对长消息按 chunk 分段，既看得见流动，又不会等太久。 */
+/** v5.6：逐字/逐词打字机效果。对长消息按 chunk 分段，既看得见流动，又不会等太久。 */
 private suspend fun typewriterDisplay(
     text: String,
     onUpdate: (String) -> Unit,
@@ -171,6 +152,11 @@ private val BrandTop = Color(0xFF6750A4)
 private val BrandBottom = Color(0xFF8B5CF6)
 private val TextSub = Color(0xFF8A8698)
 
+/** v5.6：跨页面记住当前会话，从文件管理等页面返回时不再自动切到最新会话 */
+object ChatSessionMemory {
+    var lastPid: Long = 0L
+}
+
 /**
  * 主界面 v5.3 —— 顶栏实色、全部功能收进「功能」面板、无快捷条、AI 无头像、文字居中、
  * 可选聊天主题/字体/字号，AI 回复不限字数。
@@ -181,7 +167,7 @@ fun ChatScreen(nav: NavHostController) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var currentPid by remember { mutableStateOf(0L) }
+    var currentPid by remember { mutableStateOf(ChatSessionMemory.lastPid) }
     var drawerOpen by remember { mutableStateOf(false) }
     var showPanel by remember { mutableStateOf(false) }
     var showStyle by remember { mutableStateOf(false) }
@@ -203,7 +189,9 @@ fun ChatScreen(nav: NavHostController) {
     val msgSize = style.size.coerceIn(12, 30)
 
     LaunchedEffect(projects) {
-        if (currentPid == 0L && projects.isNotEmpty()) currentPid = projects.first().id
+        if (currentPid == 0L && ChatSessionMemory.lastPid == 0L && projects.isNotEmpty()) {
+            currentPid = projects.first().id
+        }
         if (currentPid == 0L && projects.isEmpty()) {
             val exist = Repo.dao.messagesFlow(0).first()
             if (exist.isEmpty()) {
@@ -213,19 +201,16 @@ fun ChatScreen(nav: NavHostController) {
             }
         }
     }
+    LaunchedEffect(currentPid) { ChatSessionMemory.lastPid = currentPid }
 
-    // v5.5：切会话 / 新消息 / 处理中，都自动滚到"最后一条的底部"；
-    // 对 AI/系统/工具消息启动打字机效果，完整内容最终全部显示。
+    // v5.6：reverseLayout —— 最新消息永远固定在最下面，新内容把旧内容往上推，不用手动追
+    // （index 0 = 最新消息；只有用户本来就在底部附近时才自动跟随，翻历史时不打扰）
     LaunchedEffect(currentPid) {
-        if (messages.isNotEmpty()) {
-            listState.scrollToItem(messages.lastIndex)
-            scrollToBottom(listState)
-        }
+        if (messages.isNotEmpty()) listState.scrollToItem(0)
     }
     LaunchedEffect(messages.size, messages.lastOrNull()?.id, busy) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
-            scrollToBottom(listState)
+        if (messages.isNotEmpty() && listState.firstVisibleItemIndex <= 1) {
+            listState.scrollToItem(0)
         }
         val last = messages.lastOrNull()
         if (last != null && last.role != "user" && typedContents[last.id] != last.content) {
@@ -233,7 +218,9 @@ fun ChatScreen(nav: NavHostController) {
                 typewriterDisplay(
                     last.content,
                     onUpdate = { typedContents = typedContents + (last.id to it) },
-                    onScroll = { scrollToBottom(listState) }
+                    onScroll = {
+                        if (listState.firstVisibleItemIndex <= 1) listState.scrollToItem(0)
+                    }
                 )
             }
         }
@@ -245,7 +232,7 @@ fun ChatScreen(nav: NavHostController) {
         scope.launch {
             val r = com.lele.novelmaster.tools.Tools.createProject(
                 title = "未命名会话", genre = "", desc = "",
-                totalCh = 30, chWords = 2500, force = true
+                totalCh = 30, chWords = 1800, force = true
             )
             r.newProjectId?.let { currentPid = it }
             creatingSession = false
@@ -347,10 +334,14 @@ fun ChatScreen(nav: NavHostController) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
+                    reverseLayout = true,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    // v5.6：reverseLayout 下 padding 仍是物理方向；顶部只留 2dp，去掉气泡上方空白
+                    contentPadding = PaddingValues(horizontal = 8.dp, top = 2.dp, bottom = 8.dp)
                 ) {
-                    items(messages, key = { it.id }) { m ->
+                    // index 0 = 最新消息（显示在底部）
+                    val shown = messages.asReversed()
+                    items(shown, key = { it.id }) { m ->
                         val displayed = typedContents[m.id] ?: m.content
                         MessageBubble(m.copy(content = displayed), th, msgFont, msgSize)
                     }
@@ -363,7 +354,6 @@ fun ChatScreen(nav: NavHostController) {
                             }
                         }
                     }
-                    item { Spacer(Modifier.height(8.dp)) }
                 }
             }
         }

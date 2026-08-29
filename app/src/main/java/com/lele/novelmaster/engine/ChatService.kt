@@ -95,6 +95,20 @@ object ChatService {
                 val key = name + "|" + args.toString()
                 // 只对"带参数"的调用去重（无参工具如 writeNextChapter 允许连发多次）
                 if (args.length() > 0 && !executedKeys.add(key)) return true
+
+                // v5.6：已有会话时，AI 再怎么误调 createProject 也一律转成"改当前会话"——代码级兜底，绝不跳会话
+                if (name == "createProject" && pid > 0L) {
+                    val r2 = com.lele.novelmaster.tools.Tools.updateProject(
+                        pid,
+                        args.optString("title").takeIf { it.isNotBlank() },
+                        args.optString("genre").takeIf { it.isNotBlank() },
+                        args.optString("desc").takeIf { it.isNotBlank() },
+                        args.optInt("totalCh", -1).takeIf { it > 0 },
+                        args.optInt("chWords", -1).takeIf { it > 0 }
+                    )
+                    appendToolResult(pid, r2)
+                    return true
+                }
                 if (name == "createProject" && createdPid != null) {
                     pid = createdPid!!
                     onProjectChange(pid)
@@ -116,14 +130,14 @@ object ChatService {
 
             // ① 标准闭合块 <tool>...</tool>
             blockRe.findAll(work).toList().forEach { m ->
-                val parsed = parseToolBlock(m.groupValues[1])
+                val parsed = parseToolLenient(m.groupValues[1])
                 if (parsed != null && runTool(parsed.first, parsed.second)) executed++
             }
             work = blockRe.replace(work, "")
 
             // ② ```json``` 围栏块
             fenceRe.findAll(work).toList().forEach { m ->
-                val parsed = parseToolBlock(m.groupValues[1])
+                val parsed = parseToolLenient(m.groupValues[1])
                 if (parsed != null && runTool(parsed.first, parsed.second)) executed++
             }
             work = fenceRe.replace(work, "")
@@ -138,28 +152,44 @@ object ChatService {
                             val lastBrace = work.lastIndexOf('}')
                             if (lastBrace > brace) work.substring(brace, lastBrace + 1) else null
                         }
-                    if (maybe != null) {
-                        val parsed = parseToolBlock(maybe)
-                        if (parsed != null && runTool(parsed.first, parsed.second)) executed++
-                    }
+                    // v5.6：仍取不到完整 JSON 时，自动补全闭合——截断的 addCard/writeFile 也要能保存
+                    val candidate = maybe ?: autocloseJson(work.substring(brace))
+                    val parsed = parseToolLenient(candidate)
+                    if (parsed != null && runTool(parsed.first, parsed.second)) executed++
                 }
                 truncated = true
                 work = work.substring(0, openIdx)
             }
 
-            // ④ 裸工具名 + JSON（无包裹、可能跨行）：如 createProject\n{"title":...}
-            val bareRe = Regex("(" + KNOWN_TOOLS.sortedByDescending { it.length }.joinToString("|") + ")\\s*\\{")
+            // ④ 裸工具名 + JSON（无包裹、可能跨行，兼容 工具名{ / 工具名: { / 工具名：{）
+            val bareRe = Regex("(" + KNOWN_TOOLS.sortedByDescending { it.length }.joinToString("|") + ")\\s*[:：]?\\s*\\{")
             val bareMatches = bareRe.findAll(work).toList().reversed()
             for (m in bareMatches) {
                 val name = m.groupValues[1]
-                val json = extractBalancedJson(work, m.range.last)
+                val braceIdx = work.indexOf('{', m.range.first)
+                if (braceIdx < 0) continue
+                val json = extractBalancedJson(work, braceIdx)
                 if (json != null) {
-                    val parsed = parseToolBlock(name + json)
-                                        if (parsed != null && runTool(parsed.first, parsed.second)) {
+                    val parsed = parseToolLenient(name + json)
+                    if (parsed != null && runTool(parsed.first, parsed.second)) {
                         executed++
                         val startIdx = m.range.first
-                        val endIdx = m.range.last + json.length
+                        val endIdx = braceIdx + json.length
                         if (endIdx <= work.length) work = work.removeRange(startIdx, endIdx)
+                    }
+                }
+            }
+
+            // ⑤ v5.6：截断的裸工具块（结尾没有闭合 }）——自动补全闭合后仍然执行，保存不受截断影响
+            val leftover = bareRe.find(work)
+            if (leftover != null) {
+                val braceIdx = work.indexOf('{', leftover.range.first)
+                if (braceIdx >= 0) {
+                    val closed = autocloseJson(work.substring(braceIdx))
+                    val parsed = parseToolLenient(leftover.groupValues[1] + closed)
+                    if (parsed != null && runTool(parsed.first, parsed.second)) {
+                        executed++
+                        work = work.substring(0, leftover.range.first)
                     }
                 }
             }
@@ -211,6 +241,57 @@ object ChatService {
     }
 
     /**
+     * v5.6：把截断/不规范的 JSON 尽力修补成可解析：
+     * 去掉尾逗号 → 智能引号转半角 → 自动补全未闭合的引号和括号。
+     * 老模型（如智谱免费版）输出不规范时，保存文件/建设定卡不再失败。
+     */
+    private fun autocloseJson(s: String): String {
+        var inStr = false
+        var esc = false
+        val stack = ArrayDeque<Char>()
+        for (c in s) {
+            if (esc) { esc = false; continue }
+            if (inStr) {
+                when {
+                    c == '\\' -> esc = true
+                    c == '"' -> inStr = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> inStr = true
+                '{' -> stack.addLast('}')
+                '[' -> stack.addLast(']')
+                '}' -> if (stack.lastOrNull() == '}') stack.removeLast()
+                ']' -> if (stack.lastOrNull() == ']') stack.removeLast()
+            }
+        }
+        var out = s.trimEnd()
+        if (inStr) out += "\""
+        out = out.trimEnd().trimEnd(',')
+        while (stack.isNotEmpty()) out += stack.removeLast()
+        return out
+    }
+
+    /** v5.6：宽松解析 = 严格解析失败后，修复尾逗号 / 智能引号 / 未闭合结构再试一次 */
+    private fun parseToolLenient(block: String): Pair<String, org.json.JSONObject>? {
+        parseToolBlock(block)?.let { return it }
+        var t = block.trim()
+        if (t.isEmpty()) return null
+        // 1) 尾逗号
+        var repaired = t.replace(Regex(",\\s*([}\\]])"), "$1")
+        parseToolBlock(repaired)?.let { return it }
+        // 2) 中文/智能引号 → 半角（部分老模型用「”」包裹 JSON 字符串）
+        repaired = repaired
+            .replace('\u201c', '"').replace('\u201d', '"')
+            .replace('\u2018', '"').replace('\u2019', '"')
+        parseToolBlock(repaired)?.let { return it }
+        // 3) 自动补全未闭合的引号与括号（截断回复）
+        repaired = autocloseJson(repaired)
+        return parseToolBlock(repaired)
+    }
+
+    /**
      * 三重容错解析一个工具块，返回 (工具名, args)。
      *  兼容：{"name":"x","args":{...}} / {"tool":"x","arguments":{...}} / x{...}（前缀工具名）
      */
@@ -231,8 +312,8 @@ object ChatService {
             }
         } catch (_: Exception) { }
 
-        // 形式2：工具名{...} —— 例如 createProject{"title":"看",...}
-        val m = Regex("^([A-Za-z_][A-Za-z0-9_]*)\\s*\\{").find(t)
+        // 形式2：工具名{...} / 工具名: {...} —— 例如 createProject{"title":"看",...}
+        val m = Regex("^([A-Za-z_][A-Za-z0-9_]*)\\s*[:：]?\\s*\\{").find(t)
         if (m != null && m.groupValues[1] in KNOWN_TOOLS) {
             val name = m.groupValues[1]
             val jsonStart = t.indexOf('{')
