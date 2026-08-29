@@ -229,6 +229,18 @@ object Tools {
         val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val next = chs.firstOrNull { it.content.isBlank() } ?: return ToolResult(false, "全部章节都已写完 ✅")
         return try {
+            // v6.3：写章前先确保分章大纲（标题+剧情要点）已生成——
+            // 之前 AI 常常跳过 generateOutlines 直接开写，导致章节全是「未命名」且注入里没有大纲核心
+            val noOutline = chs.count { it.outline.isBlank() }
+            if (next.outline.isBlank()) {
+                withContext(Dispatchers.IO) {
+                    Repo.dao.insertMessage(
+                        Message(projectId = pid, role = "tool", kind = "tool",
+                            content = "🧭 检测到 $noOutline 章还没有大纲，正在自动补全分章大纲（标题+剧情要点）…")
+                    )
+                }
+                WriterEngine.ensureOutlines(pid, context = context)
+            }
             WriterEngine.writeOne(project, cfg, Repo.dao, next, context)
             val fresh = withContext(Dispatchers.IO) { Repo.dao.chapter(next.id) }!!
             ToolResult(true, "✅ 第${fresh.chapterIndex}章《${fresh.title}》已写入（${fresh.wordCount} 字）",

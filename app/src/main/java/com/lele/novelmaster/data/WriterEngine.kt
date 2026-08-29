@@ -101,7 +101,51 @@ object WriterEngine {
                 File(d, "分章大纲.md").writeText(md, Charsets.UTF_8)
             }
         } catch (_: Exception) { }
+
+        // v6.3：分卷大纲必须进设定卡 —— 按卷分组（每 20 章一卷）写入「全书大纲/分卷大纲」卡
+        syncVolumeOutlineCard(projectId, context)
         return null
+    }
+
+    /**
+     * v6.3：把章节标题+大纲核心按卷整理成「分卷大纲」设定卡。
+     * 用户要求"设定卡里面要包含分卷大纲"——这样在设定卡页面也能看到全书骨架，
+     * 同时写章时会作为必发卡注入，600 章也不跑偏。
+     */
+    suspend fun syncVolumeOutlineCard(projectId: Long, context: Context? = null) {
+        val dao = Repo.dao
+        val cards = dao.cards(projectId)
+        val withOutline = dao.chapters(projectId).filter { it.outline.isNotBlank() || it.title.isNotBlank() }
+        if (withOutline.isEmpty()) return
+
+        val perVolume = 20
+        val volumes = withOutline.chunked(perVolume)
+        val md = buildString {
+            volumes.forEachIndexed { vi, list ->
+                val from = list.first().chapterIndex
+                val to = list.last().chapterIndex
+                appendLine("【第${vi + 1}卷】第${from}~${to}章")
+                list.forEach { ch ->
+                    val title = ch.title.ifBlank { "未命名" }
+                    val core = ch.outline.replace(Regex("\s+"), " ").take(40)
+                    appendLine("  第${ch.chapterIndex}章《$title》：${core.ifBlank { "（待补大纲）" }}")
+                }
+                appendLine()
+            }
+        }
+
+        // 单卡分类去重：全书大纲一类只允许一张
+        val exist = cards.firstOrNull { it.category == "全书大纲" }
+        val text = md.trim()
+        if (exist != null) dao.updateCard(exist.copy(name = "分卷大纲", content = text, priority = 2))
+        else dao.insertCard(
+            SettingCard(projectId = projectId, category = "全书大纲", name = "分卷大纲", content = text, priority = 2)
+        )
+        try {
+            dir(context, projectId, "设定卡/全书大纲")?.let { d ->
+                File(d, safeName("分卷大纲") + ".md").writeText("# 全书大纲 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
     }
 
     /** 解析AI返回的大纲行并写回章节 */

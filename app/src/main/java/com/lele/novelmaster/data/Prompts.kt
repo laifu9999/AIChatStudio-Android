@@ -102,6 +102,21 @@ object Prompts {
                 appendLine("【相邻章节大纲（保持连贯）】")
                 appendLine(neighbors)
             }
+            // v6.3：本章所在卷的全景（标题 + 剧情核心），保证 600 章也不跑偏
+            val volStart = ((chapter.chapterIndex - 1) / 20) * 20 + 1
+            val volEnd = volStart + 19
+            val volLines = chapters.filter { it.chapterIndex in volStart..volEnd }
+                .joinToString("\n") { ch ->
+                    val t = ch.title.ifBlank { "未命名" }
+                    val core = ch.outline.replace(Regex("\\s+"), " ").take(30)
+                    val mark = if (ch.chapterIndex == chapter.chapterIndex) "\u25b6" else "\u00b7"
+                    "$mark 第${ch.chapterIndex}章《$t》：${core.ifBlank { "（待补）" }}"
+                }
+            if (volLines.isNotBlank()) {
+                appendLine()
+                appendLine("【本卷全景（第${volStart}~${volEnd}章，标题+剧情核心）】")
+                appendLine(volLines)
+            }
             appendLine()
             appendLine("【本章任务】第${chapter.chapterIndex}章")
             if (chapter.title.isNotBlank()) appendLine("章节名：${chapter.title}")

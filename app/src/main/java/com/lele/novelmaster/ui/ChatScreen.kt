@@ -149,6 +149,8 @@ fun ChatScreen(nav: NavHostController) {
     var creatingSession by remember { mutableStateOf(false) }
     // v5.7/v5.8：AI 流式输出的实时文本（自带打字效果）；聊天记录一律静态显示，不再重播逐字动画
     var streamingText by remember { mutableStateOf<String?>(null) }
+    // v6.3：已用秒数（让长任务有进度反馈，不再是干转圈）
+    var elapsedSec by remember { mutableStateOf(0) }
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
     val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
@@ -191,6 +193,17 @@ fun ChatScreen(nav: NavHostController) {
     // v6.0：手指滑动屏幕时显示悬浮箭头，停手即隐藏
     val showJumpBtns by remember { androidx.compose.runtime.derivedStateOf { listState.isScrollInProgress } }
 
+    // v6.3：忙时每秒计一次，界面显示已用秒数，用户知道没卡死
+    LaunchedEffect(busy) {
+        if (!busy) { elapsedSec = 0; return@LaunchedEffect }
+        var s = 0
+        while (busy) {
+            delay(1000)
+            s++
+            elapsedSec = s
+        }
+    }
+
     fun newDefaultSession() {
         if (creatingSession) return
         creatingSession = true
@@ -211,11 +224,26 @@ fun ChatScreen(nav: NavHostController) {
         busy = true
         streamingText = ""
         chatJob = scope.launch {
+            // v6.3：兜底看门狗——万一 AI 请求卡死（旧模型无响应、连接半开），
+            // 5 分钟后强制结束并恢复发送按钮，绝不让按钮永远转圈
+            val guard = scope.launch {
+                delay(300_000)
+                if (busy) {
+                    chatJob?.cancel()
+                    Repo.dao.insertMessage(
+                        Message(projectId = currentPid, role = "system", kind = "error",
+                            content = "⚠️ 本次请求超过 5 分钟没有响应，已自动停止。请再发一次，或换一个模型试试。")
+                    )
+                    streamingText = null
+                    busy = false
+                }
+            }
             try {
                 ChatService.handle(ctx, currentPid, t, { newPid -> if (newPid != 0L) currentPid = newPid }) { s ->
                     streamingText = s
                 }
             } finally {
+                guard.cancel()
                 // v5.8：AI 回复的打字效果由流式实时呈现；落库后聊天记录静态显示，不再重播逐字动画
                 streamingText = null
                 busy = false
@@ -328,7 +356,7 @@ fun ChatScreen(nav: NavHostController) {
                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
                                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
                                         Spacer(Modifier.width(8.dp))
-                                        Text("乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                        Text(if (elapsedSec > 0) "乐乐正在输入…（已用时 ${elapsedSec}s，点发送键可停止）" else "乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
                                     }
                                 }
                             }
@@ -337,7 +365,7 @@ fun ChatScreen(nav: NavHostController) {
                                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
                                     CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
                                     Spacer(Modifier.width(8.dp))
-                                    Text("乐乐正在思考…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                    Text(if (elapsedSec > 0) "乐乐正在工作…（已用时 ${elapsedSec}s，点发送键可停止）" else "乐乐正在思考…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
                                 }
                             }
                         }

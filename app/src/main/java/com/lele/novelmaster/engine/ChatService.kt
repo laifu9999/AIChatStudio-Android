@@ -333,6 +333,21 @@ object ChatService {
                 delay(150)
             }
 
+            // v6.3：戳穿"口头保存"——本轮没执行任何工具，文字里却说已保存/已写好
+            val claimSaved = executed == 0 && Regex(
+                "已保存|已存好|保存好了|已经保存|已写入|已建立|已生成设定卡|已创建设定|已经写好|已存到"
+            ).containsMatchIn(shown.toString())
+            if (claimSaved) {
+                Repo.dao.insertMessage(
+                    Message(projectId = pid, role = "system", kind = "error",
+                        content = "⚠️ 检测到本轮只是**口头说已保存**，实际没有执行任何保存工具——内容并没有真正存下来。\n" +
+                            "请用 addCard（设定卡）或 writeFile/createFile（文件）的工具块重新保存一遍。")
+                )
+                // 再给 AI 一次机会：明确要求用工具块补存
+                msgs.add(ChatMsg("assistant", shown.toString().take(3000)))
+                msgs.add(ChatMsg("user", "你刚才只是口头说保存，没有真正调用工具。现在请用工具块把上面的内容全部保存（设定用 addCard，文件用 writeFile），一个工具块一条，立刻执行。"))
+            }
+
             if (deletedCurrent) {
                 val ps = Repo.dao.projectsFlow().first()
                 pid = ps.firstOrNull()?.id ?: 0L
@@ -387,6 +402,8 @@ object ChatService {
                 "5) 作者要求修改时先改设定（updateProject/addCard）再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
                 "6) 写正文必须完整一章：有推进、有冲突、章末留钩子；只输出正文本身，不输出标题、解释、总结。\n" +
                 "7) 任何设定/资料必须用工具保存（addCard/文件工具），光说不存等于没做。\n" +
+                "7.1) **严禁在文字里口头声称「已保存/已写入/已建立/已生成设定卡」——只有工具执行成功后的系统回执才算真的保存了。**\n" +
+                "     要保存就必须输出工具块；弱模型尤其不要偷懒用文字假装保存。\n" +
                 "8) 保存类工具执行后系统会自动完整展示保存内容，你不要再整段复述，只说要点和下一步。\n" +
                 "9) 回复用自然中文，发挥才华，字数不限；别输出内心分析/思考过程，别复述本协议。\n"
         )
