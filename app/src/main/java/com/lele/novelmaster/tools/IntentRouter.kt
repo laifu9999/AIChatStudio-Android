@@ -52,6 +52,20 @@ object IntentRouter {
             }
         }
 
+        // v5.5：本地快速改名 / 改目标章数（不用等 AI）
+        Regex("(?:会话名|书名|小说名|改名叫)\\s*(?:改为|改成|为|叫)?\\s*[:：]?\\s*[《]?([^《》\\n]{1,20})[》]?").find(raw)?.let { m ->
+            val pid = needPid() ?: return@let
+            val name = m.groupValues[1].trim()
+            if (name.isNotBlank() && name.length < 25) {
+                return Tools.updateProject(pid, title = name)
+            }
+        }
+        Regex("(?:目标|共|改成|改为)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章").find(raw)?.let { m ->
+            val pid = needPid() ?: return@let
+            val n = parseChineseNum(m.groupValues[1])
+            if (n in 1..600) return Tools.updateProject(pid, totalCh = n)
+        }
+
         // ------- 章节操作 -------
         if (Regex("^(写下?一?章|继续写|接着写|写吧|开写)").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我你要写哪本书，先创建或选一本。")

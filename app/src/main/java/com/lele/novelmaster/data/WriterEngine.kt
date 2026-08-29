@@ -32,6 +32,35 @@ object WriterEngine {
 
     private fun safeName(s: String) = s.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
 
+    /** v5.5：把 AI 返回中的标题行、代码围栏、meta 说明等非正文内容去掉，只保留正文。 */
+    private fun cleanBody(text: String, chapterIndex: Int, title: String): String {
+        var s = text.trim()
+        // 去掉 ``` 围栏
+        s = s.replace(Regex("```[\\s\\S]*?```"), "")
+        // 去掉开头可能出现的「第X章 标题」行（多种写法）
+        val variants = listOf(
+            "第\\s*$chapterIndex\\s*章",
+            "第\\s*$chapterIndex\\s*章[《]${Regex.escape(title)}[》]",
+            "第\\s*$chapterIndex\\s*章\\s*${Regex.escape(title)}",
+            "[《]${Regex.escape(title)}[》]"
+        )
+        for (v in variants) {
+            s = s.replace(Regex("^\\s*$v\\s*[:：]?\\s*\\n?", RegexOption.IGNORE_CASE), "")
+        }
+        // 过滤掉明显是 meta 的行
+        s = s.lines().filterNot { line ->
+            val l = line.trim()
+            l.startsWith("【回收伏笔】") ||
+                l.startsWith("作者有话") ||
+                l.startsWith("本章小结") ||
+                l.startsWith("剧情总结") ||
+                l.startsWith("注：") ||
+                l.matches(Regex("^第\\s*\\d+\\s*章[：:\\s].*")) ||
+                l.matches(Regex("^第\\s*\\d+\\s*章\\s*[《].*[》].*"))
+        }.joinToString("\n")
+        return s.trim()
+    }
+
     /** 补齐缺失的分章大纲（只处理 from..to 范围内） */
     suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         val dao = Repo.dao
@@ -168,7 +197,7 @@ object WriterEngine {
         }
         dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
 
-        val content = AiClient.chat(cfg, messages, maxTokens = 4096).trim()
+        val content = cleanBody(AiClient.chat(cfg, messages, maxTokens = 4096).trim(), ch0.chapterIndex, ch0.title)
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")
 
         var ch = ch0.copy(
@@ -179,11 +208,11 @@ object WriterEngine {
         )
         dao.updateChapter(ch)
 
-        // 正文落盘 files/正文/第N章-标题.txt
+        // 正文落盘 files/正文/第N章-标题.txt（只存正文，不加标题头）
         try {
             dir(context, project.id, "正文")?.let { d ->
                 File(d, safeName("第${ch.chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + ".txt")
-                    .writeText("第${ch.chapterIndex}章 ${ch.title}\n\n$content\n", Charsets.UTF_8)
+                    .writeText(content + "\n", Charsets.UTF_8)
             }
         } catch (_: Exception) { }
 
@@ -255,7 +284,7 @@ object WriterEngine {
         val chapters = dao.chapters(ch.projectId)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
-        val content = AiClient.chat(cfg, messages, maxTokens = 4096).trim()
+        val content = cleanBody(AiClient.chat(cfg, messages, maxTokens = 4096).trim(), ch.chapterIndex, ch.title)
         if (content.isBlank()) return "AI返回空内容"
         dao.updateChapter(
             ch.copy(
@@ -289,7 +318,7 @@ object WriterEngine {
         val cards = dao.cards(projectId)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
         messages.add(ChatMsg("user", instruction))
-        val out = AiClient.chat(cfg, messages, temperature = 0.8, maxTokens = 4096).trim()
+        val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8, maxTokens = 4096).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
         if (replace && out.length >= 300) {
             dao.updateChapter(

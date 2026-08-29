@@ -99,13 +99,6 @@ fun MenuDrawer(
 
                 // 全部内容：一个 LazyColumn，显示不完可滚动
                 LazyColumn(Modifier.fillMaxSize()) {
-                    // 书架 / 阅读
-                    item {
-                        SectionLabel("书架与阅读")
-                        FunRow("📚  小说书架（自动生成）") { onNav("shelf") }
-                        FunRow("🔎  注入预览（当前会话）") { onNav("preview/$currentPid") }
-                    }
-
                     // 会话列表
                     item { SectionLabel("会话记录（${projects.size}） · 每个会话=一本书") }
                     if (projects.isEmpty()) {
@@ -150,18 +143,7 @@ fun MenuDrawer(
                             }
                         }
                     }
-
-                    // 功能
-                    item {
-                        SectionLabel("功能")
-                        FunRow("🗂  设定卡管理") { onNav("cards/$currentPid") }
-                        FunRow("📖  章节列表 / 编辑") { onNav("chapters/$currentPid") }
-                        FunRow("📁  项目文件（AI 的资料库）") { onNav("files/$currentPid") }
-                        FunRow("✍️  自动写作控制台") { onNav("autowrite/$currentPid") }
-                        FunRow("🤖  AI 模型（添加 / 测试）") { onNav("ai") }
-                        FunRow("📤  导出 / 发布") { onNav("export/$currentPid") }
-                        Spacer(Modifier.height(28.dp))
-                    }
+                    item { Spacer(Modifier.height(28.dp)) }
                 }
             }
         }

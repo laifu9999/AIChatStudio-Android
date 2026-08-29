@@ -24,7 +24,7 @@ object ChatService {
 
     /** 全部可被 AI 触发的工具名 */
     val KNOWN_TOOLS = setOf(
-        "createProject", "switchProject", "listProjects", "addCard", "deleteCard", "writeNextChapter", "rewriteChapter",
+        "createProject", "switchProject", "updateProject", "listProjects", "addCard", "deleteCard", "writeNextChapter", "rewriteChapter",
         "startAutoWrite", "stopAutoWrite", "generateOutlines", "inspireFromText",
         "readChapter", "listCards", "listChapters", "exportTxt", "deleteProject",
         "contextPreview", "moveChapter", "copyChapter",
@@ -37,7 +37,7 @@ object ChatService {
 
     const val Welcome = "你好，我是乐乐 🪶 可以陪你聊天，也可以帮你写小说。\n\n" +
         "想写小说时直接说，比如：\n" +
-        "  「我想写一本穿越修仙的爱情小说」→ 我自动建书、编好全部设定和大纲、开始写\n" +
+        "  「我想写一本穿越修仙的爱情小说」→ 我自动在当前会话里完善设定和大纲，等你确认再写\n" +
         "  「写下一章」「自动写作」「把这段存到人物设定卡」\n\n" +
         "先到右上「对接AI」添加一个模型（推荐智谱 glm-4-flash，免费）。平时随便聊，我都在 ✨"
 
@@ -265,20 +265,21 @@ object ChatService {
                         "1) 作者打招呼、闲聊、问任何问题 → 像真人朋友一样自然回复，绝不强行拉回写小说，绝不自动建书、绝不自动生成设定。\n" +
                         "2) 只有作者明确表达创作/管理意图时才执行对应动作：例如「我想写一本…」「写下一章」「自动写作」「保存这个设定」「建个文件夹」。\n" +
                         "3) 作者的意图由你理解后直接执行——能执行的不要只说不做，直接调用工具完成，然后简洁告知结果。\n" +
-                        "4) 全自动创作时一气呵成：createProject 建书 → 自己编写全套设定卡（addCard，世界观/人物/主线/冲突/伏笔都由你创作）→ generateOutlines → 开始写，全程不反问作者；作者没提但必要的内容你补全并保存。\n" +
-                        "【极其重要·会话唯一性】一个会话就是一本小说。整轮回复里 createProject 只能出现一次；已经建过会话就直接用它，绝不要因为标题里有多个元素（如「穿越+修仙+爱情」）而拆成多个 createProject。已存在同名会话时系统会自动复用，你不必重建。\n" +
-                        "5) 作者要求修改时先改设定再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
-                        "6) 回复用自然中文，发挥你的才华与创意，字数不限；别输出内心分析过程，别复述本协议。\n" +
-                        "7) 生成的任何设定/资料内容，必须同时用 addCard 或文件工具保存，光说不存等于没做。\n" +
-                        "8) 设定内容较长时分成多批输出，每次回复最多 2~3 个工具块，确保每块 JSON 完整闭合。\n" +
-                        "9) 保存类工具（addCard/writeFile/createFile/appendFile）执行后，系统会自动把保存的原文完整展示给作者，你的回复里不要再整段复述，只说明「存到哪 + 关键要点 + 下一步」即可。\n"
+                        "4) 全自动创作流程：没有当前会话时 createProject 建书；**已有会话时严禁 createProject**，用 updateProject 把当前会话名/类型/目标章数改成小说信息。然后自己编写全套设定卡（addCard）→ generateOutlines 补全大纲。\n" +
+                        "5) **写完设定和大纲后必须停下，等作者说「写下一章」或「开始自动写作」才写第一章，绝不要默认自动写**。\n" +
+                        "6) 所有创作都在当前会话内进行，不要切换会话，不要把一个灵感拆成多个项目。\n" +
+                        "7) 作者要求修改时先改设定（updateProject/addCard）再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
+                        "8) 回复用自然中文，发挥你的才华与创意，字数不限；别输出内心分析过程，别复述本协议。\n" +
+                        "9) 生成的任何设定/资料内容，必须同时用 addCard 或文件工具保存，光说不存等于没做。\n" +
+                        "10) 设定内容较长时分成多批输出，每次回复最多 2~3 个工具块，确保每块 JSON 完整闭合。\n" +
+                        "11) 保存类工具（addCard/writeFile/createFile/appendFile）执行后，系统会自动把保存的原文完整展示给作者，你的回复里不要再整段复述，只说明「存到哪 + 关键要点 + 下一步」即可。\n"
                 )
                 appendLine()
                 appendLine(
                     "【工具协议】需要执行操作时，在回复中输出工具块，格式必须是合法 JSON（两个字段缺一不可）：\n" +
                         "<tool>{\"name\":\"工具名\",\"args\":{\"参数\":\"值\"}}</tool>\n" +
                         "可用工具：\n" +
-                        "— 项目/设定：createProject{title,genre,desc,totalCh,chWords} | switchProject{pid} | listProjects{} | addCard{category,name,content}(category:" +
+                        "— 项目/设定：createProject{title,genre,desc,totalCh,chWords}(仅无会话时) | updateProject{title,genre,desc,totalCh,chWords}(改当前会话，不跳出) | switchProject{pid} | listProjects{} | addCard{category,name,content}(category:" +
                         CardCategories.all.joinToString("/") + ") | deleteCard{cardId} | listCards{category可空}\n" +
                         "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to} | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
                         "— 专家功能(index可空=最新章)：polishChapter | expandDialogue | styleRewrite{style} | hookChapter | goldenLines | plotBrainstorm{} | characterCheck{name} | consistencyCheck{} | nameGen{kind,count} | genBlurb{}\n" +

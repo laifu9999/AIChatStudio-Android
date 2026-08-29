@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.lele.novelmaster.data.Chapter
@@ -33,12 +34,14 @@ import com.lele.novelmaster.data.WriterEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
 fun EditorScreen(nav: NavController, chapterId: Long) {
+    val ctx = LocalContext.current
     val chapter by produceState<Chapter?>(null, chapterId) { value = Repo.dao.chapter(chapterId) }
     val scope = rememberCoroutineScope()
     var title by remember { mutableStateOf("") }
@@ -71,6 +74,14 @@ fun EditorScreen(nav: NavController, chapterId: Long) {
                     updatedAt = System.currentTimeMillis()
                 )
             )
+            // v5.5：同步更新项目文件里的本章 txt，书架阅读看到的是最新内容
+            runCatching {
+                val base = File(ctx.filesDir, "novels/${latest.projectId}/files/正文")
+                base.mkdirs()
+                val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
+                File(base, "第${latest.chapterIndex}章-$safeTitle.txt")
+                    .writeText(text + "\n", Charsets.UTF_8)
+            }
             savedAt = System.currentTimeMillis()
         }
     }

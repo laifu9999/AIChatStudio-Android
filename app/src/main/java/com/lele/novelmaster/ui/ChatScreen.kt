@@ -74,6 +74,7 @@ import com.lele.novelmaster.data.AutoWriteManager
 import com.lele.novelmaster.data.Message
 import com.lele.novelmaster.data.Repo
 import com.lele.novelmaster.engine.ChatService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -84,7 +85,7 @@ import kotlinx.coroutines.launch
  */
 private suspend fun scrollToBottom(state: androidx.compose.foundation.lazy.LazyListState) {
     repeat(3) {
-        kotlinx.coroutines.delay(80)
+        delay(80)
         val info = state.layoutInfo
         val last = info.visibleItemsInfo.lastOrNull() ?: return
         val overflow = (last.offset + last.size) - info.viewportEndOffset
@@ -94,6 +95,37 @@ private suspend fun scrollToBottom(state: androidx.compose.foundation.lazy.LazyL
         if (target <= 0) return
         state.animateScrollToItem(last.index, target)
     }
+}
+
+/** v5.5：逐字/逐词打字机效果。对长消息按 chunk 分段，既看得见流动，又不会等太久。 */
+private suspend fun typewriterDisplay(
+    text: String,
+    onUpdate: (String) -> Unit,
+    onScroll: suspend () -> Unit
+) {
+    if (text.length <= 1) { onUpdate(text); return }
+    val step = when {
+        text.length < 300 -> 1
+        text.length < 1500 -> 3
+        else -> 6
+    }
+    val delayMs = when {
+        text.length < 300 -> 16L
+        text.length < 1500 -> 10L
+        else -> 6L
+    }
+    var i = 0
+    var scrollCounter = 0
+    while (i < text.length) {
+        val end = minOf(i + step, text.length)
+        onUpdate(text.substring(0, end))
+        i = end
+        delay(delayMs)
+        scrollCounter++
+        if (scrollCounter % 4 == 0) onScroll()
+    }
+    onUpdate(text)
+    onScroll()
 }
 
 /* ---------------- 聊天外观设置（持久化） ---------------- */
@@ -124,7 +156,7 @@ data class ChatThemeColors(
 val ChatThemes = listOf(
     ChatThemeColors(Color(0xFFF7F5FC), Color(0xFFEFEBF9), Color(0xFF6750A4), Color.White, Color.White, Color(0xFF1F1B2E)),
     ChatThemeColors(Color(0xFFFAFAFA), Color(0xFFF0F0F0), Color(0xFF1976D2), Color.White, Color.White, Color(0xFF1A1A1A)),
-    ChatThemeColors(Color(0xFFF8F1E3), Color(0xFFF1E6CE), Color(0xFF8D6E3A), Color.White, Color(0xFFFFFBF0), Color(0xFF3E3222)),
+    ChatThemeColors(Color(0xFFF8F1E3), Color(0xFFF1E6CE), Color(0xFF8D6E3A), Color.White, Color.White, Color(0xFF3E3222)),
     ChatThemeColors(Color(0xFF14141C), Color(0xFF0E0E14), Color(0xFF5B4B9E), Color.White, Color(0xFF1F1F2A), Color(0xFFD5D5E0))
 )
 val ChatFontNames = listOf("苹方风格(默认)", "宋体·衬线", "等宽", "手写体")
@@ -151,13 +183,15 @@ fun ChatScreen(nav: NavHostController) {
 
     var currentPid by remember { mutableStateOf(0L) }
     var drawerOpen by remember { mutableStateOf(false) }
-    var showCreate by remember { mutableStateOf(false) }
     var showPanel by remember { mutableStateOf(false) }
     var showStyle by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var chatJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var style by remember { mutableStateOf(ChatStylePrefs.load(ctx)) }
+    // v5.5：打字机效果当前显示到的位置（key=message id）
+    var typedContents by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
+    var creatingSession by remember { mutableStateOf(false) }
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
     val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
@@ -180,7 +214,8 @@ fun ChatScreen(nav: NavHostController) {
         }
     }
 
-    // v5.4：切会话 / 新消息 / 处理中，都自动滚到"最后一条的底部"（长消息也不会停在开头）
+    // v5.5：切会话 / 新消息 / 处理中，都自动滚到"最后一条的底部"；
+    // 对 AI/系统/工具消息启动打字机效果，完整内容最终全部显示。
     LaunchedEffect(currentPid) {
         if (messages.isNotEmpty()) {
             listState.scrollToItem(messages.lastIndex)
@@ -191,6 +226,29 @@ fun ChatScreen(nav: NavHostController) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
             scrollToBottom(listState)
+        }
+        val last = messages.lastOrNull()
+        if (last != null && last.role != "user" && typedContents[last.id] != last.content) {
+            scope.launch {
+                typewriterDisplay(
+                    last.content,
+                    onUpdate = { typedContents = typedContents + (last.id to it) },
+                    onScroll = { scrollToBottom(listState) }
+                )
+            }
+        }
+    }
+
+    fun newDefaultSession() {
+        if (creatingSession) return
+        creatingSession = true
+        scope.launch {
+            val r = com.lele.novelmaster.tools.Tools.createProject(
+                title = "未命名会话", genre = "", desc = "",
+                totalCh = 30, chWords = 2500, force = true
+            )
+            r.newProjectId?.let { currentPid = it }
+            creatingSession = false
         }
     }
 
@@ -220,61 +278,60 @@ fun ChatScreen(nav: NavHostController) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(BrandTop, BrandBottom)))
+            .background(Color.Transparent)
     ) {
-        // ============ 顶栏（v5.4 紧凑版：总高 46dp，把空间全留给聊天） ============
-        Row(
+        // ============ 顶栏（v5.5：紫色只覆盖内容区，状态栏区域不再染紫） ============
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Brush.horizontalGradient(listOf(BrandTop, BrandBottom)))
-                .statusBarsPadding()
-                .height(46.dp)
-                .padding(horizontal = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { drawerOpen = true }, modifier = Modifier.size(38.dp)) {
-                Icon(Icons.Filled.Menu, "会话列表", tint = Color.White, modifier = Modifier.size(20.dp))
-            }
-            Column(Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Brush.horizontalGradient(listOf(BrandTop, BrandBottom)))
+                    .statusBarsPadding()
+                    .height(40.dp)
+                    .padding(horizontal = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { drawerOpen = true }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Filled.Menu, "会话列表", tint = Color.White, modifier = Modifier.size(20.dp))
+                }
                 Text(
                     currentTitle ?: "新会话",
-                    color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp,
+                    modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
+                    color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    if (currentPid == 0L) "发一个灵感，自动开一本新书" else "会话独立 · 资料在项目文件夹",
-                    color = Color.White.copy(alpha = 0.8f), fontSize = 9.sp, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.White.copy(alpha = 0.22f),
+                    modifier = Modifier.clickable { nav.navigate("ai") }
+                ) {
+                    Text("🤖AI", color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                }
+                Spacer(Modifier.width(2.dp))
+                IconButton(onClick = { newDefaultSession() }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Filled.Add, "新会话", tint = Color.White, modifier = Modifier.size(20.dp))
+                }
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.White.copy(alpha = 0.22f),
+                    modifier = Modifier.clickable { showPanel = true }
+                ) {
+                    Text("⠿功能", color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                }
+                Spacer(Modifier.width(4.dp))
             }
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = Color.White.copy(alpha = 0.22f),
-                modifier = Modifier.clickable { nav.navigate("ai") }
-            ) {
-                Text("🤖AI", color = Color.White, fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
-            }
-            Spacer(Modifier.width(2.dp))
-            IconButton(onClick = { showCreate = true }, modifier = Modifier.size(38.dp)) {
-                Icon(Icons.Filled.Add, "新会话", tint = Color.White, modifier = Modifier.size(20.dp))
-            }
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = Color.White.copy(alpha = 0.22f),
-                modifier = Modifier.clickable { showPanel = true }
-            ) {
-                Text("⠿功能", color = Color.White, fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
-            }
-            Spacer(Modifier.width(4.dp))
         }
 
         // ============ 主体（所有功能只在「功能」面板，聊天区留最大空间） ============
         Scaffold(
             containerColor = Color.Transparent,
             bottomBar = {
-                if (!drawerOpen && !showPanel && !showCreate) {
+                if (!drawerOpen && !showPanel) {
                     InputBar(input, busy, { input = it }, { onSendClick() })
                 }
             }
@@ -294,14 +351,15 @@ fun ChatScreen(nav: NavHostController) {
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
                 ) {
                     items(messages, key = { it.id }) { m ->
-                        MessageBubble(m, th, msgFont, msgSize)
+                        val displayed = typedContents[m.id] ?: m.content
+                        MessageBubble(m.copy(content = displayed), th, msgFont, msgSize)
                     }
                     if (busy) {
                         item {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
                                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
                                 Spacer(Modifier.width(8.dp))
-                                Text("乐乐正在处理…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                Text("乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
                             }
                         }
                     }
@@ -317,13 +375,7 @@ fun ChatScreen(nav: NavHostController) {
             onClose = { drawerOpen = false },
             onSelect = { pid -> drawerOpen = false; currentPid = pid },
             onNav = { r -> drawerOpen = false; nav.navigate(r) },
-            onNewSession = { drawerOpen = false; showCreate = true }
-        )
-    }
-    if (showCreate) {
-        CreateSessionDialog(
-            onDismiss = { showCreate = false },
-            onCreated = { pid -> showCreate = false; currentPid = pid }
+            onNewSession = { drawerOpen = false; newDefaultSession() }
         )
     }
     if (showPanel) {

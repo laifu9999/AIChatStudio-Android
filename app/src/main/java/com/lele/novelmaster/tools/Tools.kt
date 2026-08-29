@@ -93,6 +93,50 @@ object Tools {
         return ToolResult(true, "已切换到会话《${p.title}》", "目标 ${p.targetChapters} 章 / 每章 ${p.chapterWordTarget} 字 · 本会话资料独立", newProjectId = pid)
     }
 
+    /** v5.5：修改当前会话的书名/类型/简介/目标章数/每章字数（不切换会话） */
+    suspend fun updateProject(
+        pid: Long,
+        title: String? = null,
+        genre: String? = null,
+        desc: String? = null,
+        totalCh: Int? = null,
+        chWords: Int? = null
+    ): ToolResult {
+        val p = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
+        val oldChapters = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
+        var needChapters = false
+        val newTotal = totalCh?.coerceIn(1, 600)
+        val newProject = p.copy(
+            title = title?.trim()?.ifBlank { null } ?: p.title,
+            genre = genre?.trim() ?: p.genre,
+            description = desc ?: p.description,
+            targetChapters = newTotal ?: p.targetChapters,
+            chapterWordTarget = chWords?.coerceAtLeast(500) ?: p.chapterWordTarget
+        )
+        if (newTotal != null && newTotal != oldChapters.size) {
+            needChapters = true
+        }
+        withContext(Dispatchers.IO) {
+            Repo.dao.updateProject(newProject)
+            if (needChapters) {
+                // 补齐缺失的章节骨架；不删除已有章节
+                val maxIdx = oldChapters.maxOfOrNull { it.chapterIndex } ?: 0
+                if (newTotal > maxIdx) {
+                    val add = ((maxIdx + 1)..newTotal).map { Chapter(projectId = pid, chapterIndex = it) }
+                    Repo.dao.insertChapters(add)
+                }
+            }
+        }
+        val changed = buildList {
+            if (title != null) add("书名→《${newProject.title}》")
+            if (genre != null) add("类型→${newProject.genre.ifBlank { "未分类" }}")
+            if (desc != null) add("简介已更新")
+            if (newTotal != null) add("目标章数→${newProject.targetChapters}")
+            if (chWords != null) add("每章字数→${newProject.chapterWordTarget}")
+        }.joinToString("、")
+        return ToolResult(true, "已更新会话信息：$changed", "当前会话仍是《${newProject.title}》，不会跳出本会话。")
+    }
+
     suspend fun listCards(pid: Long, cat: String? = null, query: String? = null): ToolResult {
         val all = withContext(Dispatchers.IO) { Repo.dao.cards(pid) }
         val filtered = all.filter { c ->
@@ -524,6 +568,14 @@ object Tools {
             )
             "listProjects" -> listProjects()
             "switchProject" -> switchProject(args.optLong("pid", args.optLong("projectId", pid)))
+            "updateProject" -> updateProject(
+                pid,
+                args.optString("title").takeIf { it.isNotBlank() },
+                args.optString("genre").takeIf { it.isNotBlank() },
+                args.optString("desc").takeIf { it.isNotBlank() },
+                args.optInt("totalCh", -1).takeIf { it > 0 },
+                args.optInt("chWords", -1).takeIf { it > 0 }
+            )
             "addCard" -> addCard(
                 pid, args.optString("category"), args.optString("name"), args.optString("content"),
                 if (args.has("priority")) args.optInt("priority") else null, context
