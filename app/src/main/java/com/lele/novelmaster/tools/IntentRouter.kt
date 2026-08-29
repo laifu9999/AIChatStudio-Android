@@ -69,24 +69,46 @@ object IntentRouter {
         }
 
         // v5.5：本地快速改名 / 改目标章数（不用等 AI）
-        Regex("(?:会话名|书名|小说名|改名叫)\\s*(?:改为|改成|为|叫)?\\s*[:：]?\\s*[《]?([^《》\\n]{1,20})[》]?").find(raw)?.let { m ->
-            val pid = needPid() ?: return@let
-            val name = m.groupValues[1].trim()
-            if (name.isNotBlank() && name.length < 25) {
-                return Tools.updateProject(pid, title = name)
+        // v6.0：创作请求（帮写…共36章）绝不能被这里的"改章数/改名"小路由截胡——
+        //       之前「帮写一个家庭幸福的小说，共36章」只改了个章数就返回，AI 根本没开始写书
+        val creativeReq = Regex("帮写|帮我写|写一[本个部]|来一[本个部]|创作|写个|开一[本个部]").containsMatchIn(raw)
+        if (!creativeReq) {
+            Regex("(?:会话名|书名|小说名|改名叫)\\s*(?:改为|改成|为|叫)?\\s*[:：]?\\s*[《]?([^《》\\n]{1,20})[》]?").find(raw)?.let { m ->
+                val pid = needPid() ?: return@let
+                val name = m.groupValues[1].trim()
+                if (name.isNotBlank() && name.length < 25) {
+                    return Tools.updateProject(pid, title = name)
+                }
             }
-        }
-        Regex("(?:目标|共|改成|改为)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章").find(raw)?.let { m ->
-            val pid = needPid() ?: return@let
-            val n = parseChineseNum(m.groupValues[1])
-            if (n in 1..600) return Tools.updateProject(pid, totalCh = n)
-        }
+            Regex("(?:目标|共|改成|改为)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章").find(raw)?.let { m ->
+                val pid = needPid() ?: return@let
+                val n = parseChineseNum(m.groupValues[1])
+                if (n in 1..600) return Tools.updateProject(pid, totalCh = n)
+            }
+        } // v6.0: !creativeReq
 
         // ------- 章节操作 -------
         // v5.7：正在续写上一轮未写完的内容时，一切交给 AI，本地不再抢着写章
         if (resuming) return null
 
-        if (Regex("^(写下?一?章|继续写|接着写|写吧|开写)").containsMatchIn(raw)) {
+        // v6.0：设定卡和分章大纲已就绪时，「继续」= 写下一章（完整正文），不问不绕直接干
+        val nextStep = Regex("^(继续|接着|往下写|写下去|continue)", RegexOption.IGNORE_CASE).containsMatchIn(raw)
+        if (nextStep) {
+            val pid = needPid()
+            if (pid != null) {
+                val cards = Repo.dao.cards(pid)
+                val chapters = Repo.dao.chapters(pid)
+                val nextCh = chapters.firstOrNull { it.content.isBlank() }
+                val ready = cards.isNotEmpty() && nextCh != null && nextCh.outline.isNotBlank()
+                if (ready) return Tools.writeNextChapter(pid, context)
+            }
+            return null   // 资料没就绪 → 交给 AI 按流程把剩下的步骤做完
+        }
+
+        // v6.0：「开始写第一章 / 开写 / 写下一章」= 真的写完整一章，绝不只给个梗概
+        if (Regex("^(开始写|开写|写下?一?章|继续写|接着写|写吧|动笔)").containsMatchIn(raw) ||
+            Regex("(开写|开始写)[吧吧]?第一?章").containsMatchIn(raw)
+        ) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我你要写哪本书，先创建或选一本。")
             return Tools.writeNextChapter(pid, context)
         }
@@ -96,7 +118,12 @@ object IntentRouter {
             val idx = parseChineseNum(m.groupValues[1])
             if (idx in 1..100000) {
                 val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
-                // 已存在该章则跳转查看，否则要求先创建分章骨架
+                // v6.0：这一章还没写（内容为空）→ 写它；已写过 → 才是"查看"
+                val chapters = Repo.dao.chaptersFlow(pid).first()
+                val target = chapters.firstOrNull { it.chapterIndex == idx }
+                if (target != null && target.content.isBlank()) {
+                    return Tools.writeNextChapter(pid, context)
+                }
                 return Tools.readChapter(pid, idx).takeIf { it.ok } ?: ToolResult(true, "目标章节不在骨架中，请先创建项目并初始化大纲。")
             }
         }

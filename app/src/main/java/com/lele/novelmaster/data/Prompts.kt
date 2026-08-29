@@ -63,7 +63,9 @@ object Prompts {
         appendLine("9. 笔法：场景、动作、对话、心理交替推进；每 300~500 字给一个新的信息点或小转折，保持张力。")
         appendLine()
         appendLine("【设定资料】")
-        append(budgetCardBlock(selected))
+        // v6.0：注入总量恒定 ~2000 字（卡片 900 + 摘要 5×80 + 结尾 300 + 大纲 250 + 任务），
+        // 600 章注入不膨胀；一致性靠必发卡 + 未回收伏笔
+        append(budgetCardBlock(selected, budget = 900, perCard = 300))
     }
 
     /** 组装写章所需的完整消息 */
@@ -84,16 +86,16 @@ object Prompts {
 
         val user = buildString {
             appendLine("【书名】${project.title}　【类型】${project.genre}")
-            if (project.description.isNotBlank()) appendLine("【简介】${project.description.take(150)}")
+            if (project.description.isNotBlank()) appendLine("【简介】${project.description.take(100)}")
             if (recent.isNotEmpty()) {
                 appendLine()
                 appendLine("【前情摘要】")
-                recent.forEach { appendLine("第${it.chapterIndex}章《${it.title}》：${it.summary.take(120)}") }
+                recent.forEach { appendLine("第${it.chapterIndex}章《${it.title}》：${it.summary.take(80)}") }
             }
             if (prev != null && prev.content.isNotBlank()) {
                 appendLine()
                 appendLine("【上一章结尾（本章开头要自然衔接）】")
-                appendLine(prev.content.takeLast(400))
+                appendLine(prev.content.takeLast(300))
             }
             if (neighbors.isNotBlank()) {
                 appendLine()
@@ -104,7 +106,7 @@ object Prompts {
             appendLine("【本章任务】第${chapter.chapterIndex}章")
             if (chapter.title.isNotBlank()) appendLine("章节名：${chapter.title}")
             if (chapter.outline.isNotBlank()) {
-                appendLine("本章大纲：${chapter.outline.take(300)}")
+                appendLine("本章大纲：${chapter.outline.take(250)}")
             } else {
                 appendLine("本章大纲未给出，请根据前情与相邻章节大纲自然推进剧情。")
             }

@@ -252,6 +252,7 @@ object AiClient {
             }
             val reader = java.io.BufferedReader(resp.body?.charStream() ?: return@use AiResult("", "stop"))
             val sb = StringBuilder()
+            val think = StringBuilder()
             var finish = "stop"
             try {
                 while (true) {
@@ -265,12 +266,14 @@ object AiClient {
                         val ch = obj.optJSONArray("choices")?.optJSONObject(0)
                         jstr(ch, "finish_reason").takeIf { it.isNotBlank() }?.let { finish = it }
                         val d = ch?.optJSONObject("delta")
-                        var piece = jstr(d, "content")
-                        if (piece.isEmpty()) piece = jstr(d, "reasoning_content")
-                        if (piece.isEmpty()) piece = jstr(d, "reasoning")
+                        val piece = jstr(d, "content")
                         if (piece.isNotEmpty()) {
                             sb.append(piece)
                             onDelta(piece)
+                        } else {
+                            // v6.0：思考过程(reasoning_content/reasoning)只收集不显示
+                            val tk = jstr(d, "reasoning_content").ifEmpty { jstr(d, "reasoning") }
+                            if (tk.isNotEmpty()) think.append(tk)
                         }
                     }
                 }
@@ -279,7 +282,8 @@ object AiClient {
                 if (currentCoroutineContext()[Job]?.isActive == false) throw CancellationException("用户停止")
                 throw io
             }
-            AiResult(sb.toString(), finish)
+            // 个别推理模型只输出思考段：作为兜底内容返回（界面侧还会再剥一层 <think>）
+            AiResult(if (sb.isBlank()) think.toString() else sb.toString(), finish)
         }
     }
 

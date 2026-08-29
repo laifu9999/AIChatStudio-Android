@@ -177,23 +177,19 @@ fun ChatScreen(nav: NavHostController) {
     // v5.8：空内容的消息一律不显示（不会再出现没有文字的空白模块）
     val visibleMsgs = remember(messages) { messages.filter { it.content.isNotBlank() } }
 
-    // v5.7：消息区用正常顺序（最新在下面），内容少时紧贴顶栏，不浪费上方空间；
-    //      有新消息/流式输出时自动跟随到底部，不用手动滑。
-    suspend fun scrollToBottomIfNear(force: Boolean = false) {
-        val total = visibleMsgs.size + (if (streamingText != null) 1 else 0)
-        if (total <= 0) return
-        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        if (force || visibleMsgs.size <= 3 || total - 1 - lastVisible <= 3) {
-            listState.scrollToItem(total - 1)
-        }
-    }
-
+    // v6.0：reverseLayout —— 最新消息固定在发送框正上方，新内容从底部出来把旧内容往上推（信息自下而上流动）；
+    //       index 0 = 最底部（最新），lastIndex = 最顶部（最旧）
     LaunchedEffect(currentPid) {
-        if (visibleMsgs.isNotEmpty()) listState.scrollToItem(visibleMsgs.lastIndex)
+        if (visibleMsgs.isNotEmpty() || streamingText != null) listState.scrollToItem(0)
     }
-    LaunchedEffect(visibleMsgs.size) { scrollToBottomIfNear() }
-    // v5.9：AI 输出期间无条件实时跟随，界面始终能看到最新生成的字
-    LaunchedEffect(streamingText) { scrollToBottomIfNear(force = true) }
+    LaunchedEffect(visibleMsgs.size) {
+        if (listState.firstVisibleItemIndex <= 1) listState.scrollToItem(0)
+    }
+    // v5.9/v6.0：AI 输出期间无条件实时跟随，界面始终能看到最新生成的字
+    LaunchedEffect(streamingText) { listState.scrollToItem(0) }
+
+    // v6.0：手指滑动屏幕时显示悬浮箭头，停手即隐藏
+    val showJumpBtns by remember { androidx.compose.runtime.derivedStateOf { listState.isScrollInProgress } }
 
     fun newDefaultSession() {
         if (creatingSession) return
@@ -223,7 +219,7 @@ fun ChatScreen(nav: NavHostController) {
                 // v5.8：AI 回复的打字效果由流式实时呈现；落库后聊天记录静态显示，不再重播逐字动画
                 streamingText = null
                 busy = false
-                scrollToBottomIfNear(force = true)
+                listState.scrollToItem(0)
             }
         }
     }
@@ -310,39 +306,57 @@ fun ChatScreen(nav: NavHostController) {
             ) {
                 if (aw.running && aw.projectId == currentPid) AutoWriteCard(aw) { AutoWriteManager.stop() }
 
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    // v5.9：与功能栏零间距
-                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 0.dp, bottom = 6.dp)
-                ) {
-                    items(visibleMsgs, key = { it.id }) { m ->
-                        MessageBubble(m, th, msgFont, msgSize)
-                    }
-                    val st = streamingText
-                    if (st != null) {
-                        item {
-                            if (st.isNotBlank()) {
-                                MessageBubble(
-                                    Message(projectId = currentPid, role = "assistant", content = st, kind = "text"),
-                                    th, msgFont, msgSize
-                                )
-                            } else {
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        reverseLayout = true,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        // v6.0：与功能栏零间距；reverseLayout 下 bottom padding 是视觉顶部
+                        contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 2.dp)
+                    ) {
+                        // index 0 = 最底部（最新）：流式气泡贴着发送框上方逐字生长
+                        val st = streamingText
+                        if (st != null) {
+                            item(key = "streaming") {
+                                if (st.isNotBlank()) {
+                                    MessageBubble(
+                                        Message(projectId = currentPid, role = "assistant", content = st, kind = "text"),
+                                        th, msgFont, msgSize
+                                    )
+                                } else {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
+                                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                        } else if (busy) {
+                            item(key = "thinking") {
                                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
                                     CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
                                     Spacer(Modifier.width(8.dp))
-                                    Text("乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                    Text("乐乐正在思考…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
                                 }
                             }
                         }
-                    } else if (busy) {
-                        item {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
-                                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
-                                Spacer(Modifier.width(8.dp))
-                                Text("乐乐正在思考…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
-                            }
+                        items(visibleMsgs.asReversed(), key = { it.id }) { m ->
+                            MessageBubble(m, th, msgFont, msgSize)
+                        }
+                    }
+
+                    // v6.0：悬浮箭头——手指滑动时出现（↑回顶部 / ↓回底部），停手即隐藏
+                    if (showJumpBtns && visibleMsgs.size > 3) {
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 10.dp, bottom = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            JumpButton("↑", th) { scope.launch { listState.scrollToItem(visibleMsgs.lastIndex) } }
+                            Spacer(Modifier.height(8.dp))
+                            JumpButton("↓", th) { scope.launch { listState.scrollToItem(0) } }
                         }
                     }
                 }
@@ -609,6 +623,23 @@ private fun InputBar(input: String, busy: Boolean, onChange: (String) -> Unit, o
     }
 }
 
+/* ---------------- v6.0：悬浮跳转按钮 ---------------- */
+
+@Composable
+private fun JumpButton(label: String, th: ChatThemeColors, onClick: () -> Unit) {
+    Surface(
+        shape = CircleShape,
+        color = th.userBubble,
+        shadowElevation = 3.dp,
+        modifier = Modifier
+            .size(34.dp)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = th.userText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
 /* ---------------- 消息气泡（无头像、全屏宽、AI 居中） ---------------- */
 
 @Composable
@@ -617,7 +648,7 @@ private fun MessageBubble(m: Message, th: ChatThemeColors, font: FontFamily, siz
     val bubbleMax = screenW - 20.dp
     when (m.role) {
         "user" -> UserBubble(m, bubbleMax, th, font, size)
-        "tool" -> ToolBubble(m, bubbleMax, font, size)
+        "tool" -> ToolBubble(m, bubbleMax, th, font, size)
         "system" -> SystemBubble(m, bubbleMax, font, size)
         else -> AiBubble(m, bubbleMax, th, font, size)
     }
@@ -657,20 +688,21 @@ private fun AiBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: Cha
 }
 
 @Composable
-private fun ToolBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, font: FontFamily, size: Int) {
+private fun ToolBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: ChatThemeColors, font: FontFamily, size: Int) {
+    // v6.0：工具气泡跟随聊天主题（浅色主题=白底黑字），不再用绿色
     val lines = m.content.split("\n")
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFE7F6EC)),
+            colors = CardDefaults.cardColors(containerColor = th.aiBubble),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier.widthIn(max = bubbleMax)
         ) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                Text(lines.firstOrNull() ?: "", color = Color(0xFF1B7A3D), fontWeight = FontWeight.Bold,
+                Text(lines.firstOrNull() ?: "", color = th.aiText, fontWeight = FontWeight.Bold,
                     fontSize = (size - 1).sp, textAlign = TextAlign.Center)
                 if (lines.size > 1) {
                     Spacer(Modifier.height(4.dp))
-                    Text(lines.drop(1).joinToString("\n"), color = Color(0xFF2E5B3C),
+                    Text(lines.drop(1).joinToString("\n"), color = th.aiText.copy(alpha = 0.85f),
                         fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
                         textAlign = TextAlign.Center)
                 }

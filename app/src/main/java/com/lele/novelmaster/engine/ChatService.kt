@@ -193,9 +193,15 @@ object ChatService {
             }
         }
 
-        /** 给用户看的文本：剔除工具块与未闭合的片段 */
+        /** v6.0：剥离思考过程（<think>…</think> 或未闭合的 <think>…），绝不显示给作者 */
+        fun stripThinking(s: String): String =
+            s.replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("<think>[\\s\\S]*$", RegexOption.IGNORE_CASE), "")
+
+        /** 给用户看的文本：剔除思考过程、工具块与未闭合的片段 */
         fun visibleOf(seg: String): String {
-            var v = BLOCK_RE.replace(seg, "")
+            var v = stripThinking(seg)
+            v = BLOCK_RE.replace(v, "")
             var i = v.indexOf("<tool")
             if (i >= 0) v = v.substring(0, i)
             i = v.indexOf("```")
@@ -222,13 +228,20 @@ object ChatService {
         return withContext(Dispatchers.IO) {
 
             // ---------- 组装消息 ----------
-            val sysText = buildSystemText(pid, isContinue(input))
-            val msgs = mutableListOf<ChatMsg>(ChatMsg("system", sysText))
+            // v6.0：「继续」的两种语义：
+            //   上一条明显被截断（结尾没收束）→ 接着把没写完的内容写完；
+            //   否则 → 继续流程的下一步（设定/大纲没建完→建完；建完了→写下一章），绝不连续不停地写。
             val recent = Repo.dao.messagesFlow(pid).first().takeLast(8).toMutableList()
             // 去掉刚插入的同一条 user 消息，避免重复
             if (recent.lastOrNull()?.role == "user" && recent.lastOrNull()?.content == input) {
                 recent.removeAt(recent.lastIndex)
             }
+            val lastAssistant = recent.lastOrNull { it.role == "assistant" }?.content?.trimEnd().orEmpty()
+            val resumeMidSentence = isContinue(input) && lastAssistant.isNotEmpty() &&
+                lastAssistant.last() !in "。！？…」』”\"!?~）)】"
+
+            val sysText = buildSystemText(pid, isContinue(input), resumeMidSentence)
+            val msgs = mutableListOf<ChatMsg>(ChatMsg("system", sysText))
             recent.forEach { m ->
                 when {
                     m.kind == "text" ->
@@ -244,9 +257,13 @@ object ChatService {
             msgs.add(
                 ChatMsg(
                     "user",
-                    if (isContinue(input))
-                        "继续。对照系统提示里的「已保存的设定卡清单」，只补还没生成的分类和内容，已保存的严禁重复生成；输出量不要吝啬，一次做完不要停。"
-                    else input
+                    when {
+                        resumeMidSentence ->
+                            "继续。你上一条回复在半截被打断了，严格接着最后一句话往下输出完，不要重复已写过的内容，不要写「（续）」这类开场白。"
+                        isContinue(input) ->
+                            "继续 = 按流程继续下一步：对照「已保存的设定卡清单」，设定/分章大纲还没建全就接着建全；已经建全了就调用 writeNextChapter 写下一章（要完整一章正文，不是梗概）。已完成的部分严禁重做，也严禁一口气连写多章。"
+                        else -> input
+                    }
                 )
             )
 
@@ -323,7 +340,7 @@ object ChatService {
             }
 
             // ---------- 落库 ----------
-            val finalText = shown.toString()
+            val finalText = stripThinking(shown.toString())
                 .replace(Regex("<tool>[\\s\\S]*$"), "")
                 .replace(Regex("```[\\s\\S]*$"), "")
                 .replace(Regex("\\n{3,}"), "\n\n")
@@ -352,20 +369,26 @@ object ChatService {
     // 系统提示词
     // ------------------------------------------------------------------
 
-    private suspend fun buildSystemText(pid: Long, continuing: Boolean): String = buildString {
+    private suspend fun buildSystemText(pid: Long, continuing: Boolean, resumeMid: Boolean = false): String = buildString {
         appendLine(
-            "你是「乐乐」，作者的智能助理：既能像朋友一样自然聊天，也是专业的小说创作专家。\n" +
-                "【交流原则】\n" +
-                "1) 作者打招呼、闲聊、问任何问题 → 像真人朋友一样自然回复，绝不强行拉回写小说，绝不自动建书、绝不自动生成设定。\n" +
-                "2) 只有作者明确表达创作/管理意图时才执行对应动作：例如「我想写一本…」「写下一章」「自动写作」「保存这个设定」「建个文件夹」。\n" +
-                "3) 作者的意图由你理解后直接执行——能执行的不要只说不做，直接调用工具完成，然后简洁告知结果。\n" +
-                "4) 全自动创作流程：没有当前会话时 createProject 建书；**已有会话时严禁 createProject**，用 updateProject 把当前会话名/类型/目标章数改成小说信息。然后自己编写全套设定卡（addCard）→ generateOutlines 补全大纲。\n" +
-                "5) **写完设定和大纲后必须停下，等作者说「写下一章」或「开始自动写作」才写第一章，绝不要默认自动写**。\n" +
-                "6) 所有创作都在当前会话内进行，不要切换会话，不要把一个灵感拆成多个项目。\n" +
-                "7) 作者要求修改时先改设定（updateProject/addCard）再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
-                "8) 回复用自然中文，发挥你的才华与创意，字数不限；别输出内心分析过程，别复述本协议。\n" +
-                "9) 生成的任何设定/资料内容，必须同时用 addCard 或文件工具保存，光说不存等于没做。\n" +
-                "10) 保存类工具（addCard/writeFile/createFile/appendFile）执行后，系统会自动把保存的原文完整展示给作者，你的回复里不要再整段复述，只说明「存到哪 + 关键要点 + 下一步」即可。\n"
+            "你是「乐乐」，作者的智能写作助理：既像朋友一样自然聊天，更是顶级小说创作专家+全能执行智能体。\n" +
+                "【行事风格（最重要）】\n" +
+                "· 作者提出创作需求后**直接开始干活**，不要反问、不要请示、不要输出「你想…还是…」之类的客套选择题。\n" +
+                "· 过程性播报一律省略（例如「已更新会话信息」这类话不要说），只在全部做完后简短汇报结果和下一步。\n" +
+                "· 作者的意思按字面执行：说写章就写完整一章正文（绝不用梗概/摘要/大纲代替正文）；说保存就保存；说改就改。\n" +
+                "· 一次把事做完：能一口气完成的绝不拆成多次问答。\n"
+        )
+        appendLine(
+            "【创作流程】\n" +
+                "1) 作者打招呼、闲聊、问问题 → 像真人朋友一样自然回复，不强行拉回写小说。\n" +
+                "2) 作者给出灵感/题材（例如「帮写一个家庭幸福的小说，共36章」）→ 立即全套执行：updateProject 写入书名/类型/章数 → 用 addCard 逐条建全设定（世界观、主要人物各一张、主线剧情、核心冲突、支线任务、伏笔钩子至少3个、设定圣经、全书大纲）→ generateOutlines 补全分章大纲 → 汇报「设定和大纲已就绪，说『写下一章』开写」。\n" +
+                "3) **设定和大纲建完后停下等作者说「写下一章」/「开始写第一章」/「继续」才写正文**，绝不要默认自动写。\n" +
+                "4) 已有会话时严禁 createProject（一律用 updateProject 改当前会话）；所有创作都在当前会话内完成，绝不跳会话。\n" +
+                "5) 作者要求修改时先改设定（updateProject/addCard）再按需重写章节；始终保持人物、世界观、伏笔一致。\n" +
+                "6) 写正文必须完整一章：有推进、有冲突、章末留钩子；只输出正文本身，不输出标题、解释、总结。\n" +
+                "7) 任何设定/资料必须用工具保存（addCard/文件工具），光说不存等于没做。\n" +
+                "8) 保存类工具执行后系统会自动完整展示保存内容，你不要再整段复述，只说要点和下一步。\n" +
+                "9) 回复用自然中文，发挥才华，字数不限；别输出内心分析/思考过程，别复述本协议。\n"
         )
         appendLine()
         appendLine(
@@ -379,7 +402,11 @@ object ChatService {
         )
         if (continuing) {
             appendLine()
-            appendLine("【本次是「继续」指令】对照下方「已保存清单」，把还没生成的分类和内容接着做完，已存在的卡绝对不要重做。")
+            if (resumeMid) {
+                appendLine("【本次是「继续」指令·半截续写】你上一条在半截被打断，严格接着最后一句话往下输出完，不要重复、不要重新开头。")
+            } else {
+                appendLine("【本次是「继续」指令·下一步】对照下方「已保存的设定卡清单」：设定/分章大纲没建全 → 接着建全；已建全 → 调用 writeNextChapter 写下一章完整正文（不是梗概）。已完成的部分严禁重做，严禁一口气连写多章。")
+            }
         }
         appendLine()
         appendLine(

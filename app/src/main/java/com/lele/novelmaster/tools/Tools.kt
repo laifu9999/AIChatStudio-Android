@@ -135,7 +135,7 @@ object Tools {
             if (newTotal != null) add("目标章数→${newProject.targetChapters}")
             if (chWords != null) add("每章字数→${newProject.chapterWordTarget}")
         }.joinToString("、")
-        return ToolResult(true, "已更新会话信息：$changed", "当前会话仍是《${newProject.title}》，不会跳出本会话。")
+        return ToolResult(true, "✅ $changed（仍是《${newProject.title}》，继续在本会话工作）", "")
     }
 
     suspend fun listCards(pid: Long, cat: String? = null, query: String? = null): ToolResult {
@@ -312,7 +312,7 @@ object Tools {
             appendLine("【前5章剧情摘要】${recent.size} 条")
             recent.forEach { appendLine("  • 第${it.chapterIndex}章：${it.summary.take(50)}…") }
             appendLine()
-            appendLine("【上一章结尾】${if (prev != null && prev.content.isNotBlank()) "${prev.content.takeLast(600).length} 字（取结尾600字）" else "无"}")
+            appendLine("【上一章结尾】${if (prev != null && prev.content.isNotBlank()) "${prev.content.takeLast(300).length} 字" else "无"}")
             appendLine()
             appendLine("【相邻章节大纲】")
             appendLine(if (neighbors.isBlank()) "  无" else neighbors)
