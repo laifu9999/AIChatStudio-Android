@@ -1,16 +1,30 @@
 package com.lele.novelmaster.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 data class ChatMsg(val role: String, val content: String)
+
+/** 一次 AI 调用的结果；finishReason="length" 表示被 token 上限截断 */
+data class AiResult(
+    val text: String,
+    val finishReason: String = "stop"
+) {
+    val truncated: Boolean get() = finishReason == "length"
+}
 
 data class ProviderPreset(
     val name: String,
@@ -49,23 +63,84 @@ object AiProviders {
 
 object AiClient {
 
+    /**
+     * v5.7：连接 20s / 单次读 60s（流式下=两个数据包之间的最长间隔）。
+     * 老版本 readTimeout=600s 会让界面"假死"十几分钟——用户感觉就是"卡住、回复不了"。
+     */
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(600, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 
-    /** 对话补全（自动区分 OpenAI 兼容 / Gemini 原生） */
+    /** v5.7：把每个 AI 的允许输出长度开到最大（默认 16384），被平台拒绝时自动降级重试 */
+    const val MAX_TOKENS_HUGE = 16384
+    private val TOKEN_LADDER = listOf(16384, 8192, 4096, 2048, 1024)
+
+    /**
+     * 流式对话：拿到第一个字就回调，界面立刻能看到内容在增长。
+     * 流式不被支持时自动回退到普通对话。
+     */
+    suspend fun chatStream(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double = 0.85,
+        maxTokens: Int = MAX_TOKENS_HUGE,
+        onDelta: suspend (String) -> Unit
+    ): AiResult {
+        val ladder = (listOf(maxTokens) + TOKEN_LADDER).distinct().filter { it >= 512 }
+        var lastErr: Exception? = null
+        for (mt in ladder) {
+            try {
+                val r = if (cfg.provider == "gemini")
+                    streamGemini(cfg, messages, temperature, mt, onDelta)
+                else
+                    streamOpenai(cfg, messages, temperature, mt, onDelta)
+                if (r.text.isNotBlank()) return r
+                // 流式拿到空内容（部分老模型 stream 支持不全）→ 回退普通对话
+                val plain = chat(cfg, messages, temperature, mt)
+                if (plain.isNotBlank()) {
+                    onDelta(plain)
+                    return AiResult(plain, "stop")
+                }
+                return r
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e   // 用户停止：立刻中断，不重试
+                lastErr = e
+                if (!isMaxTokensError(e.message)) break
+            }
+        }
+        throw lastErr ?: RuntimeException("AI 调用失败")
+    }
+
+    /** 对话补全（自动区分 OpenAI 兼容 / Gemini 原生），max_tokens 过大时自动降级重试 */
     suspend fun chat(
         cfg: ApiConfig,
         messages: List<ChatMsg>,
         temperature: Double = 0.85,
-        maxTokens: Int = 4096
+        maxTokens: Int = MAX_TOKENS_HUGE
     ): String = withContext(Dispatchers.IO) {
-        if (cfg.provider == "gemini") chatGemini(cfg, messages, temperature, maxTokens)
-        else chatOpenai(cfg, messages, temperature, maxTokens)
+        val ladder = (listOf(maxTokens) + TOKEN_LADDER).distinct().filter { it >= 512 }
+        var lastErr: Exception? = null
+        for (mt in ladder) {
+            try {
+                val r = if (cfg.provider == "gemini")
+                    chatGemini(cfg, messages, temperature, mt)
+                else
+                    chatOpenai(cfg, messages, temperature, mt)
+                if (r.isNotBlank()) return@withContext r
+                lastErr = RuntimeException("AI返回为空")
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                lastErr = e
+                if (!isMaxTokensError(e.message)) break
+            }
+        }
+        throw lastErr ?: RuntimeException("AI 调用失败")
     }
 
     /** 测试连接：发一句极短的请求 */
@@ -81,114 +156,261 @@ object AiClient {
 
     /** 自动获取该服务下所有可用模型 */
     suspend fun listModels(cfg: ApiConfig): List<String> = withContext(Dispatchers.IO) {
-        try {
-            if (cfg.provider == "gemini") {
-                val body = httpGet("https://generativelanguage.googleapis.com/v1beta/models?key=${cfg.apiKey}", null)
-                val arr = JSONObject(body).optJSONArray("models") ?: return@withContext emptyList()
-                (0 until arr.length()).mapNotNull { i ->
-                    arr.optJSONObject(i)?.optString("name")
-                        ?.removePrefix("models/")
-                        ?.takeIf { it.contains("gemini") }
-                }
-            } else {
-                val body = httpGet(cfg.baseUrl.trimEnd('/') + "/models", "Bearer ${cfg.apiKey}")
-                val arr = JSONObject(body).optJSONArray("data") ?: return@withContext emptyList()
-                (0 until arr.length()).mapNotNull { i ->
-                    arr.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
-                }.sorted()
+        if (cfg.provider == "gemini") {
+            val body = httpGet("https://generativelanguage.googleapis.com/v1beta/models?key=${cfg.apiKey}", null)
+            val arr = JSONObject(body).optJSONArray("models") ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                arr.optJSONObject(i)?.optString("name")
+                    ?.removePrefix("models/")
+                    ?.takeIf { it.contains("gemini") }
             }
-        } catch (e: Exception) {
-            throw e
+        } else {
+            val body = httpGet(cfg.baseUrl.trimEnd('/') + "/models", "Bearer ${cfg.apiKey}")
+            val arr = JSONObject(body).optJSONArray("data") ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                arr.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
+            }.sorted()
         }
+    }
+
+    /** 平台拒绝"太大 max_tokens"时的特征：自动降一档重试 */
+    private fun isMaxTokensError(msg: String?): Boolean {
+        val m = msg?.lowercase().orEmpty()
+        return m.contains("max_tokens") || m.contains("maxtokens") ||
+            m.contains("maxoutputtokens") || m.contains("max_output") ||
+            m.contains("too large") || m.contains("too long") ||
+            m.contains("exceed") || m.contains("超出") || m.contains("上限") ||
+            m.contains("maximum context") || m.contains("greater than")
     }
 
     // ---------- OpenAI 兼容 ----------
 
-    private fun openaiBody(cfg: ApiConfig, messages: List<ChatMsg>, temperature: Double, maxTokens: Int): String {
+    private fun openaiBody(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int,
+        stream: Boolean = false
+    ): String {
         val arr = JSONArray()
         messages.forEach { arr.put(JSONObject().put("role", it.role).put("content", it.content)) }
-        return JSONObject()
+        val o = JSONObject()
             .put("model", cfg.model)
             .put("messages", arr)
             .put("temperature", temperature)
             .put("max_tokens", maxTokens)
-            .toString()
+        if (stream) o.put("stream", true)
+        return o.toString()
     }
 
-    private suspend fun chatOpenai(cfg: ApiConfig, messages: List<ChatMsg>, temperature: Double, maxTokens: Int): String =
-        withContext(Dispatchers.IO) {
-            if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
-            val url = cfg.baseUrl.trimEnd('/') + "/chat/completions"
-            val req = Request.Builder()
-                .url(url)
-                .header("Authorization", "Bearer ${cfg.apiKey}")
-                .post(openaiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
-                .build()
-            client.newCall(req).execute().use { resp ->
-                val body = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
-                val msg = JSONObject(body)
-                    .optJSONArray("choices")?.optJSONObject(0)
-                    ?.optJSONObject("message")
-                // content 为空时回退 reasoning_content（DeepSeek-R1/V3-Flash 等推理模型把正文放这里）
-                var content = msg?.optString("content").orEmpty()
-                if (content.isBlank()) {
-                    content = msg?.optString("reasoning_content").orEmpty()
-                }
-                if (content.isBlank()) {
-                    // 兜底：拼接 reasoning_content（有的模型叫 reasoning）
-                    content = msg?.optString("reasoning").orEmpty()
-                }
-                if (content.isBlank()) throw RuntimeException("AI返回为空: ${body.take(300)}")
-                content
+    private suspend fun streamOpenai(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int,
+        onDelta: suspend (String) -> Unit
+    ): AiResult = withContext(Dispatchers.IO) {
+        if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
+        val req = Request.Builder()
+            .url(cfg.baseUrl.trimEnd('/') + "/chat/completions")
+            .header("Authorization", "Bearer ${cfg.apiKey}")
+            .header("Accept", "text/event-stream")
+            .post(openaiBody(cfg, messages, temperature, maxTokens, true).toRequestBody(JSON_TYPE))
+            .build()
+
+        executeCall(req).use { resp ->
+            if (!resp.isSuccessful) {
+                val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
+                throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
             }
+            val reader = resp.body?.charStream() ?: return@use AiResult("", "stop")
+            val sb = StringBuilder()
+            var finish = "stop"
+            try {
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    val t = line.trim()
+                    if (t.isEmpty() || !t.startsWith("data:")) continue
+                    val payload = t.removePrefix("data:").trim()
+                    if (payload == "[DONE]" || payload.isEmpty()) break
+                    runCatching {
+                        val obj = JSONObject(payload)
+                        val ch = obj.optJSONArray("choices")?.optJSONObject(0)
+                        ch?.optString("finish_reason")
+                            ?.takeIf { it.isNotBlank() && it != "null" }
+                            ?.let { finish = it }
+                        val d = ch?.optJSONObject("delta")
+                        var piece = d?.optString("content").orEmpty()
+                        if (piece.isEmpty()) piece = d?.optString("reasoning_content").orEmpty()
+                        if (piece.isEmpty()) piece = d?.optString("reasoning").orEmpty()
+                        if (piece.isNotEmpty()) {
+                            sb.append(piece)
+                            onDelta(piece)
+                        }
+                    }
+                }
+            } catch (io: java.io.IOException) {
+                // 用户点「停止」时 Call 被 cancel，读流会抛 IOException —— 转成正常取消，别报成失败
+                if (!currentCoroutineContext().isActive) throw CancellationException("用户停止")
+                throw io
+            }
+            AiResult(sb.toString(), finish)
         }
+    }
+
+    private suspend fun chatOpenai(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
+    ): String = withContext(Dispatchers.IO) {
+        if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
+        val req = Request.Builder()
+            .url(cfg.baseUrl.trimEnd('/') + "/chat/completions")
+            .header("Authorization", "Bearer ${cfg.apiKey}")
+            .post(openaiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
+            .build()
+        executeCall(req).use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
+            val msg = JSONObject(body)
+                .optJSONArray("choices")?.optJSONObject(0)
+                ?.optJSONObject("message")
+            // content 为空时回退 reasoning_content（DeepSeek-R1 等推理模型把正文放这里）
+            var content = msg?.optString("content").orEmpty()
+            if (content.isBlank()) content = msg?.optString("reasoning_content").orEmpty()
+            if (content.isBlank()) content = msg?.optString("reasoning").orEmpty()
+            if (content.isBlank()) throw RuntimeException("AI返回为空: ${body.take(300)}")
+            content
+        }
+    }
 
     // ---------- Gemini 原生 ----------
 
-    private suspend fun chatGemini(cfg: ApiConfig, messages: List<ChatMsg>, temperature: Double, maxTokens: Int): String =
-        withContext(Dispatchers.IO) {
-            if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
-            val sys = messages.firstOrNull { it.role == "system" }?.content
-            val contents = JSONArray()
-            messages.filter { it.role != "system" }.forEach { m ->
-                contents.put(
-                    JSONObject()
-                        .put("role", if (m.role == "assistant") "model" else "user")
-                        .put("parts", JSONArray().put(JSONObject().put("text", m.content)))
-                )
-            }
-            val json = JSONObject().put("contents", contents)
-            if (!sys.isNullOrBlank()) {
-                json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
-            }
-            json.put(
-                "generationConfig",
-                JSONObject().put("temperature", temperature).put("maxOutputTokens", maxTokens)
+    private fun geminiBody(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
+    ): String {
+        val sys = messages.firstOrNull { it.role == "system" }?.content
+        val contents = JSONArray()
+        messages.filter { it.role != "system" }.forEach { m ->
+            contents.put(
+                JSONObject()
+                    .put("role", if (m.role == "assistant") "model" else "user")
+                    .put("parts", JSONArray().put(JSONObject().put("text", m.content)))
             )
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:generateContent?key=${cfg.apiKey}"
-            val req = Request.Builder()
-                .url(url)
-                .post(json.toString().toRequestBody(JSON_TYPE))
-                .build()
-            client.newCall(req).execute().use { resp ->
-                val body = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
-                val cand = JSONObject(body).optJSONArray("candidates")?.optJSONObject(0)
-                val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
-                val sb = StringBuilder()
-                if (parts != null) {
-                    for (i in 0 until parts.length()) {
-                        sb.append(parts.optJSONObject(i)?.optString("text").orEmpty())
+        }
+        val json = JSONObject().put("contents", contents)
+        if (!sys.isNullOrBlank()) {
+            json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
+        }
+        json.put(
+            "generationConfig",
+            JSONObject().put("temperature", temperature).put("maxOutputTokens", maxTokens)
+        )
+        return json.toString()
+    }
+
+    private suspend fun streamGemini(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int,
+        onDelta: suspend (String) -> Unit
+    ): AiResult = withContext(Dispatchers.IO) {
+        if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
+        val url =
+            "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:streamGenerateContent?alt=sse&key=${cfg.apiKey}"
+        val req = Request.Builder()
+            .url(url)
+            .header("Accept", "text/event-stream")
+            .post(geminiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
+            .build()
+        executeCall(req).use { resp ->
+            if (!resp.isSuccessful) {
+                val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
+                throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
+            }
+            val reader = resp.body?.charStream() ?: return@use AiResult("", "stop")
+            val sb = StringBuilder()
+            var finish = "stop"
+            try {
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    val t = line.trim()
+                    if (t.isEmpty() || !t.startsWith("data:")) continue
+                    val payload = t.removePrefix("data:").trim()
+                    if (payload == "[DONE]" || payload.isEmpty()) break
+                    runCatching {
+                        val obj = JSONObject(payload)
+                        val cand = obj.optJSONArray("candidates")?.optJSONObject(0)
+                        cand?.optString("finishReason")?.takeIf { it.isNotBlank() }?.let { finish = it }
+                        val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
+                        if (parts != null) {
+                            for (i in 0 until parts.length()) {
+                                val piece = parts.optJSONObject(i)?.optString("text").orEmpty()
+                                if (piece.isNotEmpty()) {
+                                    sb.append(piece)
+                                    onDelta(piece)
+                                }
+                            }
+                        }
                     }
                 }
-                val content = sb.toString()
-                if (content.isBlank()) throw RuntimeException("Gemini返回为空: ${body.take(300)}")
-                content
+            } catch (io: java.io.IOException) {
+                if (!currentCoroutineContext().isActive) throw CancellationException("用户停止")
+                throw io
             }
+            AiResult(sb.toString(), if (finish == "MAX_TOKENS") "length" else finish)
         }
+    }
+
+    private suspend fun chatGemini(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
+    ): String = withContext(Dispatchers.IO) {
+        if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
+        val url =
+            "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:generateContent?key=${cfg.apiKey}"
+        val req = Request.Builder()
+            .url(url)
+            .post(geminiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
+            .build()
+        executeCall(req).use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
+            val cand = JSONObject(body).optJSONArray("candidates")?.optJSONObject(0)
+            val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
+            val sb = StringBuilder()
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    sb.append(parts.optJSONObject(i)?.optString("text").orEmpty())
+                }
+            }
+            val content = sb.toString()
+            if (content.isBlank()) throw RuntimeException("Gemini返回为空: ${body.take(300)}")
+            content
+        }
+    }
 
     // ---------- HTTP 基础 ----------
+
+    /** v5.7：可取消的 execute —— 用户点「停止」时真正断开连接，不再"卡住没反应" */
+    private suspend fun executeCall(req: Request): Response =
+        suspendCancellableCoroutine { cont ->
+            val call = client.newCall(req)
+            cont.invokeOnCancellation { runCatching { call.cancel() } }
+            try {
+                val r = call.execute()
+                if (cont.isActive) cont.resume(r) else r.close()
+            } catch (e: Throwable) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+        }
 
     private fun httpGet(url: String, auth: String?): String {
         val b = Request.Builder().url(url)

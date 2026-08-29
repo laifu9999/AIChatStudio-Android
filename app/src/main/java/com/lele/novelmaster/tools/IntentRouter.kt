@@ -42,6 +42,17 @@ object IntentRouter {
         val asking = Regex("[??？]|吗\\s*$|好了没有|好了吗|可以了吗|准备好了|是不是|能不能|可不可以|什么时候").containsMatchIn(raw) ||
             raw.trimEnd().endsWith("没有")
 
+        // v5.7：AI 上一轮明显没写完（结尾没收束）时，作者说「继续/继续写/接着写/往下」= 让它接着输出。
+        // 这类指令绝不能被本地路由截去"写下一章"——那正是"叫继续没反应 / 反而直接开写下一章"的根因。
+        val cont = Regex("^(继续|接着|往下|然后呢|还有呢|没写完|写下去|continue)", RegexOption.IGNORE_CASE).containsMatchIn(raw)
+        var resuming = false
+        if (cont && currentPid != null && currentPid > 0L) {
+            val last = Repo.dao.messagesFlow(currentPid).first()
+                .lastOrNull { it.role == "assistant" || it.role == "tool" }
+            val s = last?.content?.trimEnd().orEmpty()
+            resuming = s.isNotEmpty() && s.last() !in "。！？…」』”\"!?~）)】"
+        }
+
         // ------- 项目管理 -------
         if (Regex("^(开新书|新建小说|创建项目|新写一本|新开一本)").containsMatchIn(raw)) {
             // 让 AI 处理（更智能地抽取书名/类型）
@@ -72,6 +83,9 @@ object IntentRouter {
         }
 
         // ------- 章节操作 -------
+        // v5.7：正在续写上一轮未写完的内容时，一切交给 AI，本地不再抢着写章
+        if (resuming) return null
+
         if (Regex("^(写下?一?章|继续写|接着写|写吧|开写)").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我你要写哪本书，先创建或选一本。")
             return Tools.writeNextChapter(pid, context)

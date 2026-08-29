@@ -178,6 +178,11 @@ fun ChatScreen(nav: NavHostController) {
     // v5.5：打字机效果当前显示到的位置（key=message id）
     var typedContents by remember { mutableStateOf<Map<Long, String>>(emptyMap()) }
     var creatingSession by remember { mutableStateOf(false) }
+    // v5.7：AI 流式输出的实时文本（null = 没在流式）
+    var streamingText by remember { mutableStateOf<String?>(null) }
+    // v5.7：已经实时显示过、不需要再跑打字机的消息 id
+    var liveShownId by remember { mutableStateOf<Long?>(null) }
+    var typeJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
     val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
@@ -203,24 +208,32 @@ fun ChatScreen(nav: NavHostController) {
     }
     LaunchedEffect(currentPid) { ChatSessionMemory.lastPid = currentPid }
 
-    // v5.6：reverseLayout —— 最新消息永远固定在最下面，新内容把旧内容往上推，不用手动追
-    // （index 0 = 最新消息；只有用户本来就在底部附近时才自动跟随，翻历史时不打扰）
-    LaunchedEffect(currentPid) {
-        if (messages.isNotEmpty()) listState.scrollToItem(0)
-    }
-    LaunchedEffect(messages.size, messages.lastOrNull()?.id, busy) {
-        if (messages.isNotEmpty() && listState.firstVisibleItemIndex <= 1) {
-            listState.scrollToItem(0)
+    // v5.7：消息区用正常顺序（最新在下面），内容少时紧贴顶栏，不浪费上方空间；
+    //      有新消息/流式输出时自动跟随到底部，不用手动滑。
+    suspend fun scrollToBottomIfNear() {
+        val total = messages.size + (if (streamingText != null) 1 else 0)
+        if (total <= 0) return
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (messages.size <= 3 || total - 1 - lastVisible <= 3) {
+            listState.scrollToItem(total - 1)
         }
+    }
+
+    LaunchedEffect(currentPid) {
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
+    }
+    LaunchedEffect(messages.size) { scrollToBottomIfNear() }
+    LaunchedEffect(streamingText) { scrollToBottomIfNear() }
+
+    LaunchedEffect(messages.size, messages.lastOrNull()?.id, busy) {
         val last = messages.lastOrNull()
-        if (last != null && last.role != "user" && typedContents[last.id] != last.content) {
-            scope.launch {
+        if (last != null && last.role != "user" && last.id != liveShownId && typedContents[last.id] != last.content) {
+            typeJob?.cancel()
+            typeJob = scope.launch {
                 typewriterDisplay(
                     last.content,
                     onUpdate = { typedContents = typedContents + (last.id to it) },
-                    onScroll = {
-                        if (listState.firstVisibleItemIndex <= 1) listState.scrollToItem(0)
-                    }
+                    onScroll = { scrollToBottomIfNear() }
                 )
             }
         }
@@ -244,9 +257,25 @@ fun ChatScreen(nav: NavHostController) {
         if (t.isEmpty() || busy) return
         input = ""
         busy = true
+        streamingText = ""
         chatJob = scope.launch {
-            ChatService.handle(ctx, currentPid, t) { newPid -> if (newPid != 0L) currentPid = newPid }
-            busy = false
+            var insertedId: Long? = null
+            try {
+                insertedId = ChatService.handle(ctx, currentPid, t, { newPid -> if (newPid != 0L) currentPid = newPid }) { s ->
+                    streamingText = s
+                }
+            } finally {
+                // v5.7：AI 已经在界面上逐字显示过了，落库后不再重播打字机动画
+                val finalText = streamingText
+                liveShownId = insertedId
+                if (insertedId != null && !finalText.isNullOrBlank()) {
+                    typedContents = typedContents + (insertedId to finalText)
+                }
+                typeJob?.cancel()
+                typeJob = null
+                streamingText = null
+                busy = false
+            }
         }
     }
 
@@ -334,23 +363,36 @@ fun ChatScreen(nav: NavHostController) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
-                    reverseLayout = true,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
-                    // v5.6：reverseLayout 下 padding 仍是物理方向；顶部只留 2dp，去掉气泡上方空白
-                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 8.dp)
+                    // v5.7：只跟顶栏留 4dp 间距，把剩下的空间全部给聊天
+                    contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp)
                 ) {
-                    // index 0 = 最新消息（显示在底部）
-                    val shown = messages.asReversed()
-                    items(shown, key = { it.id }) { m ->
+                    items(messages, key = { it.id }) { m ->
                         val displayed = typedContents[m.id] ?: m.content
                         MessageBubble(m.copy(content = displayed), th, msgFont, msgSize)
                     }
-                    if (busy) {
+                    val st = streamingText
+                    if (st != null) {
+                        item {
+                            if (st.isNotBlank()) {
+                                MessageBubble(
+                                    Message(projectId = currentPid, role = "assistant", content = st, kind = "text"),
+                                    th, msgFont, msgSize
+                                )
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
+                                    CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    } else if (busy) {
                         item {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
                                 CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
                                 Spacer(Modifier.width(8.dp))
-                                Text("乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                Text("乐乐正在思考…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
                             }
                         }
                     }

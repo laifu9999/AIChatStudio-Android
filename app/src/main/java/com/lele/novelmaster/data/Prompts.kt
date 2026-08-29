@@ -58,6 +58,9 @@ object Prompts {
         appendLine("4. 每章必须有推进、有冲突、章末留钩子（悬念）。多用场景与对话，少干巴巴的旁白。")
         appendLine("5. 只输出正文本身：不要输出章节标题、章节号、序号、解释、总结或任何多余内容。")
         appendLine("6. 必须一次性写完整一章：从开头一路写到章末钩子，情节自然收束，绝不允许中途停笔、省略或写“未完待续/下半部分”。")
+        appendLine("7. 绝不重复：不要复述前情摘要里已经写过的情节，不要写“正如前文所说”“上一章提到”这类回顾句，直接推进新的戏。")
+        appendLine("8. 不写任何创作说明：不要出现“本章完”“作者有话”“（此处省略）”“由于篇幅”之类的话，写完最后一个句号就停。")
+        appendLine("9. 笔法：场景、动作、对话、心理交替推进；每 300~500 字给一个新的信息点或小转折，保持张力。")
         appendLine()
         appendLine("【设定资料】")
         append(budgetCardBlock(selected))
@@ -141,17 +144,37 @@ object Prompts {
         append("请为第${from}章到第${to}章编写分章大纲，共${count}行。每章严格一行，格式：第N章《标题》：剧情要点（包含出场人物、关键事件、本章钩子，重要处注明埋设/回收的伏笔）。")
     }
 
-    /** 灵感分析 → 生成设定卡 */
-    const val INSPIRE_SYSTEM = "你是资深网文策划师。根据用户的灵感与需求输出结构化设定。严格按行输出，每行格式：分类｜名称｜内容。分类只能用：全书大纲、世界观、人物设定、主线剧情、支线任务、伏笔钩子、核心冲突、设定圣经、辅助设定。不要输出其他任何内容。"
+    /** v5.7：灵感分析 → 生成设定卡（按"还缺哪些分类"精准下单，一次只补一批，内容能写足） */
+    const val INSPIRE_SYSTEM =
+        "你是资深网文策划师。根据用户的灵感与需求输出结构化设定。\n" +
+            "严格按行输出，一行一条，格式：分类｜名称｜内容（分隔符必须是中文全角竖线｜）\n" +
+            "分类只能用：全书大纲、世界观、人物设定、主线剧情、支线任务、伏笔钩子、核心冲突、设定圣经、辅助设定\n" +
+            "要求：\n" +
+            "1) 每条的「内容」要写足 80~300 字，信息密度高、可直接用于写作，不要写空话套话。\n" +
+            "2) 只输出要求补充的分类，一行一条，不要编号、不要 Markdown 符号、不要解释、不要空行标题。\n" +
+            "3) 人物设定请为每个主要人物单独一行。伏笔钩子至少 3 条。支线任务 2~4 条。\n" +
+            "4) 内容里不要再出现｜符号，也不要换行，一整条必须写在同一行内。"
 
-    fun buildInspireUser(project: Project, inspiration: String): String = buildString {
+    fun buildInspireUser(
+        project: Project,
+        inspiration: String,
+        need: List<String>,
+        existing: List<SettingCard>
+    ): String = buildString {
         appendLine("书名：${project.title}（类型：${project.genre}）")
         if (project.description.isNotBlank()) appendLine("已有简介：${project.description}")
         appendLine()
         appendLine("用户的灵感与需求：")
         appendLine(inspiration)
         appendLine()
-        append("请生成完整设定：世界观、主角与主要人物（各一行）、主线剧情、核心冲突、2~4个支线任务、至少3个伏笔钩子（名称简短便于追踪）、设定圣经摘要、全书大纲（分阶段）。")
+        appendLine("本轮只需补充以下分类（每个分类至少一条）：${need.joinToString("、")}")
+        if (existing.isNotEmpty()) {
+            appendLine()
+            appendLine("【已建成的设定卡（不要重复生成，保持与它们一致）】")
+            existing.take(30).forEach { appendLine("${it.category}｜${it.name}：${it.content.take(80)}") }
+        }
+        appendLine()
+        append("现在请只输出「${need.joinToString("、")}」这些分类的设定行，每行：分类｜名称｜内容。")
     }
 
     /** 编辑器内续写（也用于章节补完）；words=期望续写字数 */

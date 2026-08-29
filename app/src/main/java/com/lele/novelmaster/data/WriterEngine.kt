@@ -80,7 +80,7 @@ object WriterEngine {
                 cfg,
                 listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
                 temperature = 0.7,
-                maxTokens = 4096
+                maxTokens = 8192
             )
             applyOutlines(dao, chapters, reply)
         }
@@ -130,31 +130,82 @@ object WriterEngine {
         }
     }
 
-    /** 灵感分析：根据用户输入自动生成一整套设定卡（并全部落盘到 files/设定卡/） */
+    /**
+     * 灵感分析：自动生成一整套设定卡（并全部落盘到 files/设定卡/）
+     * v5.7：按"还缺哪些分类"分批下单 + 自动补齐（最多 3 轮），
+     *      一次 AI 输出不完就再要下一批，彻底解决「设定卡只建了一两张就断 / 内容被截断」。
+     */
     suspend fun generateCardsFromInspire(projectId: Long, inspiration: String, context: Context? = null): String? {
         val dao = Repo.dao
         val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
         val project = dao.project(projectId) ?: return "项目不存在"
-        val reply = AiClient.chat(
-            cfg,
-            listOf(
-                ChatMsg("system", Prompts.INSPIRE_SYSTEM),
-                ChatMsg("user", Prompts.buildInspireUser(project, inspiration))
-            ),
-            temperature = 0.8,
-            maxTokens = 4096
-        )
+
+        // 一本小说必须建齐的核心分类
+        val required = listOf("世界观", "人物设定", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "支线任务", "伏笔钩子")
+        var count = 0
+        var pass = 0
+        var lastSnippet = ""
+
+        while (pass < 3) {
+            val have = dao.cards(projectId)
+            val need = required.filter { cat -> have.none { c -> c.category == cat } }
+            if (need.isEmpty()) break
+            pass++
+            val reply = try {
+                AiClient.chat(
+                    cfg,
+                    listOf(
+                        ChatMsg("system", Prompts.INSPIRE_SYSTEM),
+                        ChatMsg("user", Prompts.buildInspireUser(project, inspiration, need, have))
+                    ),
+                    temperature = 0.8,
+                    maxTokens = 8192
+                )
+            } catch (e: Exception) {
+                if (count == 0) return "AI 生成设定失败：${e.message?.take(200)}"
+                break
+            }
+            lastSnippet = reply.take(200)
+            val added = applyInspireLines(projectId, reply, context)
+            count += added
+            if (added == 0) break
+        }
+        return if (count == 0)
+            "AI未能生成可识别的设定（回复片段：$lastSnippet）。建议换一个模型，或把灵感说得更具体一点。"
+        else null
+    }
+
+    /** 解析「分类｜名称｜内容」行并落库落盘，返回新增条数 */
+    private suspend fun applyInspireLines(projectId: Long, reply: String, context: Context?): Int {
+        val dao = Repo.dao
         var count = 0
         for (raw in reply.lines()) {
-            val line = raw.trim().trimStart('-', '*', '·').trim()
-            if (!line.contains("｜") && !line.contains("|")) continue
-            val parts = line.split("｜", "|").map { it.trim() }
+            var line = raw.trim()
+                .trimStart('-', '*', '·', '•', '#', '>')
+                .trim()
+            // 去掉行首的 1. / 1、/ (1) 之类编号
+            line = line.replace(Regex("^[0-9]{1,2}[.、)）]\\s*"), "").trim()
+            val parts = when {
+                line.contains("｜") -> line.split("｜")
+                line.contains("|") -> line.split("|")
+                line.contains("：") && line.indexOf("：") < 12 -> line.split("：", limit = 3)
+                else -> continue
+            }
             if (parts.size < 3) continue
-            val cat = parts[0].removeSurrounding("【", "】")
-            if (cat !in CardCategories.all) continue
-            val name = parts[1].take(50)
-            if (name.isBlank()) continue
-            val content = parts.drop(2).joinToString("｜")
+            var cat = parts[0].trim().removeSurrounding("【", "】").removeSurrounding("[", "]").trim()
+            // 兼容 「人物设定 - 林墨」/「人物设定：林墨」这类写法
+            if (cat !in CardCategories.all) {
+                val hit = CardCategories.all.firstOrNull { cat.contains(it) }
+                if (hit != null) {
+                    cat = hit
+                } else continue
+            }
+            val name = parts[1].trim().trim('《', '》', '「', '」', '"', '\'').take(50)
+            if (name.isBlank() || name.length > 50) continue
+            val content = parts.drop(2).joinToString("｜").trim()
+            if (content.length < 4) continue
+            // 同名同分类视为已存在，跳过，避免重复建卡
+            if (dao.findCard(projectId, cat, name) != null) continue
             dao.insertCard(
                 SettingCard(
                     projectId = projectId,
@@ -173,7 +224,7 @@ object WriterEngine {
             } catch (_: Exception) { }
             count++
         }
-        return if (count == 0) "AI未能生成可识别的设定，回复片段：${reply.take(200)}" else null
+        return count
     }
 
     /** v5.6：结尾是否已收束（以句号/叹号/问号/省略号/引号等结尾），用于判断章节是否写完 */
@@ -205,25 +256,27 @@ object WriterEngine {
         }
         dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
 
-        var content = cleanBody(AiClient.chat(cfg, messages, maxTokens = 4096).trim(), ch0.chapterIndex, ch0.title)
+        // v5.7：字数上限开到最大（16384），让 AI 一气写完，不再"写一小段就停"
+        var content = cleanBody(AiClient.chat(cfg, messages).trim(), ch0.chapterIndex, ch0.title)
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")
 
-        // v5.6：完整性保障——太短或结尾没有收束标点时续写补完（最多2次，只在需要时才多花 token）
+        // v5.6/v5.7：完整性保障——太短或结尾没有收束标点时续写补完（最多5次，保证每章都写完整）
         val target = project.chapterWordTarget
         var fixUps = 0
-        while (fixUps < 2 && (content.length < target * 55 / 100 || !endsWell(content))) {
+        while (fixUps < 5 && (content.length < target * 85 / 100 || !endsWell(content))) {
             fixUps++
             try {
-                val words = (target - content.length).coerceIn(300, 1500)
+                val words = (target - content.length).coerceIn(300, 2200)
                 val cont = AiClient.chat(
                     cfg,
                     Prompts.continueMessages(project, cards, ch0, content, words),
-                    temperature = 0.85,
-                    maxTokens = 3000
+                    temperature = 0.85
                 ).trim()
                 if (cont.isBlank()) break
-                content = cleanBody(content + "\n" + cont, ch0.chapterIndex, ch0.title)
-                if (endsWell(content) && content.length >= target * 55 / 100) break
+                val merged = cleanBody(content + "\n" + cont, ch0.chapterIndex, ch0.title)
+                if (merged.length <= content.length + 20 && endsWell(content)) break
+                content = merged
+                if (endsWell(content) && content.length >= target * 85 / 100) break
             } catch (_: Exception) { break }
         }
 
@@ -257,7 +310,7 @@ object WriterEngine {
                     )
                 ),
                 temperature = 0.3,
-                maxTokens = 1024
+                maxTokens = 2048
             )
             val recovered = sumReply.lineSequence()
                 .firstOrNull { it.contains("回收伏笔") }
@@ -297,7 +350,7 @@ object WriterEngine {
         val project = dao.project(ch.projectId) ?: throw IllegalStateException("项目不存在")
         val cards = dao.cards(ch.projectId)
         val messages = Prompts.continueMessages(project, cards, ch, currentText)
-        val out = AiClient.chat(cfg, messages, temperature = 0.9, maxTokens = 2048)
+        val out = AiClient.chat(cfg, messages, temperature = 0.9)
         return currentText + "\n" + out.trim()
     }
 
@@ -311,7 +364,7 @@ object WriterEngine {
         val chapters = dao.chapters(ch.projectId)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
-        val content = cleanBody(AiClient.chat(cfg, messages, maxTokens = 4096).trim(), ch.chapterIndex, ch.title)
+        val content = cleanBody(AiClient.chat(cfg, messages).trim(), ch.chapterIndex, ch.title)
         if (content.isBlank()) return "AI返回空内容"
         dao.updateChapter(
             ch.copy(
@@ -345,7 +398,7 @@ object WriterEngine {
         val cards = dao.cards(projectId)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
         messages.add(ChatMsg("user", instruction))
-        val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8, maxTokens = 4096).trim(), chapterIndex, ch.title)
+        val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
         if (replace && out.length >= 300) {
             dao.updateChapter(
@@ -377,7 +430,7 @@ object WriterEngine {
             cfg,
             listOf(ChatMsg("system", sys), ChatMsg("user", instruction)),
             temperature = 0.85,
-            maxTokens = 3000
+            maxTokens = 8192
         ).trim()
         if (out.isBlank()) return "AI返回为空" to ""
         return null to out
