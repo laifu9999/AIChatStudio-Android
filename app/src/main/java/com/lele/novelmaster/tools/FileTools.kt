@@ -76,7 +76,6 @@ object FileTools {
                         val (base, f) = resolve(context, pid, path)
                         val content = args.optString("content")
                         f.parentFile?.mkdirs()
-                        val before = if (f.exists()) f.length() else 0L
                         f.appendText(content, Charsets.UTF_8)
                         ToolResult(true, "✅ 已追加：${rel(base, f)}（本次 ${content.length} 字，现共 ${f.length()} 字）",
                             "📄 ${rel(base, f)}\n\n" + preview(content))
