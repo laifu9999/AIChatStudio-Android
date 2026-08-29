@@ -127,7 +127,7 @@ object AiClient {
                     return r
                 }
                 // 流式拿到空内容（部分老模型 stream 支持不全）→ 回退普通对话
-                val plain = chat(cfg, messages, temperature, mt)
+                val plain = chatPlain(cfg, messages, temperature, mt)
                 if (plain.isNotBlank()) {
                     onDelta(plain)
                     return AiResult(plain, "stop")
@@ -142,12 +142,35 @@ object AiClient {
         throw lastErr ?: RuntimeException("AI 调用失败")
     }
 
-    /** 对话补全（自动区分 OpenAI 兼容 / Gemini 原生），max_tokens 过大时自动降级重试 */
+    /**
+     * v6.2：对话补全统一走流式管道（可取消、无 60s 超时问题）。
+     * 写章/大纲/摘要/专家功能等所有旧调用点因此全部变成流式，无需逐个改造。
+     * 底层 chatPlain 仅在流式完全不可用时兜底。
+     */
     suspend fun chat(
         cfg: ApiConfig,
         messages: List<ChatMsg>,
         temperature: Double = 0.85,
         maxTokens: Int = MAX_TOKENS_HUGE
+    ): String = withContext(Dispatchers.IO) {
+        val r = try {
+            chatStream(cfg, messages, temperature, maxTokens) { }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            val plain = chatPlain(cfg, messages, temperature, maxTokens).trim()
+            if (plain.isNotBlank()) return@withContext plain
+            throw e
+        }
+        val t = r.text.trim()
+        if (t.isNotBlank()) t else throw RuntimeException("AI返回为空")
+    }
+
+    /** 非流式兜底（max_tokens 过大时自动降级重试） */
+    private suspend fun chatPlain(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
     ): String = withContext(Dispatchers.IO) {
         val ladder = ladderFor(cfg, maxTokens)
         var lastErr: Exception? = null

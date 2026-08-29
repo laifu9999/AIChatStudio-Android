@@ -146,7 +146,9 @@ object WriterEngine {
         var pass = 0
         var lastSnippet = ""
 
-        while (pass < 3) {
+        // v6.2：正常情况一遍写完（提示词已规定顺序与条数）；只有一条都没解析出来时才重试一次。
+        // 之前最多 3 轮"补缺"是重复生成设定卡的主要来源——第2轮模型经常把世界观再写一遍（名字不同=新卡）。
+        while (pass < 2) {
             val have = dao.cards(projectId)
             val need = required.filter { cat -> have.none { c -> c.category == cat } }
             if (need.isEmpty()) break
@@ -214,16 +216,30 @@ object WriterEngine {
         if (name.isBlank() || name.length > 50) return 0
         val content = parts.drop(2).joinToString("｜").trim()
         if (content.length < 4) return 0
-        // 同名同分类视为已存在，跳过，避免重复建卡
-        if (dao.findCard(projectId, cat, name) != null) return 0
+        // v6.2：防重复——同名同分类 → 跳过；单卡分类（世界观/主线/冲突/圣经/全书大纲/剧情进度）
+        // 一类只允许一张，模型又输出同类不同名的 → 更新已有卡，绝不新建
+        val singleCats = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")
+        val prio = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1
+        val status = if (cat == "伏笔钩子") "埋设中" else ""
+        val sameName = dao.findCard(projectId, cat, name)
+        val dupCard = sameName ?: if (cat in singleCats) dao.cards(projectId).firstOrNull { it.category == cat } else null
+        if (dupCard != null) {
+            dao.updateCard(dupCard.copy(content = content, priority = prio, status = status))
+            try {
+                dir(context, projectId, "设定卡/$cat")?.let { d ->
+                    File(d, safeName(dupCard.name) + ".md").writeText("# $cat · ${dupCard.name}\n\n$content\n", Charsets.UTF_8)
+                }
+            } catch (_: Exception) { }
+            return 0   // 更新不算新增，避免刺激上层再补一轮
+        }
         dao.insertCard(
             SettingCard(
                 projectId = projectId,
                 category = cat,
                 name = name,
                 content = content,
-                priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
-                status = if (cat == "伏笔钩子") "埋设中" else ""
+                priority = prio,
+                status = status
             )
         )
         // 落盘 files/设定卡/{分类}/{名称}.md

@@ -166,9 +166,13 @@ object Tools {
         }
         val status = if (category == "伏笔钩子") "埋设中" else ""
         val id = withContext(Dispatchers.IO) {
+            // v6.2：单卡分类（世界观/主线/冲突/圣经/全书大纲/剧情进度）一类只允许一张——
+            // AI 换个名字再存也不会堆出重复卡，只会更新该类唯一一张
+            val singleCats = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")
             val exist = Repo.dao.findCard(pid, category, name)
+                ?: if (category in singleCats) Repo.dao.cards(pid).firstOrNull { it.category == category } else null
             if (exist != null) {
-                Repo.dao.updateCard(exist.copy(content = content, priority = prio, status = status))
+                Repo.dao.updateCard(exist.copy(name = name, content = content, priority = prio, status = status))
                 exist.id
             } else {
                 Repo.dao.insertCard(
