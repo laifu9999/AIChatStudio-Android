@@ -58,21 +58,28 @@ object FileTools {
                     "createFile" -> {
                         val (base, f) = resolve(context, pid, path)
                         if (f.exists()) return@withContext ToolResult(false, "文件已存在（可用 writeFile 覆盖）：$path")
+                        val content = args.optString("content")
                         f.parentFile?.mkdirs()
-                        f.writeText(args.optString("content"), Charsets.UTF_8)
-                        ToolResult(true, "已创建文件并写入 ${f.length()} 字", rel(base, f))
+                        f.writeText(content, Charsets.UTF_8)
+                        ToolResult(true, "✅ 已创建文件：${rel(base, f)}（${content.length} 字）",
+                            "📄 ${rel(base, f)}\n\n" + preview(content))
                     }
                     "writeFile" -> {
                         val (base, f) = resolve(context, pid, path)
+                        val content = args.optString("content")
                         f.parentFile?.mkdirs()
-                        f.writeText(args.optString("content"), Charsets.UTF_8)
-                        ToolResult(true, "已写入文件（${f.length()} 字，覆盖模式）", rel(base, f))
+                        f.writeText(content, Charsets.UTF_8)
+                        ToolResult(true, "✅ 已写入：${rel(base, f)}（${content.length} 字，覆盖模式）",
+                            "📄 ${rel(base, f)}\n\n" + preview(content))
                     }
                     "appendFile" -> {
                         val (base, f) = resolve(context, pid, path)
+                        val content = args.optString("content")
                         f.parentFile?.mkdirs()
-                        f.appendText(args.optString("content"), Charsets.UTF_8)
-                        ToolResult(true, "已追加写入（现共 ${f.length()} 字）", rel(base, f))
+                        val before = if (f.exists()) f.length() else 0L
+                        f.appendText(content, Charsets.UTF_8)
+                        ToolResult(true, "✅ 已追加：${rel(base, f)}（本次 ${content.length} 字，现共 ${f.length()} 字）",
+                            "📄 ${rel(base, f)}\n\n" + preview(content))
                     }
                     "readFile" -> {
                         val (_, f) = resolve(context, pid, path)
@@ -106,6 +113,10 @@ object FileTools {
             ToolResult(false, "文件操作失败：${e.message?.take(200)}")
         }
     }
+
+    /** 回显写入/读取的内容（过长折叠，但仍看得见实际内容） */
+    private fun preview(s: String, max: Int = 3000): String =
+        if (s.length > max) s.take(max) + "\n…（共 ${s.length} 字，已完整保存）" else s
 
     private fun rename(context: Context, pid: Long, path: String, args: JSONObject): ToolResult {
         val (base, f) = resolve(context, pid, path)

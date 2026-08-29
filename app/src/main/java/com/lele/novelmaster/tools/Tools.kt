@@ -32,6 +32,10 @@ data class ToolResult(
  */
 object Tools {
 
+    /** v5.4：回显保存内容 —— 超过 max 字折叠，但保证用户能在聊天里看到实际存了什么 */
+    fun preview(s: String, max: Int = 3000): String =
+        if (s.length > max) s.take(max) + "\n…（全文共 ${s.length} 字，已完整保存，可到「项目文件」查看）" else s
+
     // ---------- 项目 / 设定卡 ----------
 
     suspend fun listProjects(): ToolResult {
@@ -43,10 +47,28 @@ object Tools {
         return ToolResult(true, "你共有 ${snap.size} 本小说：", text)
     }
 
-    suspend fun createProject(title: String, genre: String, desc: String, totalCh: Int, chWords: Int): ToolResult {
+    /**
+     * 建会话（= 一本书）。
+     * v5.4 防串台：同名会话默认直接复用（force=false），不再重复创建；
+     * 手动「新建会话」时传 force=true 才允许同名新建。
+     */
+    suspend fun createProject(
+        title: String, genre: String, desc: String,
+        totalCh: Int, chWords: Int, force: Boolean = false, context: Context? = null
+    ): ToolResult {
+        val t = title.trim().ifBlank { "未命名小说" }
+        var reused = false
         val pid = withContext(Dispatchers.IO) {
+            if (!force) {
+                val exist = Repo.dao.projectsFlow().first()
+                    .firstOrNull { it.title.trim().equals(t, ignoreCase = true) }
+                if (exist != null) {
+                    reused = true
+                    return@withContext exist.id
+                }
+            }
             val p = Project(
-                title = title.ifBlank { "未命名小说" },
+                title = t,
                 genre = genre.ifBlank { "玄幻" },
                 description = desc,
                 targetChapters = totalCh.coerceAtLeast(1),
@@ -58,12 +80,17 @@ object Tools {
             Repo.dao.insertChapters(list)
             id
         }
-        return ToolResult(true, "已创建项目《$title》", "项目 ID = $pid ，已生成 ${totalCh} 章骨架。", newProjectId = pid)
+        if (context != null) runCatching { FileTools.baseDir(context, pid).mkdirs() }
+        return if (reused) {
+            ToolResult(true, "已复用同名会话《$t》", "该会话已存在（ID=$pid），没有重复创建。一个会话就是一本小说。", newProjectId = pid)
+        } else {
+            ToolResult(true, "已创建会话《$t》", "会话 ID = $pid · 已生成 ${totalCh.coerceAtLeast(1)} 章骨架\n本会话全部资料独立保存在 novels/$pid/files/ 下。", newProjectId = pid)
+        }
     }
 
     suspend fun switchProject(pid: Long): ToolResult {
         val p = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "找不到该 ID 的项目")
-        return ToolResult(true, "已切换到《${p.title}》", "目标 ${p.targetChapters} 章 / 每章 ${p.chapterWordTarget} 字")
+        return ToolResult(true, "已切换到会话《${p.title}》", "目标 ${p.targetChapters} 章 / 每章 ${p.chapterWordTarget} 字 · 本会话资料独立", newProjectId = pid)
     }
 
     suspend fun listCards(pid: Long, cat: String? = null, query: String? = null): ToolResult {
@@ -113,7 +140,12 @@ object Tools {
                     .writeText("# $category · $name\n\n$content\n", Charsets.UTF_8)
             } catch (_: Exception) { }
         }
-        return ToolResult(true, "✅ 已存入设定卡", "「$category / $name」已保存（id=$id），并同步到项目文件夹。")
+        return ToolResult(
+            true,
+            "✅ 已存入设定卡：$category / $name（${content.length} 字 · id=$id）",
+            "📄 设定卡/$category/$name.md\n\n" + preview(content) +
+                "\n\n——以上内容已完整保存，并同步写入本会话项目文件夹。"
+        )
     }
 
     suspend fun deleteCard(pid: Long, cardId: Long): ToolResult {
@@ -487,8 +519,11 @@ object Tools {
             when (name) {
             "createProject" -> createProject(
                 args.optString("title"), args.optString("genre"), args.optString("desc"),
-                args.optInt("totalCh", 300), args.optInt("chWords", 2500)
+                args.optInt("totalCh", 300), args.optInt("chWords", 2500),
+                args.optBoolean("force", false), context
             )
+            "listProjects" -> listProjects()
+            "switchProject" -> switchProject(args.optLong("pid", args.optLong("projectId", pid)))
             "addCard" -> addCard(
                 pid, args.optString("category"), args.optString("name"), args.optString("content"),
                 if (args.has("priority")) args.optInt("priority") else null, context

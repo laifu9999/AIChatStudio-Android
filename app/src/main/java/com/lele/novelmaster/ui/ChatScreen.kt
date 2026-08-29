@@ -77,6 +77,20 @@ import com.lele.novelmaster.engine.ChatService
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
+/**
+ * v5.4：把最后一条消息的"底部"拉进可视区。
+ * 只 scrollToItem(last) 时会把长消息的开头对齐顶部，导致看不到最新内容；
+ * 这里补一段溢出量滚动，保证最新消息始终可见。
+ */
+private suspend fun scrollToBottom(state: androidx.compose.foundation.lazy.LazyListState) {
+    repeat(2) {
+        kotlinx.coroutines.delay(60)
+        val info = state.layoutInfo.visibleItemsInfo.lastOrNull() ?: return
+        val overflow = (info.offset + info.size) - state.layoutInfo.viewportEndOffset
+        if (overflow > 0) state.animateScrollBy(overflow.toFloat())
+    }
+}
+
 /* ---------------- 聊天外观设置（持久化） ---------------- */
 
 data class ChatStyle(
@@ -161,8 +175,18 @@ fun ChatScreen(nav: NavHostController) {
         }
     }
 
-    LaunchedEffect(messages.size, busy) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // v5.4：切会话 / 新消息 / 处理中，都自动滚到"最后一条的底部"（长消息也不会停在开头）
+    LaunchedEffect(currentPid) {
+        if (messages.isNotEmpty()) {
+            listState.scrollToItem(messages.lastIndex)
+            scrollToBottom(listState)
+        }
+    }
+    LaunchedEffect(messages.size, messages.lastOrNull()?.id, busy) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.lastIndex)
+            scrollToBottom(listState)
+        }
     }
 
     fun send(text: String) {
@@ -193,48 +217,52 @@ fun ChatScreen(nav: NavHostController) {
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(BrandTop, BrandBottom)))
     ) {
-        // ============ 顶栏（实色，按钮全部可见） ============
+        // ============ 顶栏（v5.4 紧凑版：总高 46dp，把空间全留给聊天） ============
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(Brush.horizontalGradient(listOf(BrandTop, BrandBottom)))
                 .statusBarsPadding()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
+                .height(46.dp)
+                .padding(horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { drawerOpen = true }) {
-                Icon(Icons.Filled.Menu, "会话列表", tint = Color.White)
+            IconButton(onClick = { drawerOpen = true }, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Filled.Menu, "会话列表", tint = Color.White, modifier = Modifier.size(20.dp))
             }
             Column(Modifier.weight(1f)) {
                 Text(
                     currentTitle ?: "新会话",
-                    color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                    color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     if (currentPid == 0L) "发一个灵感，自动开一本新书" else "会话独立 · 资料在项目文件夹",
-                    color = Color.White.copy(alpha = 0.85f), fontSize = 10.sp, maxLines = 1
+                    color = Color.White.copy(alpha = 0.8f), fontSize = 9.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             Surface(
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(14.dp),
                 color = Color.White.copy(alpha = 0.22f),
                 modifier = Modifier.clickable { nav.navigate("ai") }
             ) {
-                Text("🤖 对接AI", color = Color.White, fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                Text("🤖AI", color = Color.White, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
             }
-            Spacer(Modifier.width(4.dp))
-            IconButton(onClick = { showCreate = true }) {
-                Icon(Icons.Filled.Add, "新会话", tint = Color.White)
+            Spacer(Modifier.width(2.dp))
+            IconButton(onClick = { showCreate = true }, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Filled.Add, "新会话", tint = Color.White, modifier = Modifier.size(20.dp))
             }
             Surface(
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(14.dp),
                 color = Color.White.copy(alpha = 0.22f),
                 modifier = Modifier.clickable { showPanel = true }
             ) {
-                Text("⠿ 功能", color = Color.White, fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                Text("⠿功能", color = Color.White, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
             }
+            Spacer(Modifier.width(4.dp))
         }
 
         // ============ 主体（所有功能只在「功能」面板，聊天区留最大空间） ============
@@ -258,7 +286,7 @@ fun ChatScreen(nav: NavHostController) {
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
                 ) {
                     items(messages, key = { it.id }) { m ->
                         MessageBubble(m, th, msgFont, msgSize)
@@ -482,7 +510,8 @@ private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit
                     scope.launch {
                         val r = com.lele.novelmaster.tools.Tools.createProject(
                             title = title.trim(), genre = genre.trim(), desc = "",
-                            totalCh = (total.toIntOrNull() ?: 300).coerceIn(1, 600), chWords = 2500
+                            totalCh = (total.toIntOrNull() ?: 300).coerceIn(1, 600), chWords = 2500,
+                            force = true
                         )
                         onCreated(r.newProjectId ?: 0L)
                     }
