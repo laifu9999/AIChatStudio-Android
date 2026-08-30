@@ -224,18 +224,24 @@ fun ChatScreen(nav: NavHostController) {
         busy = true
         streamingText = ""
         chatJob = scope.launch {
-            // v6.3：兜底看门狗——万一 AI 请求卡死（旧模型无响应、连接半开），
-            // 5 分钟后强制结束并恢复发送按钮，绝不让按钮永远转圈
+            // v6.3/v6.9：兜底看门狗——改为「活动感知」：AI 每出一个字都算活着，
+            // 只有连续 5 分钟没有任何流式字节（真卡死/连接半开）才强制结束并恢复发送按钮。
+            // 之前是固定 5 分钟必杀，分章大纲等多批长任务会被误杀报"超时"
             val guard = scope.launch {
-                delay(300_000)
-                if (busy) {
-                    chatJob?.cancel()
-                    Repo.dao.insertMessage(
-                        Message(projectId = currentPid, role = "system", kind = "error",
-                            content = "⚠️ 本次请求超过 5 分钟没有响应，已自动停止。请再发一次，或换一个模型试试。")
-                    )
-                    streamingText = null
-                    busy = false
+                while (true) {
+                    delay(15_000)
+                    if (!busy) break
+                    val idle = System.currentTimeMillis() - com.lele.novelmaster.data.AiClient.lastActivityMs
+                    if (idle > 300_000) {
+                        chatJob?.cancel()
+                        Repo.dao.insertMessage(
+                            Message(projectId = currentPid, role = "system", kind = "error",
+                                content = "⚠️ 本次请求超过 5 分钟没有任何响应，已自动停止。请再发一次，或换一个模型试试。")
+                        )
+                        streamingText = null
+                        busy = false
+                        break
+                    }
                 }
             }
             try {

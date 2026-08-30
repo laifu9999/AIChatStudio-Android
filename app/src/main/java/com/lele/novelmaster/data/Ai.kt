@@ -97,6 +97,14 @@ object AiClient {
     /** v5.9：记住每个模型实测可用的 max_tokens，下次直接命中，不再从头降级重试（省 1~2 次往返延迟） */
     private val okMaxTokens = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
+    /**
+     * v6.9：全局「AI 活动」时间戳——任何流式字节到达就刷新。
+     * ChatScreen 的兜底看门狗改为检查它：只要 AI 还在出字就不超时，
+     * 只有真正卡死（5 分钟无任何字节）才强制结束。修复分章大纲等长任务被看门狗误杀。
+     */
+    @Volatile
+    var lastActivityMs: Long = System.currentTimeMillis()
+
     private fun ladderFor(cfg: ApiConfig, maxTokens: Int): List<Int> {
         val cached = okMaxTokens[cfg.model]
         return (listOfNotNull(cached?.takeIf { it <= maxTokens }, maxTokens) + TOKEN_LADDER)
@@ -116,12 +124,17 @@ object AiClient {
     ): AiResult {
         val ladder = ladderFor(cfg, maxTokens)
         var lastErr: Exception? = null
+        // v6.9：包装 onDelta——每个字节到达都刷新全局活动时间戳（喂看门狗）
+        val fed: suspend (String) -> Unit = { d ->
+            lastActivityMs = System.currentTimeMillis()
+            onDelta(d)
+        }
         for (mt in ladder) {
             try {
                 val r = if (cfg.provider == "gemini")
-                    streamGemini(cfg, messages, temperature, mt, onDelta)
+                    streamGemini(cfg, messages, temperature, mt, fed)
                 else
-                    streamOpenai(cfg, messages, temperature, mt, onDelta)
+                    streamOpenai(cfg, messages, temperature, mt, fed)
                 if (r.text.isNotBlank()) {
                     okMaxTokens[cfg.model] = mt
                     return r

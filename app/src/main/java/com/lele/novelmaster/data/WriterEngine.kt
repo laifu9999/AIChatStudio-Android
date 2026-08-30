@@ -71,7 +71,10 @@ object WriterEngine {
 
         if (missing.isNotEmpty()) {
             val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
-            val batches = missing.chunked(15)
+            // v6.9：批次 15→10 并每批播报进度——批次小、单次调用快，配合看门狗活动感知，
+            // 大批量大纲生成不再触发「超时」；进度在聊天里可见
+            val batches = missing.chunked(10)
+            var done = 0
             for (batch in batches) {
                 val f = batch.first().chapterIndex
                 val t = batch.last().chapterIndex
@@ -80,15 +83,20 @@ object WriterEngine {
                     cfg,
                     listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
                     temperature = 0.7,
-                    maxTokens = 8192
+                    maxTokens = 6000
                 )
                 applyOutlines(dao, chapters, reply)
+                done += batch.size
+                dao.insertMessage(
+                    Message(projectId = projectId, role = "tool", kind = "tool",
+                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
+                )
             }
         }
 
-        // v6.7：分章大纲文件只放 设定卡/分章大纲/ 文件夹，不再写顶级「大纲/」文件夹（消除重复生成）
+        // v6.7：分章大纲文件只放 设定卡/分章大纲/ 文件夹；v6.9：分卷大纲废弃，清理旧卡
         syncChapterOutlineCard(projectId, context)
-        syncVolumeOutlineCard(projectId, context)
+        try { cleanupVolumeOutline(projectId, context) } catch (_: Exception) { }
         return null
     }
 
@@ -105,7 +113,8 @@ object WriterEngine {
      * 每个单卡分类只保留最早的一张，其余全部删除。返回合并掉的数量。
      */
     /** v6.7：与「全书大纲」主卡共存的系统卡名——单类去重时按名字分别保留，绝不互相吞并 */
-    val OUTLINE_CARD_NAMES = setOf("分卷大纲", "分章大纲")
+    /** v6.9：分卷大纲与分章大纲内容重复，用户要求去掉——分卷大纲升级时自动删除（见 cleanupVolumeOutline） */
+    val OUTLINE_CARD_NAMES = setOf("分章大纲")
 
     suspend fun mergeDuplicateSingles(projectId: Long): Int {
         val dao = Repo.dao
@@ -300,9 +309,8 @@ object WriterEngine {
             if (err != null) return "分章大纲生成失败：$err"
         }
 
-        // 3) 分卷大纲卡：设定卡里必须有「分卷大纲」（含旧项目升级补建）
-        val hasVol = dao.cards(projectId).any { it.name == "分卷大纲" }
-        if (!hasVol) syncVolumeOutlineCard(projectId, context)
+        // 3) v6.9：分卷大纲已废弃（与分章大纲重复），升级时自动清理旧卡与旧文件
+        try { cleanupVolumeOutline(projectId, context) } catch (_: Exception) { }
 
         // 4) v6.6：分章大纲卡：设定卡里必须有「分章大纲」（含旧项目升级补建）
         val hasChOutline = dao.cards(projectId).any { it.name == "分章大纲" }
@@ -312,44 +320,14 @@ object WriterEngine {
     }
 
     /**
-     * v6.3：把章节标题+大纲核心按卷整理成「分卷大纲」设定卡。
-     * 用户要求"设定卡里面要包含分卷大纲"——这样在设定卡页面也能看到全书骨架，
-     * 同时写章时会作为必发卡注入，600 章也不跑偏。
+     * v6.9：分卷大纲与分章大纲内容高度重复，用户要求去掉分卷大纲、只留全书大纲主卡+分章大纲。
+     * 升级时自动删除库里所有「分卷大纲」卡与本地文件，全书骨架由分章大纲卡承担。
      */
-    suspend fun syncVolumeOutlineCard(projectId: Long, context: Context? = null) {
+    suspend fun cleanupVolumeOutline(projectId: Long, context: Context? = null) {
         val dao = Repo.dao
-        val cards = dao.cards(projectId)
-        val withOutline = dao.chapters(projectId).filter { it.outline.isNotBlank() || it.title.isNotBlank() }
-        if (withOutline.isEmpty()) return
-
-        val perVolume = 20
-        val volumes = withOutline.chunked(perVolume)
-        val md = buildString {
-            volumes.forEachIndexed { vi, list ->
-                val from = list.first().chapterIndex
-                val to = list.last().chapterIndex
-                appendLine("【第${vi + 1}卷】第${from}~${to}章")
-                list.forEach { ch ->
-                    val title = ch.title.ifBlank { "未命名" }
-                    val core = ch.outline.replace(Regex("\\s+"), " ").take(40)
-                    appendLine("  第${ch.chapterIndex}章《$title》：${core.ifBlank { "（待补大纲）" }}")
-                }
-                appendLine()
-            }
-        }
-
-        // v6.7：分卷大纲归位「全书大纲」类（之前错放在辅助设定），文件放 设定卡/全书大纲/
-        val exist = cards.firstOrNull { it.name == "分卷大纲" }
-        val text = md.trim()
-        if (exist != null) dao.updateCard(exist.copy(category = "全书大纲", content = text, priority = 2))
-        else dao.insertCard(
-            SettingCard(projectId = projectId, category = "全书大纲", name = "分卷大纲", content = text, priority = 2)
-        )
+        dao.cards(projectId).filter { it.name == "分卷大纲" }.forEach { dao.deleteCard(it) }
         try {
-            dir(context, projectId, "设定卡/全书大纲")?.let { d ->
-                File(d, safeName("分卷大纲") + ".md").writeText("# 全书大纲 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
-            }
-            // v6.7：清理旧位置的重复文件（辅助设定/ 下的旧分卷大纲）
+            dir(context, projectId, "设定卡/全书大纲")?.let { d -> File(d, "分卷大纲.md").delete() }
             dir(context, projectId, "设定卡/辅助设定")?.let { d -> File(d, "分卷大纲.md").delete() }
         } catch (_: Exception) { }
     }
@@ -719,6 +697,68 @@ object WriterEngine {
 
         // v6.8.1：摘要 + 伏笔回收 + 剧情进度卡抽成公共函数（重写/润色替换正文后也走同一套，不再断链）
         ch = regenerateSummary(cfg, dao, project, ch)
+
+        // v6.9：写后轻量自检——用「全书体检」的对照原理只查本章（详见 selfCheckChapter）
+        try { selfCheckChapter(cfg, dao, project, ch, context) } catch (_: Exception) { }
+    }
+
+    /**
+     * v6.9：写后轻量自检（全书体检的单章版）。
+     * 全书体检的原理 = 拿设定卡对照各章摘要找矛盾；这里只拿硬约束设定（人物/世界观/圣经）
+     * 对照本章正文，约 2000~3000 token（正文成本的 ~15%），不浪费。
+     * AI 输出「原文=>修正」修正对，程序只做精确匹配替换——替换不动就只播报问题，绝不瞎改。
+     */
+    suspend fun selfCheckChapter(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter, context: Context? = null) {
+        val cards = dao.cards(project.id)
+        val hard = cards.filter { it.category == "人物设定" || it.category == "世界观" || it.category == "设定圣经" }
+        if (hard.isEmpty()) return
+        val settingBlock = hard.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" }
+        val reply = AiClient.chat(
+            cfg,
+            listOf(
+                ChatMsg("system", "你是小说一致性校对员，只按格式输出，不解释。"),
+                ChatMsg("user",
+                    "【设定（硬性标准）】\n$settingBlock\n\n" +
+                        "【第${ch0.chapterIndex}章正文】\n${ch0.content.take(3000)}\n\n" +
+                        "任务：只检查正文是否违背上述设定（体质/灵根/境界/功法/称谓/世界观规则）。\n" +
+                        "无矛盾：只输出【通过】。\n" +
+                        "有矛盾：每行一条，格式：原文片段=>修正后片段（原文片段必须是正文里连续出现的文字，最多3条，改最小的范围）。"
+                    )
+            ),
+            temperature = 0.2,
+            maxTokens = 1024
+        )
+        val text = reply.trim()
+        if (text.contains("【通过】") || text.isBlank()) {
+            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                content = "✅ 第${ch0.chapterIndex}章自检通过：与人物/世界观设定无矛盾"))
+            return
+        }
+        var content = ch0.content
+        val fixes = mutableListOf<String>()
+        text.lines().filter { it.contains("=>") }.take(5).forEach { line ->
+            val (bad, good) = line.split("=>", limit = 2).map { it.trim().trim('`', '"') }
+            if (bad.length in 2..120 && good.isNotBlank() && content.contains(bad)) {
+                content = content.replace(bad, good)
+                fixes.add("「${bad.take(30)}」→「${good.take(30)}」")
+            }
+        }
+        if (fixes.isNotEmpty()) {
+            dao.updateChapter(ch0.copy(content = content, wordCount = content.length, updatedAt = System.currentTimeMillis()))
+            try {
+                dir(context, project.id, "正文")?.let { d ->
+                    File(d, safeName("第${ch0.chapterIndex}章-${ch0.title.ifBlank { "未命名" }}") + ".txt")
+                        .writeText(content + "\n", Charsets.UTF_8)
+                }
+            } catch (_: Exception) { }
+            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                content = "🔧 第${ch0.chapterIndex}章自检发现 ${fixes.size} 处与设定矛盾，已自动修正：\n" +
+                    fixes.joinToString("\n") { "· $it" }))
+        } else {
+            // AI 报了矛盾但给出的片段无法精确匹配——只播报，让作者决定是否重写
+            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                content = "⚠️ 第${ch0.chapterIndex}章自检发现疑似设定矛盾，请复核：\n${text.take(300)}"))
+        }
     }
 
     /**
