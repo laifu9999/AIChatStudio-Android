@@ -556,6 +556,8 @@ object WriterEngine {
         }
         val name = parts[1].trim().trim('《', '》', '「', '」', '"', '\'').take(50)
         if (name.isBlank() || name.length > 50) return 0
+        // v6.9.6：「写作禁忌」由写后自检系统维护，灵感分析/设定生成不得创建或覆盖
+        if (name == "写作禁忌") return 0
         val content = parts.drop(2).joinToString("｜").trim()
         if (content.length < 4) return 0
         // v6.2：防重复——同名同分类 → 跳过；单卡分类（世界观/主线/冲突/圣经/全书大纲/剧情进度）
@@ -564,7 +566,7 @@ object WriterEngine {
         val prio = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1
         val status = if (cat == "伏笔钩子") "埋设中" else ""
         val sameName = dao.findCard(projectId, cat, name)
-        // v6.7：全书大纲类的回退匹配要排除 分卷大纲/分章大纲 系统卡，防止 AI 存主卡时覆盖掉它们
+        // v6.9：全书大纲类的回退匹配要排除 分章大纲 系统卡，防止 AI 存主卡时覆盖掉它们
         val dupCard = sameName ?: if (cat in singleCats)
             dao.cards(projectId).firstOrNull { it.category == cat && it.name !in OUTLINE_CARD_NAMES } else null
         if (dupCard != null) {

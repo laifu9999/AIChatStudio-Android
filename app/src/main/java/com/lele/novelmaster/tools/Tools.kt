@@ -160,6 +160,9 @@ object Tools {
     suspend fun addCard(pid: Long, category: String, name: String, content: String, priority: Int? = null, context: Context? = null): ToolResult {
         if (category !in CardCategories.all) return ToolResult(false, "未知分类「$category」", "可选：" + CardCategories.all.joinToString("、"))
         if (name.isBlank() || content.isBlank()) return ToolResult(false, "名称和内容不能为空")
+        // v6.9.6：「写作禁忌」由写后自检系统维护，AI 不得创建/覆盖
+        if (name == "写作禁忌") return ToolResult(false, "「写作禁忌」由系统自检自动维护，无需手动创建")
+        if (name == "分章大纲" && category == "全书大纲") return ToolResult(false, "「分章大纲」卡由系统自动同步维护，无需手动创建")
         val prio = priority ?: when (category) {
             "设定圣经", "世界观", "主线剧情", "核心冲突", "剧情进度" -> 2
             "伏笔钩子" -> 1
