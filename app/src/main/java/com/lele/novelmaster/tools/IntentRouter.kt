@@ -230,6 +230,11 @@ object IntentRouter {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.expandDialogue(pid, chapterNum)
         }
+        // v6.9.14：补写缺失剧情——自检报「重大偏离/关键事件遗漏」后的修复入口
+        if (Regex("补写|补全.*剧情|剧情补全").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.supplementChapter(pid, chapterNum)
+        }
         Regex("(?:模仿|按|用)\\s*([^，。,]{2,15}?)\\s*(?:的)?风格|风格改写").find(raw)?.let { m ->
             val style = m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() && !it.contains("风格") } ?: ""
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")

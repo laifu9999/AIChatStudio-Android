@@ -893,7 +893,8 @@ object WriterEngine {
     }
 
     /**
-     * v6.9.10：撤销第 N 章最近一次自检修改——用「正文备份」目录里该章最新的备份覆盖回去。
+     * v6.9.10：撤销第 N 章最近一次修改——用「正文备份」目录里该章最新的备份覆盖回去
+     * （v6.9.14 起备份来源包括：自检修复、补写、润色、扩写、改风格、钩子等所有替换正文的操作）。
      * 恢复后同步本地正文文件并重新生成摘要。返回 (err, msg)。
      */
     suspend fun restoreLastSelfCheck(cfg: ApiConfig, dao: NovelDao, project: Project, chapterIndex: Int, context: Context?): Pair<String?, String> {
@@ -903,7 +904,7 @@ object WriterEngine {
         val prefix = safeName("第${chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + "-备份"
         val latest = d.listFiles { f -> f.isFile && f.name.startsWith(prefix) }
             ?.maxByOrNull { it.name }
-            ?: return "第 ${chapterIndex} 章没有自检修复备份（该章可能从未被自动修正过）" to ""
+            ?: return "第 ${chapterIndex} 章没有修改备份（该章可能从未被自动修改过）" to ""
         val restored = latest.readText(Charsets.UTF_8).trim()
         if (restored.isBlank()) return "备份文件为空，放弃恢复" to ""
         val newCh = ch.copy(content = restored, wordCount = restored.length, updatedAt = System.currentTimeMillis())
@@ -915,7 +916,7 @@ object WriterEngine {
             }
         } catch (_: Exception) { }
         regenerateSummary(cfg, dao, project, newCh)
-        return null to "↩️ 已把第 ${chapterIndex} 章恢复到最近一次自检修复前的版本（备份：${latest.name}），摘要已重新生成。"
+        return null to "↩️ 已把第 ${chapterIndex} 章恢复到最近一次修改（自检修复/补写/润色等）前的版本（备份：${latest.name}），摘要已重新生成。"
     }
 
     /**
@@ -1071,6 +1072,13 @@ object WriterEngine {
         val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
         if (replace && out.length >= 300) {
+            // v6.9.14：替换正文（润色/扩写/补写/改风格/钩子等）前先备份原文——撤销工具可直接恢复
+            try {
+                dir(Repo.app, projectId, "正文备份")?.let { d ->
+                    File(d, safeName("第${ch.chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + "-备份" + System.currentTimeMillis() + ".txt")
+                        .writeText(ch.content + "\n", Charsets.UTF_8)
+                }
+            } catch (_: Exception) { }
             val newCh = ch.copy(
                 content = out,
                 wordCount = out.length,

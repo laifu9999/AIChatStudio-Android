@@ -447,6 +447,22 @@ object Tools {
         return if (err == null) ToolResult(true, "✅ 第${n}章结尾钩子已强化", "章末悬念已重写。") else ToolResult(false, err)
     }
 
+    /** 4.5 补写第N章缺失剧情：把本章大纲要求但遗漏的关键事件自然融入正文，不必重写整章（v6.9.14） */
+    suspend fun supplementChapter(pid: Long, idx: Int): ToolResult {
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "没有可补写的章节")
+        if (ch.outline.isBlank()) return ToolResult(false, "第${n}章还没有分章大纲，无法确定应补写哪些剧情。可先说「生成分章大纲」。")
+        val (err, _) = WriterEngine.chapterTask(
+            pid, n,
+            "本章正文可能遗漏了大纲要求的部分关键剧情。请对照大纲与现有正文补写：\n" +
+                "【本章大纲】${ch.outline.take(300)}\n" +
+                "要求：把大纲中要求但正文里没有的关键事件自然融入（在合适位置插入段落或重写衔接段，保持原文风格，与已有情节不冲突）；" +
+                "正文里已经写对的部分原样保留，不要重写全文。输出补写后的完整正文。",
+            replace = true
+        )
+        return if (err == null) ToolResult(true, "✅ 第${n}章缺失剧情已补写", "正文已更新：原版已自动备份（说「撤销第${n}章自检修改」可恢复），随后自动跑了写后自检。") else ToolResult(false, err)
+    }
+
     /** 5. 金句生成 */
     suspend fun goldenLines(pid: Long, idx: Int): ToolResult {
         val (n, ch) = locate(pid, idx)
