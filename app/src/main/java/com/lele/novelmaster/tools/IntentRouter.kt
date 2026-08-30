@@ -253,6 +253,11 @@ object IntentRouter {
             if (name.isBlank()) return ToolResult(false, "请说明检查哪个人物，如：体检林墨")
             return Tools.characterCheck(pid, name)
         }
+        // v6.9.9：全书逐章自检修复——必须放在单章自检路由之前（「全书自检」含「自检」会被误拦截）
+        if (Regex("全书自检|自检全书|逐章自检|自检所有|所有章.{0,4}自检").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.fullSelfCheck(pid)
+        }
         // v6.9.8：单章自检——「自检第N章 / 检查第N章 / 自检最新章」，手动触发写后自检（发现矛盾自动修正）
         // 注意必须放在「全书体检」路由之前，且正则不与 人物体检/全书体检 冲突
         if (Regex("自检|本章体检|检查第|体检第|[0-9零一二三四五六七八九十百千]+章.{0,6}(检查|体检|自检)").containsMatchIn(raw)) {

@@ -13,8 +13,8 @@ android {
         applicationId = "com.lele.novelmaster"
         minSdk = 26
         targetSdk = 35
-        versionCode = 80
-        versionName = "6.9.8"
+        versionCode = 81
+        versionName = "6.9.9"
     }
 
     buildTypes {

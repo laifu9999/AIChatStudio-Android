@@ -741,8 +741,9 @@ object WriterEngine {
      *  2) v6.9.4：前 5 章摘要——时间线/人数/物品/事件衔接（全书体检最有价值的部分）。
      * 约 2500~3500 token（正文成本的 ~18%），不浪费。
      * AI 输出「原文=>修正」修正对，程序只做精确匹配替换——替换不动就只播报问题，绝不瞎改。
+     * v6.9.9：返回状态 "pass"|"fixed"|"suspect"；quiet=true 时「通过」不插消息（全书逐章自检防刷屏），修复/疑似仍播报。
      */
-    suspend fun selfCheckChapter(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter, context: Context? = null) {
+    suspend fun selfCheckChapter(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter, context: Context? = null, quiet: Boolean = false): String {
         val cards = dao.cards(project.id)
         val hard = cards.filter { it.category == "人物设定" || it.category == "世界观" || it.category == "设定圣经" }
         if (hard.isEmpty()) return
@@ -771,9 +772,9 @@ object WriterEngine {
         )
         val text = reply.trim()
         if (text.contains("【通过】") || text.isBlank()) {
-            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+            if (!quiet) dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "✅ 第${ch0.chapterIndex}章自检通过：与设定及前情均无矛盾"))
-            return
+            return "pass"
         }
         var content = ch0.content
         val fixes = mutableListOf<String>()
@@ -797,11 +798,50 @@ object WriterEngine {
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "🔧 第${ch0.chapterIndex}章自检发现 ${fixes.size} 处与设定矛盾，已自动修正：\n" +
                     fixes.joinToString("\n") { "· $it" }))
+            return "fixed"
         } else {
             // AI 报了矛盾但给出的片段无法精确匹配——只播报，让作者决定是否重写
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "⚠️ 第${ch0.chapterIndex}章自检发现疑似设定矛盾，请复核：\n${text.take(300)}"))
+            return "suspect"
         }
+    }
+
+    /**
+     * v6.9.9：全书逐章自检修复——把「全书体检」（只查不修）和「单章自检」（能修）合二为一。
+     * 对每章依次跑 selfCheckChapter：发现矛盾自动修正并沉淀禁忌卡；每 3 章插一次进度播报。
+     * 成本：每章一次小调用（~18% 正文），N 章约等于 0.2N 章正文的 token。
+     */
+    suspend fun fullSelfCheck(cfg: ApiConfig, dao: NovelDao, project: Project, context: Context? = null): Pair<String?, String> {
+        val chapters = dao.chapters(project.id).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
+        if (chapters.isEmpty()) return "还没有已写章节" to ""
+        var passed = 0
+        var fixed = 0
+        var suspect = 0
+        val fixedChapters = mutableListOf<Int>()
+        chapters.forEachIndexed { i, ch ->
+            val before = ch.content
+            val status = try {
+                selfCheckChapter(cfg, dao, project, ch, context, quiet = true)
+            } catch (_: Exception) { "suspect" }
+            when (status) {
+                "pass" -> passed++
+                "fixed" -> { fixed++; fixedChapters.add(ch.chapterIndex) }
+                else -> suspect++
+            }
+            if ((i + 1) % 3 == 0 || i + 1 == chapters.size) {
+                dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                    content = "🔬 全书自检进度：已检查 ${i + 1}/${chapters.size} 章" +
+                        (if (fixed > 0) "，已修复 $fixed 章" else "")))
+            }
+        }
+        val summary = "🔬 全书自检完成（共 ${chapters.size} 章）：\n" +
+            "· ✅ 无矛盾：$passed 章\n" +
+            "· 🔧 已自动修正：$fixed 章" + (if (fixedChapters.isNotEmpty()) "（第${fixedChapters.joinToString("、")}章）" else "") + "\n" +
+            "· ⚠️ 疑似矛盾待复核：$suspect 章\n" +
+            "修正模式已沉淀进【写作禁忌】卡，后续章节不再重犯同类错误。"
+        dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool", content = summary))
+        return null to summary
     }
 
     /**

@@ -496,6 +496,15 @@ object Tools {
         return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out) else ToolResult(false, err)
     }
 
+    /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
+    suspend fun fullSelfCheck(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
+        val (err, out) = WriterEngine.fullSelfCheck(cfg, dao, project, Repo.app)
+        return if (err == null) ToolResult(true, "🔬 全书逐章自检已完成（详见报告）", out) else ToolResult(false, err)
+    }
+
     /** 8.1 单章自检（写后自检的手动版）：对指定章跑体检逻辑，发现矛盾自动修正；chapterIndex<=0 表示最新已写章 */
     suspend fun chapterSelfCheck(pid: Long, chapterIndex: Int): ToolResult {
         val dao = Repo.dao
