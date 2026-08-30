@@ -751,6 +751,8 @@ object WriterEngine {
                         .writeText(content + "\n", Charsets.UTF_8)
                 }
             } catch (_: Exception) { }
+            // v6.9.2：把修正过的矛盾模式记入「写作禁忌」卡（必发注入），后续章节不再重犯同类错误
+            try { rememberTaboo(dao, project.id, fixes) } catch (_: Exception) { }
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "🔧 第${ch0.chapterIndex}章自检发现 ${fixes.size} 处与设定矛盾，已自动修正：\n" +
                     fixes.joinToString("\n") { "· $it" }))
@@ -758,6 +760,29 @@ object WriterEngine {
             // AI 报了矛盾但给出的片段无法精确匹配——只播报，让作者决定是否重写
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "⚠️ 第${ch0.chapterIndex}章自检发现疑似设定矛盾，请复核：\n${text.take(300)}"))
+        }
+    }
+
+    /**
+     * v6.9.2：把自检修正过的矛盾模式累积记入「辅助设定·写作禁忌」卡（priority=2 必发注入）。
+     * 每条一行（最多 10 条，超出淘汰最旧的），写章系统提示会要求 AI 绝不再犯这些模式。
+     */
+    private suspend fun rememberTaboo(dao: NovelDao, projectId: Long, fixes: List<String>) {
+        if (fixes.isEmpty()) return
+        val existing = dao.cards(projectId).firstOrNull { it.category == "辅助设定" && it.name == "写作禁忌" }
+        val lines = existing?.content?.lines()?.filter { it.isNotBlank() }?.toMutableList() ?: mutableListOf()
+        for (f in fixes) {
+            val line = "· $f"
+            if (lines.none { it == line }) lines.add(line)
+        }
+        while (lines.size > 10) lines.removeAt(0)
+        val text = lines.joinToString("\n")
+        if (existing != null) {
+            dao.updateCard(existing.copy(content = text, priority = 2, updatedAt = System.currentTimeMillis()))
+        } else {
+            dao.insertCard(
+                SettingCard(projectId = projectId, category = "辅助设定", name = "写作禁忌", content = text, priority = 2)
+            )
         }
     }
 
