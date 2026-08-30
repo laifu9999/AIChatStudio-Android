@@ -501,11 +501,11 @@ object Tools {
         val dao = Repo.dao
         val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
-        val ch = if (chapterIndex > 0)
+        val ch0 = if (chapterIndex > 0)
             dao.chapters(pid).firstOrNull { it.chapterIndex == chapterIndex }
         else
             dao.chapters(pid).lastOrNull { it.content.isNotBlank() }
-            ?: return ToolResult(false, if (chapterIndex > 0) "第 $chapterIndex 章不存在或还没写" else "还没有已写章节")
+        val ch = ch0 ?: return ToolResult(false, if (chapterIndex > 0) "第 $chapterIndex 章不存在或还没写" else "还没有已写章节")
         if (chapterIndex > 0 && ch.content.isBlank()) return ToolResult(false, "第 $chapterIndex 章还没有正文")
         val before = ch.content
         try {
