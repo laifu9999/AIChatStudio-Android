@@ -75,7 +75,13 @@ object Prompts {
         //  第3层 其余卡（伏笔/主线/大纲/相关卡）维持 900 字预算，注入总量基本恒定
         val charCards = selected.filter { it.category == "人物设定" }
         val worldCards = selected.filter { it.category == "世界观" || it.category == "设定圣经" }
-        val rest = selected.filter { it.category != "人物设定" && it.category != "世界观" && it.category != "设定圣经" }
+        // v6.9.3：写作禁忌卡单独完整注入——它是自检修正过的矛盾模式清单，
+        // 混在普通卡里走 900 字预算会被 300 字/卡截断，避坑信息不完整
+        val taboo = selected.filter { it.category == "辅助设定" && it.name == "写作禁忌" }
+        val rest = selected.filter {
+            it.category != "人物设定" && it.category != "世界观" && it.category != "设定圣经" &&
+                it.id !in taboo.map { t -> t.id }
+        }
         if (charCards.isNotEmpty()) {
             appendLine("【人物设定（硬性约束，体质/灵根/功法/称谓必须与此完全一致）】")
             // 预算按张数动态给足：每张 600 字上限，一张不丢、一字不截
@@ -85,6 +91,11 @@ object Prompts {
         if (worldCards.isNotEmpty()) {
             appendLine("【世界观与力量体系（硬性约束，修炼体系/灵根规则/势力格局不得违背）】")
             append(budgetCardBlock(worldCards, budget = worldCards.size * 800, perCard = 800))
+            appendLine()
+        }
+        if (taboo.isNotEmpty()) {
+            appendLine("【写作禁忌（本书已写错并被系统纠正的矛盾模式，原文=>修正，绝不允许再犯）】")
+            append(budgetCardBlock(taboo, budget = taboo.size * 600, perCard = 600))
             appendLine()
         }
         if (charCards.isNotEmpty() || worldCards.isNotEmpty()) {
