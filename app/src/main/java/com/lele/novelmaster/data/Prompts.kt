@@ -189,10 +189,11 @@ object Prompts {
     ): String = buildString {
         appendLine("【书名】${project.title}　【类型】${project.genre}")
         if (project.description.isNotBlank()) appendLine("【简介】${project.description}")
-        val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
+        // v6.9.25：分章大纲卡不注入（旧大纲已由下方 takeLast(20) 窗口覆盖；600章整卡数万字）；核心卡预算截断
+        val core = cards.filter { it.name != "分章大纲" && (it.priority == 2 || it.category in CardCategories.KEY_CATS) }
         if (core.isNotEmpty()) {
             appendLine("【核心设定】")
-            appendLine(cardBlock(core))
+            appendLine(budgetCardBlock(core, budget = 3200, perCard = 600))
         }
         val lastOutlines = existing.filter { it.outline.isNotBlank() }.takeLast(20)
         if (lastOutlines.isNotEmpty()) {

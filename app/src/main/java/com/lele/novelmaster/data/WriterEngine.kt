@@ -750,7 +750,18 @@ object WriterEngine {
             recordSelfCheck(project.id, ch0.chapterIndex, "pass", context)
             return "pass"
         }
-        val settingBlock = hard.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" }
+        val settingBlock = run {
+            // v6.9.25：人物卡按本章正文出场过滤（长篇人物多时自检注入随卡数线性膨胀）——
+            // 出场人物/必发人物全量对照；未出场人物只留名单供称谓/人数对照，设定省略
+            val body = ch0.content
+            fun bareName(n: String) = n.substringAfterLast('·', n).substringAfterLast('•', n).trim()
+            val present = hard.filter { it.category != "人物设定" || it.priority == 2 || body.contains(bareName(it.name)) }
+            val absent = hard.filter { it.category == "人物设定" && it.priority != 2 && !body.contains(bareName(it.name)) }
+            present.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" } +
+                (if (absent.isNotEmpty())
+                    "\n【本章未出场人物（仅供称谓/人数对照）】" + absent.joinToString("、") { bareName(it.name) }
+                else "")
+        }
         // v6.9.4：前 5 章摘要——检查章与章之间的矛盾（时间线/称谓/人数/物品/事件）
         val recentBlock = dao.chapters(project.id)
             .filter { it.chapterIndex < ch0.chapterIndex && it.summary.isNotBlank() }
