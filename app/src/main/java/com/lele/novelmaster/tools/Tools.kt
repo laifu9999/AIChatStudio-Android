@@ -171,7 +171,10 @@ object Tools {
             // AI 换个名字再存也不会堆出重复卡，只会更新该类唯一一张
             val singleCats = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")
             val exist = Repo.dao.findCard(pid, category, name)
-                ?: if (category in singleCats) Repo.dao.cards(pid).firstOrNull { it.category == category } else null
+                // v6.7：全书大纲类的回退匹配排除 分卷大纲/分章大纲 系统卡，防止覆盖
+                ?: if (category in singleCats) Repo.dao.cards(pid).firstOrNull {
+                    it.category == category && it.name !in com.lele.novelmaster.data.WriterEngine.OUTLINE_CARD_NAMES
+                } else null
             if (exist != null) {
                 Repo.dao.updateCard(exist.copy(name = name, content = content, priority = prio, status = status))
                 exist.id

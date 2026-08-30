@@ -61,51 +61,34 @@ object WriterEngine {
         return s.trim()
     }
 
-    /** 补齐缺失的分章大纲（只处理 from..to 范围内） */
+    /** 补齐缺失的分章大纲（只处理 from..to 范围内）；v6.7：无论本轮是否补了大纲，结尾都同步「分卷大纲/分章大纲」设定卡 */
     suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
         val project = dao.project(projectId) ?: return "项目不存在"
         val cards = dao.cards(projectId)
         val chapters = dao.chapters(projectId)
         val missing = chapters.filter { it.outline.isBlank() && it.chapterIndex in from..to }
-        if (missing.isEmpty()) return null
 
-        val batches = missing.chunked(15)
-        for (batch in batches) {
-            val f = batch.first().chapterIndex
-            val t = batch.last().chapterIndex
-            val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size)
-            val reply = AiClient.chat(
-                cfg,
-                listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
-                temperature = 0.7,
-                maxTokens = 8192
-            )
-            applyOutlines(dao, chapters, reply)
+        if (missing.isNotEmpty()) {
+            val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
+            val batches = missing.chunked(15)
+            for (batch in batches) {
+                val f = batch.first().chapterIndex
+                val t = batch.last().chapterIndex
+                val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size)
+                val reply = AiClient.chat(
+                    cfg,
+                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
+                    temperature = 0.7,
+                    maxTokens = 8192
+                )
+                applyOutlines(dao, chapters, reply)
+            }
         }
 
-        // 大纲全量落盘：files/大纲/分章大纲.md
-        try {
-            dir(context, projectId, "大纲")?.let { d ->
-                val fresh = dao.chapters(projectId)
-                val md = buildString {
-                    appendLine("# 《${project.title}》分章大纲")
-                    appendLine()
-                    fresh.filter { it.outline.isNotBlank() }.forEach {
-                        appendLine("## 第${it.chapterIndex}章 ${it.title}")
-                        appendLine(it.outline)
-                        appendLine()
-                    }
-                }
-                File(d, "分章大纲.md").writeText(md, Charsets.UTF_8)
-            }
-        } catch (_: Exception) { }
-
-        // v6.3：分卷大纲必须进设定卡 —— 按卷分组（每 20 章一卷）写入「全书大纲/分卷大纲」卡
-        syncVolumeOutlineCard(projectId, context)
-        // v6.6：分章大纲整卡进设定卡（辅助设定/分章大纲），章节标题以此为唯一来源
+        // v6.7：分章大纲文件只放 设定卡/分章大纲/ 文件夹，不再写顶级「大纲/」文件夹（消除重复生成）
         syncChapterOutlineCard(projectId, context)
+        syncVolumeOutlineCard(projectId, context)
         return null
     }
 
@@ -121,14 +104,26 @@ object WriterEngine {
      * v6.5：单卡分类去重兜底——把老版本堆出来的重复卡（例如两张不同名字的世界观）合并：
      * 每个单卡分类只保留最早的一张，其余全部删除。返回合并掉的数量。
      */
+    /** v6.7：与「全书大纲」主卡共存的系统卡名——单类去重时按名字分别保留，绝不互相吞并 */
+    val OUTLINE_CARD_NAMES = setOf("分卷大纲", "分章大纲")
+
     suspend fun mergeDuplicateSingles(projectId: Long): Int {
         val dao = Repo.dao
         var merged = 0
         for (cat in SINGLE_CATS) {
             val list = dao.cards(projectId).filter { it.category == cat }
             if (list.size <= 1) continue
-            val keep = list.minByOrNull { it.id } ?: continue
-            list.filter { it.id != keep.id }.forEach {
+            val keep: List<SettingCard> = if (cat == "全书大纲") {
+                // v6.7：全书大纲类允许 主卡+分卷大纲+分章大纲 各留一张共存，其余同名的仍只留最早一张
+                val protected = list.filter { it.name == cat || it.name in OUTLINE_CARD_NAMES }
+                    .groupBy { it.name }.mapNotNull { g -> g.value.minByOrNull { c -> c.id } }
+                val others = list.filter { c -> c.name != cat && c.name !in OUTLINE_CARD_NAMES }
+                    .groupBy { it.name }.mapNotNull { g -> g.value.minByOrNull { c -> c.id } }
+                protected + others
+            } else {
+                listOf(list.minByOrNull { it.id } ?: continue)
+            }
+            list.filter { c -> keep.none { it.id == c.id } }.forEach {
                 dao.deleteCard(it)
                 merged++
             }
@@ -209,8 +204,10 @@ object WriterEngine {
             }
         }
 
-        // 3) 分章大纲：files/大纲/分章大纲.md（## 第N章 标题 分节解析）
-        val outlineFile = File(File(base, "大纲"), "分章大纲.md")
+        // 3) 分章大纲：v6.7 优先读 设定卡/分章大纲/分章大纲.md；旧项目顶级 大纲/分章大纲.md 仍兼容读取
+        val outlineNew = File(File(base, "设定卡" + File.separator + "分章大纲"), "分章大纲.md")
+        val outlineLegacy = File(File(base, "大纲"), "分章大纲.md")
+        val outlineFile = if (outlineNew.exists()) outlineNew else outlineLegacy
         if (outlineFile.isFile) {
             val chs = dao.chapters(projectId)
             val newestCh = chs.maxOfOrNull { it.updatedAt } ?: 0L
@@ -341,18 +338,19 @@ object WriterEngine {
             }
         }
 
-        // v6.4：分卷大纲独立成卡（辅助设定/分卷大纲）——不再覆盖 AI 生成的「全书大纲」主卡，
-        // 两张卡都在：全书大纲=起承转合阶段规划，分卷大纲=每章标题+剧情核心逐章列表
+        // v6.7：分卷大纲归位「全书大纲」类（之前错放在辅助设定），文件放 设定卡/全书大纲/
         val exist = cards.firstOrNull { it.name == "分卷大纲" }
         val text = md.trim()
-        if (exist != null) dao.updateCard(exist.copy(category = "辅助设定", content = text, priority = 2))
+        if (exist != null) dao.updateCard(exist.copy(category = "全书大纲", content = text, priority = 2))
         else dao.insertCard(
-            SettingCard(projectId = projectId, category = "辅助设定", name = "分卷大纲", content = text, priority = 2)
+            SettingCard(projectId = projectId, category = "全书大纲", name = "分卷大纲", content = text, priority = 2)
         )
         try {
-            dir(context, projectId, "设定卡/辅助设定")?.let { d ->
-                File(d, safeName("分卷大纲") + ".md").writeText("# 辅助设定 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
+            dir(context, projectId, "设定卡/全书大纲")?.let { d ->
+                File(d, safeName("分卷大纲") + ".md").writeText("# 全书大纲 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
             }
+            // v6.7：清理旧位置的重复文件（辅助设定/ 下的旧分卷大纲）
+            dir(context, projectId, "设定卡/辅助设定")?.let { d -> File(d, "分卷大纲.md").delete() }
         } catch (_: Exception) { }
     }
 
@@ -378,14 +376,18 @@ object WriterEngine {
         val text = md.trim()
 
         val exist = dao.cards(projectId).firstOrNull { it.name == "分章大纲" }
-        if (exist != null) dao.updateCard(exist.copy(category = "辅助设定", content = text, priority = 2))
+        if (exist != null) dao.updateCard(exist.copy(category = "全书大纲", content = text, priority = 2))
         else dao.insertCard(
-            SettingCard(projectId = projectId, category = "辅助设定", name = "分章大纲", content = text, priority = 2)
+            SettingCard(projectId = projectId, category = "全书大纲", name = "分章大纲", content = text, priority = 2)
         )
         try {
-            dir(context, projectId, "设定卡/辅助设定")?.let { d ->
-                File(d, safeName("分章大纲") + ".md").writeText("# 辅助设定 · 分章大纲\n\n$text\n", Charsets.UTF_8)
+            // v6.7：分章大纲文件夹建在设定卡文件夹里：设定卡/分章大纲/分章大纲.md
+            dir(context, projectId, "设定卡/分章大纲")?.let { d ->
+                File(d, "分章大纲.md").writeText("# 全书大纲 · 分章大纲（章节标题以此为准）\n\n$text\n", Charsets.UTF_8)
             }
+            // v6.7：清理旧位置的重复文件（辅助设定/ 与顶级 大纲/ 下的旧分章大纲）
+            dir(context, projectId, "设定卡/辅助设定")?.let { d -> File(d, "分章大纲.md").delete() }
+            dir(context, projectId, "大纲")?.let { d -> File(d, "分章大纲.md").delete() }
         } catch (_: Exception) { }
     }
 
@@ -433,6 +435,28 @@ object WriterEngine {
 
         // v6.5：单卡分类先去重（老版本可能堆出两张世界观），再开始生成
         mergeDuplicateSingles(projectId)
+
+        // v6.7：先检索已有设定卡——八类齐全就全部沿用，绝不重复生成；缺哪类才补哪类
+        val preHave = dao.cards(projectId)
+        val preNeed = required.filter { cat -> preHave.none { c -> c.category == cat } }
+        if (preNeed.isEmpty()) {
+            val haveNames = preHave.filter { it.category in required.toSet() }
+                .groupBy { it.category }.entries.joinToString("、") { "${it.key}×${it.value.size}" }
+            dao.insertMessage(
+                Message(projectId = projectId, role = "tool", kind = "tool",
+                    content = "🔍 设定卡检索：已建齐（$haveNames），全部沿用现有设定，不重复生成。\n" +
+                        "要改哪张卡直接说，例如「修改世界观里的力量体系」。")
+            )
+            return null
+        }
+        if (preNeed.size < required.size) {
+            val haveList = preHave.filter { it.category in required.toSet() }
+                .groupBy { it.category }.keys.joinToString("、")
+            dao.insertMessage(
+                Message(projectId = projectId, role = "tool", kind = "tool",
+                    content = "🔍 设定卡检索：已有（${haveList.ifBlank { "无" }}）；还缺：${preNeed.joinToString("、")}——只补缺的，已有的不重做。")
+            )
+        }
 
         // v6.5：内容多一次保存不完就分多轮——每轮开始前播报「已保存好哪些/还缺哪些」，
         // 自动继续补全，作者不用盯着；已保存的部分绝不重做。
@@ -532,7 +556,9 @@ object WriterEngine {
         val prio = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1
         val status = if (cat == "伏笔钩子") "埋设中" else ""
         val sameName = dao.findCard(projectId, cat, name)
-        val dupCard = sameName ?: if (cat in singleCats) dao.cards(projectId).firstOrNull { it.category == cat } else null
+        // v6.7：全书大纲类的回退匹配要排除 分卷大纲/分章大纲 系统卡，防止 AI 存主卡时覆盖掉它们
+        val dupCard = sameName ?: if (cat in singleCats)
+            dao.cards(projectId).firstOrNull { it.category == cat && it.name !in OUTLINE_CARD_NAMES } else null
         if (dupCard != null) {
             dao.updateCard(dupCard.copy(content = content, priority = prio, status = status))
             try {

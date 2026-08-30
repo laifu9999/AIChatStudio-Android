@@ -128,6 +128,10 @@ object ChatService {
         var executed = 0
         val executedKeys = mutableSetOf<String>()
         var createdPid: Long? = null
+        // v6.7：本次小结用——执行过哪些工具、是否截断、是否被手动停止
+        val doneTools = mutableListOf<String>()
+        var anyTruncated = false
+        var wasCanceled = false
 
         /** JSON null 参数 -> ""（org.json 的 optString 会把 JSON null 变成字面量 "null"，必须拦在工具层之前） */
         fun cleanArgs(a: JSONObject): JSONObject {
@@ -179,6 +183,7 @@ object ChatService {
                 onProjectChange(np)
             }
             appendToolResult(pid, r)
+            if (r.ok) doneTools.add("$name：${r.message.take(50)}")
             if (name == "deleteProject" && r.ok) deletedCurrent = true
             return true
         }
@@ -294,8 +299,10 @@ object ChatService {
                         emit(false)
                     }
                     stopReason = res.finishReason
+                    if (res.finishReason == "length") anyTruncated = true
                 } catch (ce: CancellationException) {
                     canceled = true   // 用户点了停止：已生成的部分照样保存，不丢内容
+                    wasCanceled = true
                 }
 
                 // 收尾：再扫一遍（兼容不带 <tool> 包裹的写法）
@@ -368,7 +375,7 @@ object ChatService {
                 .replace(Regex("\\n{3,}"), "\n\n")
                 .trim()
 
-            when {
+            val savedId = when {
                 finalText.isNotBlank() -> {
                     val id = Repo.dao.insertMessage(
                         Message(projectId = pid, role = "assistant", content = finalText, kind = "text")
@@ -384,6 +391,38 @@ object ChatService {
                     null
                 }
             }
+
+            // v6.7：每次回复结束的「本次小结」——生成保存情况 + 是否截断 + 建议
+            if (pid > 0L) runCatching {
+                val rep = StringBuilder("📋 本次小结\n")
+                if (doneTools.isEmpty()) {
+                    rep.appendLine("✅ 本轮为文字回复，没有生成新的设定卡或文件。")
+                } else {
+                    rep.appendLine("✅ 已生成并保存 ${doneTools.size} 项：")
+                    doneTools.forEach { rep.appendLine("  • $it") }
+                }
+                rep.appendLine(
+                    when {
+                        anyTruncated -> "⚠️ 截断检测：输出被截断过（已自动续写）；若内容仍不完整，说「继续」接着生成。"
+                        wasCanceled -> "⏹ 已手动停止，本轮已生成的部分都保存好了，不会丢。"
+                        else -> "📄 完整性：未截断，内容完整。"
+                    }
+                )
+                rep.append(
+                    when {
+                        anyTruncated -> "💡 建议：说「继续」补完剩余内容；长内容会自动分批保存不丢。"
+                        doneTools.any { it.startsWith("writeNextChapter") || it.startsWith("startAutoWrite") } ->
+                            "💡 建议：可继续「写下一章」推进进度，或到书架阅读检查连贯性；不满意就说「重写本章」。"
+                        doneTools.any { it.startsWith("addCard") } ->
+                            "💡 建议：到「设定卡」页可查看刚保存的卡；要修改直接说「修改××卡的××」。"
+                        else -> "💡 建议：直接告诉我下一步（写章/改设定/查大纲），我马上开工。"
+                    }
+                )
+                Repo.dao.insertMessage(
+                    Message(projectId = pid, role = "tool", kind = "tool", content = rep.toString())
+                )
+            }
+            savedId
         }
     }
 
