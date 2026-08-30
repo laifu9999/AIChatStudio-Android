@@ -61,7 +61,7 @@ object WriterEngine {
         return s.trim()
     }
 
-    /** 补齐缺失的分章大纲（只处理 from..to 范围内）；v6.7：无论本轮是否补了大纲，结尾都同步「分卷大纲/分章大纲」设定卡 */
+    /** 补齐缺失的分章大纲（只处理 from..to 范围内）；结尾同步「分章大纲」设定卡并清理已废弃的分卷大纲 */
     suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在"
@@ -153,7 +153,7 @@ object WriterEngine {
             val list = dao.cards(projectId).filter { it.category == cat }
             if (list.size <= 1) continue
             val keep: List<SettingCard> = if (cat == "全书大纲") {
-                // v6.7：全书大纲类允许 主卡+分卷大纲+分章大纲 各留一张共存，其余同名的仍只留最早一张
+                // v6.9：全书大纲类允许 主卡+分章大纲 各留一张共存，其余同名的仍只留最早一张
                 val protected = list.filter { it.name == cat || it.name in OUTLINE_CARD_NAMES }
                     .groupBy { it.name }.mapNotNull { g -> g.value.minByOrNull { c -> c.id } }
                 val others = list.filter { c -> c.name != cat && c.name !in OUTLINE_CARD_NAMES }
@@ -1042,7 +1042,7 @@ object AutoWriteManager {
                 val cfg = dao.activeApi() ?: run { log("未启用AI模型：请到【AI模型】添加并设为启用"); return@launch }
                 log("开始自动写作《${project.title}》第$from~$to 章（模型：${cfg.model}）")
 
-                // v6.4：硬门槛——设定卡八类+分章大纲+分卷大纲不齐全，先自动补全再开写
+                // v6.4：硬门槛——设定卡八类+分章大纲不齐全，先自动补全再开写
                 state.value = state.value.copy(currentChapter = "检查设定卡与大纲…")
                 val gateErr = WriterEngine.ensurePreconditions(projectId, context)
                 if (gateErr != null) { log(gateErr); return@launch }

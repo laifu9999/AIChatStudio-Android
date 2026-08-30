@@ -171,7 +171,7 @@ object Tools {
             // AI 换个名字再存也不会堆出重复卡，只会更新该类唯一一张
             val singleCats = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")
             val exist = Repo.dao.findCard(pid, category, name)
-                // v6.7：全书大纲类的回退匹配排除 分卷大纲/分章大纲 系统卡，防止覆盖
+                // v6.7：全书大纲类的回退匹配排除 分章大纲 系统卡，防止覆盖
                 ?: if (category in singleCats) Repo.dao.cards(pid).firstOrNull {
                     it.category == category && it.name !in com.lele.novelmaster.data.WriterEngine.OUTLINE_CARD_NAMES
                 } else null
@@ -231,7 +231,7 @@ object Tools {
         val chs = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
         val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val next = chs.firstOrNull { it.content.isBlank() } ?: return ToolResult(false, "全部章节都已写完 ✅")
-        // v6.4：硬门槛——设定卡八类全部建全 + 分章大纲 + 分卷大纲卡就绪才允许写正文；
+        // v6.4：硬门槛——设定卡八类全部建全 + 分章大纲卡就绪才允许写正文；
         // 缺什么自动先补什么（聊天里实时播报），补不齐绝不放行，杜绝"没建完设定就开始写第一章"
         val gateErr = WriterEngine.ensurePreconditions(pid, context)
         if (gateErr != null) return ToolResult(false, gateErr)
@@ -259,7 +259,7 @@ object Tools {
     // ---------- 自动写作 / 大纲 ----------
 
     suspend fun startAutoWrite(pid: Long, from: Int, to: Int, context: Context? = null): ToolResult {
-        // v6.4：自动写作同样过硬门槛——设定卡+分章大纲+分卷大纲不齐全，先自动补全再开写
+        // v6.4：自动写作同样过硬门槛——设定卡+分章大纲不齐全，先自动补全再开写
         val gateErr = WriterEngine.ensurePreconditions(pid, context)
         if (gateErr != null) return ToolResult(false, gateErr)
         // 自定义范围 1~600；实际章节不足时按实际章节遍历，写完自动停
