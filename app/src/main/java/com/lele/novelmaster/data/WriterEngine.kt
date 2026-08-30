@@ -625,6 +625,8 @@ object WriterEngine {
         val inject = buildString {
             append("📥 已注入本章上下文：")
             append("设定卡 ${cards.size} 张（选中 ${Prompts.selectCards(cards, ch0.outline + ch0.title).size} 张）")
+            val charCards = cards.filter { it.category == "人物设定" }
+            append(" · 人物卡 ${charCards.size} 张已完整注入${if (charCards.isNotEmpty()) "（" + charCards.joinToString("、") { it.name } + "）" else ""}")
             append(" · 未回收伏笔 ${cards.count { it.category == "伏笔钩子" && it.status != "已回收" }} 条")
             append(" · 前5章摘要+上一章结尾300字+相邻大纲")
             append(" · 合计约 ${messages.sumOf { it.content.length }} 字")

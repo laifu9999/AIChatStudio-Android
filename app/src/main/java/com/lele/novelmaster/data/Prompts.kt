@@ -52,7 +52,7 @@ object Prompts {
 
     fun writerSystem(selected: List<SettingCard>): String = buildString {
         appendLine("你是一位顶级网络小说作家，正在按大纲逐章写作。严格遵守：")
-        appendLine("1. 人物性格、能力、称谓、世界观必须与设定资料完全一致，绝不能自相矛盾。")
+        appendLine("1. 人物的体质、灵根、血脉、境界、功法、外貌、称谓、性格是硬性设定，必须与【人物设定】逐字一致，绝不允许自行更改或另造（例如设定为先天剑体/天灵根，就绝不能写成其他体质灵根）。世界观规则同样不得违背。")
         appendLine("2. 与前情摘要、上一章结尾自然衔接；不重复已写过的情节，不另起炉灶。")
         appendLine("3. 伏笔规则：【伏笔钩子】中状态为“埋设中”的伏笔要按计划推进；“已回收”的不可再当新伏笔。需要埋新伏笔时自然埋下。")
         appendLine("4. 每章必须有推进、有冲突、章末留钩子（悬念）。多用场景与对话，少干巴巴的旁白。")
@@ -62,10 +62,23 @@ object Prompts {
         appendLine("8. 不写任何创作说明：不要出现“本章完”“作者有话”“（此处省略）”“由于篇幅”之类的话，写完最后一个句号就停。")
         appendLine("9. 笔法：场景、动作、对话、心理交替推进；每 300~500 字给一个新的信息点或小转折，保持张力。")
         appendLine()
-        appendLine("【设定资料】")
-        // v6.0：注入总量恒定 ~2000 字（卡片 900 + 摘要 5×80 + 结尾 300 + 大纲 250 + 任务），
+        // v6.8：人物设定卡单独一层完整注入（硬约束），不参与 900 字预算竞争、不被 300 字截断——
+        // 之前人物卡和世界观/圣经/大纲卡挤 900 字预算，排后面的整卡被 break 丢掉，正文就出现了
+        // 「设定卡写先天剑体天灵根、正文却写五行杂灵根」这类设定丢失
+        val charCards = selected.filter { it.category == "人物设定" }
+        val rest = selected.filter { it.category != "人物设定" }
+        if (charCards.isNotEmpty()) {
+            appendLine("【人物设定（硬性约束，体质/灵根/功法/称谓必须与此完全一致）】")
+            // 预算按张数动态给足：每张 600 字上限，一张不丢、一字不截
+            append(budgetCardBlock(charCards, budget = charCards.size * 600, perCard = 600))
+            appendLine()
+            appendLine("【其他设定资料】")
+        } else {
+            appendLine("【设定资料】")
+        }
+        // v6.0：其余卡注入总量恒定 ~900 字（摘要 5×80 + 结尾 300 + 大纲 250 + 任务另计），
         // 600 章注入不膨胀；一致性靠必发卡 + 未回收伏笔
-        append(budgetCardBlock(selected, budget = 900, perCard = 300))
+        append(budgetCardBlock(rest, budget = 900, perCard = 300))
     }
 
     /** 组装写章所需的完整消息 */
