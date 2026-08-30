@@ -619,8 +619,9 @@ object Tools {
                 ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
                 ?: continue
             if (card.name == "分章大纲" || card.name == "剧情进度" || card.content == newContent) continue
-            try {
-                val d = File(FileTools.baseDir(Repo.app, pid), "设定卡/备份")
+            val appCtx = Repo.app
+            if (appCtx != null) try {
+                val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
                 d.mkdirs()
                 File(d, "设定体检备份.md").appendText(
                     "==== ${card.category}/${card.name}（${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())} 体检修改前） ====\n${card.content}\n\n",
