@@ -122,7 +122,7 @@ object WriterEngine {
         val project = dao.project(projectId) ?: return "项目不存在"
 
         // 1) 设定卡：八类核心一张都不能少
-        fun missingCats(): List<String> {
+        suspend fun missingCats(): List<String> {
             val have = dao.cards(projectId).map { it.category }.toSet()
             return REQUIRED_CATS.filter { it !in have }
         }
