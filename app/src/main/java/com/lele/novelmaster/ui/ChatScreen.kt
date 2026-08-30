@@ -504,6 +504,7 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
         Triple("📚", "小说书架", FNav("shelf")),
         Triple("📊", "项目仪表盘", FNav("project/{pid}")),
         Triple("💎", "全书体检", FRun("全书体检")),
+        Triple("🔬", "自检最新章", FRun("自检最新章")),
         Triple("💡", "剧情推演", FRun("推演后续剧情")),
         Triple("✨", "润色最新章", FRun("润色最新章")),
         Triple("💬", "生成金句", FRun("生成金句")),

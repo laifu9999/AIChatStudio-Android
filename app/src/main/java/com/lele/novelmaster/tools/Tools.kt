@@ -496,6 +496,33 @@ object Tools {
         return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out) else ToolResult(false, err)
     }
 
+    /** 8.1 单章自检（写后自检的手动版）：对指定章跑体检逻辑，发现矛盾自动修正；chapterIndex<=0 表示最新已写章 */
+    suspend fun chapterSelfCheck(pid: Long, chapterIndex: Int): ToolResult {
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
+        val ch = if (chapterIndex > 0)
+            dao.chapters(pid).firstOrNull { it.chapterIndex == chapterIndex }
+        else
+            dao.chapters(pid).lastOrNull { it.content.isNotBlank() }
+            ?: return ToolResult(false, if (chapterIndex > 0) "第 $chapterIndex 章不存在或还没写" else "还没有已写章节")
+        if (chapterIndex > 0 && ch.content.isBlank()) return ToolResult(false, "第 $chapterIndex 章还没有正文")
+        val before = ch.content
+        try {
+            WriterEngine.selfCheckChapter(cfg, dao, project, ch, Repo.app)
+        } catch (e: Exception) {
+            return ToolResult(false, "自检失败：${e.message?.take(120)}")
+        }
+        val after = dao.chapters(pid).firstOrNull { it.chapterIndex == ch.chapterIndex }
+        val fixed = after != null && after.content != before
+        return ToolResult(
+            true,
+            "🔍 第${ch.chapterIndex}章自检完成：",
+            if (fixed) "发现与设定/前情矛盾并已自动修正（详见上方消息）。"
+            else "未发现可自动修正的矛盾；若有疑似问题会在上方列出，供你复核。"
+        )
+    }
+
     /** 9. 起名器 */
     suspend fun nameGen(pid: Long, kind: String, count: Int): ToolResult {
         val (err, out) = WriterEngine.freeTask(
