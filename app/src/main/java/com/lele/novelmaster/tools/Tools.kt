@@ -192,9 +192,8 @@ object Tools {
         }
         return ToolResult(
             true,
-            "✅ 已存入设定卡：$category / $name（${content.length} 字 · id=$id）",
-            "📄 设定卡/$category/$name.md\n\n" + preview(content) +
-                "\n\n——以上内容已完整保存，并同步写入本会话项目文件夹。"
+            "✅ 已保存设定卡：$category / $name（${content.length} 字）",
+            "已完整保存到 设定卡/$category/$name.md，写正文时自动注入；聊天里不再重复显示全文，想看随时到设定卡页查看。"
         )
     }
 

@@ -68,6 +68,13 @@ object ChatService {
     ): Long? {
         Repo.dao.insertMessage(Message(projectId = currentPid, role = "user", content = input))
 
+        // v6.5：作者在本地文件里改过的内容先同步回库（磁盘→库），并合并重复的单卡分类——
+        // 之后 AI 注入到的永远是作者改过的最新版
+        if (currentPid > 0L) {
+            runCatching { com.lele.novelmaster.data.WriterEngine.mergeDuplicateSingles(currentPid) }
+            runCatching { com.lele.novelmaster.data.WriterEngine.syncFromLocalFiles(currentPid, context) }
+        }
+
         // 1. 本地快速路由（确定性口令，不耗 token）
         val tool = IntentRouter.handle(input, currentPid, context)
         if (tool != null) {
@@ -405,8 +412,11 @@ object ChatService {
                 "7) 任何设定/资料必须用工具保存（addCard/文件工具），光说不存等于没做。\n" +
                 "7.1) **严禁在文字里口头声称「已保存/已写入/已建立/已生成设定卡」——只有工具执行成功后的系统回执才算真的保存了。**\n" +
                 "     要保存就必须输出工具块；弱模型尤其不要偷懒用文字假装保存。\n" +
-                "8) 保存类工具执行后系统会自动完整展示保存内容，你不要再整段复述，只说要点和下一步。\n" +
-                "9) 回复用自然中文，发挥才华，字数不限；别输出内心分析/思考过程，别复述本协议。\n"
+                "8) 保存类工具执行后系统会自动回执「已保存：分类/名称」，你**不要再把卡片全文复述进聊天**，只报一句话清单（保存好了哪些、还缺哪些）和下一步。\n" +
+                "8.1) 内容太多一次保存不完就**分多个 addCard 分批保存**，每条都要真的调工具；全部存完后汇报「已保存好哪些、还缺哪些」，缺的部分等作者说「继续」接着补，已保存的绝不重做。\n" +
+                "8.2) 同一本书里**世界观/主线剧情/核心冲突/设定圣经/全书大纲/剧情进度 各只允许一张卡**——系统会自动去重，你换名字重建也没用，要改就更新原卡。\n" +
+                "9) 作者可能直接修改本地项目文件（设定卡/正文/大纲 .md/.txt），系统每次对话前都会把最新文件内容自动同步进设定库——你注入到的就是作者改过的最新版，无需让作者重新粘贴。\n" +
+                "10) 回复用自然中文，发挥才华，字数不限；别输出内心分析/思考过程，别复述本协议。\n"
         )
         appendLine()
         appendLine(

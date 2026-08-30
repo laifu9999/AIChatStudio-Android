@@ -112,6 +112,144 @@ object WriterEngine {
         "世界观", "人物设定", "主线剧情", "核心冲突", "支线任务", "伏笔钩子", "设定圣经", "全书大纲"
     )
 
+    /** v6.5：单卡分类——一个会话（一本书）里该分类只允许存在一张卡 */
+    val SINGLE_CATS = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")
+
+    /**
+     * v6.5：单卡分类去重兜底——把老版本堆出来的重复卡（例如两张不同名字的世界观）合并：
+     * 每个单卡分类只保留最早的一张，其余全部删除。返回合并掉的数量。
+     */
+    suspend fun mergeDuplicateSingles(projectId: Long): Int {
+        val dao = Repo.dao
+        var merged = 0
+        for (cat in SINGLE_CATS) {
+            val list = dao.cards(projectId).filter { it.category == cat }
+            if (list.size <= 1) continue
+            val keep = list.minByOrNull { it.id } ?: continue
+            list.filter { it.id != keep.id }.forEach {
+                dao.deleteCard(it)
+                merged++
+            }
+        }
+        return merged
+    }
+
+    /**
+     * v6.5：把作者在本地文件里做的修改同步回数据库（磁盘 → 库）。
+     * 作者可以直接改/新增以下文件，之后所有注入与续写都以最新内容为准：
+     *   files/设定卡/{分类}/{名称}.md —— 改卡内容、新增卡
+     *   files/正文/第N章-标题.txt    —— 改正文（摘要自动作废，下次写作前自动刷新）
+     *   files/大纲/分章大纲.md        —— 改章节标题与大纲
+     * 按文件修改时间判断新旧：文件比库新才采纳，绝不覆盖作者刚在 APP 里保存的内容。
+     */
+    suspend fun syncFromLocalFiles(projectId: Long, context: Context?): Int {
+        if (context == null) return 0
+        val dao = Repo.dao
+        val base = try { File(context.filesDir, "novels/$projectId/files") } catch (_: Exception) { return 0 }
+        if (!base.isDirectory) return 0
+        var changed = 0
+
+        // 1) 设定卡：files/设定卡/{分类}/{名称}.md
+        val cardRoot = File(base, "设定卡")
+        if (cardRoot.isDirectory) {
+            val cards = dao.cards(projectId)
+            cardRoot.listFiles()?.filter { it.isDirectory }?.forEach { catDir ->
+                val cat = catDir.name
+                if (cat !in CardCategories.all) return@forEach
+                catDir.listFiles()?.filter { it.isFile && it.name.endsWith(".md") }?.forEach { f ->
+                    val name = f.name.removeSuffix(".md")
+                    val body = f.readText(Charsets.UTF_8).lines()
+                        .dropWhile { it.startsWith("# ") || it.isBlank() }
+                        .joinToString("\n").trim()
+                    if (body.isBlank()) return@forEach
+                    val exist = cards.firstOrNull { it.category == cat && it.name == name }
+                    if (exist == null) {
+                        dao.insertCard(
+                            SettingCard(
+                                projectId = projectId, category = cat, name = name, content = body,
+                                priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
+                                status = if (cat == "伏笔钩子") "埋设中" else "",
+                                updatedAt = f.lastModified()
+                            )
+                        )
+                        changed++
+                    } else if (f.lastModified() > exist.updatedAt && body != exist.content) {
+                        dao.updateCard(exist.copy(content = body, updatedAt = f.lastModified()))
+                        changed++
+                    }
+                }
+            }
+        }
+
+        // 2) 正文：files/正文/第N章-标题.txt
+        val txtDir = File(base, "正文")
+        if (txtDir.isDirectory) {
+            val chs = dao.chapters(projectId)
+            val re = Regex("第\\s*(\\d+)\\s*章")
+            txtDir.listFiles()?.filter { it.isFile && it.name.endsWith(".txt") }?.forEach { f ->
+                val idx = re.find(f.name)?.groupValues?.get(1)?.toIntOrNull() ?: return@forEach
+                val ch = chs.firstOrNull { it.chapterIndex == idx } ?: return@forEach
+                val body = f.readText(Charsets.UTF_8).trim()
+                if (body.isBlank() || body == ch.content) return@forEach
+                if (f.lastModified() > ch.updatedAt) {
+                    dao.updateChapter(
+                        ch.copy(
+                            content = body, wordCount = body.length, summary = "",
+                            status = 2, updatedAt = f.lastModified()
+                        )
+                    )
+                    dao.insertMessage(
+                        Message(projectId = projectId, role = "tool", kind = "tool",
+                            content = "🔄 检测到第${idx}章正文在本地被修改（${body.length} 字），已采用最新版本，后续写作以修改后的内容为准。")
+                    )
+                    changed++
+                }
+            }
+        }
+
+        // 3) 分章大纲：files/大纲/分章大纲.md（## 第N章 标题 分节解析）
+        val outlineFile = File(File(base, "大纲"), "分章大纲.md")
+        if (outlineFile.isFile) {
+            val chs = dao.chapters(projectId)
+            val newestCh = chs.maxOfOrNull { it.updatedAt } ?: 0L
+            if (outlineFile.lastModified() > newestCh) {
+                val re = Regex("^##\\s*第\\s*(\\d+)\\s*章\\s*(.*)$")
+                var curIdx = 0
+                var curTitle = ""
+                val buf = StringBuilder()
+                suspend fun flush() {
+                    if (curIdx == 0) return
+                    val ch = chs.firstOrNull { it.chapterIndex == curIdx } ?: return
+                    val outline = buf.toString().trim()
+                    val title = curTitle.trim().removeSurrounding("《", "》")
+                    if ((outline.isNotBlank() && outline != ch.outline) || (title.isNotBlank() && title != ch.title)) {
+                        dao.updateChapter(
+                            ch.copy(
+                                title = title.ifBlank { ch.title },
+                                outline = outline.ifBlank { ch.outline },
+                                updatedAt = outlineFile.lastModified()
+                            )
+                        )
+                        changed++
+                    }
+                }
+                outlineFile.readText(Charsets.UTF_8).lines().forEach { line ->
+                    val m = re.find(line.trim())
+                    if (m != null) {
+                        flush()
+                        curIdx = m.groupValues[1].toIntOrNull() ?: 0
+                        curTitle = m.groupValues[2]
+                        buf.setLength(0)
+                    } else if (curIdx > 0 && !line.trim().startsWith("#")) {
+                        buf.appendLine(line)
+                    }
+                }
+                flush()
+            }
+        }
+        return changed
+    }
+
     /**
      * v6.4：写正文的硬性前置门槛（writeNextChapter / startAutoWrite 都要过这道门）。
      * 返回 null = 全部就绪可以开写；否则返回缺失说明。
@@ -120,6 +258,10 @@ object WriterEngine {
     suspend fun ensurePreconditions(projectId: Long, context: Context? = null): String? {
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在"
+
+        // v6.5：先把作者在本地文件里的修改同步回库（磁盘→库），再合并重复的单卡分类
+        try { syncFromLocalFiles(projectId, context) } catch (_: Exception) { }
+        try { mergeDuplicateSingles(projectId) } catch (_: Exception) { }
 
         // 1) 设定卡：八类核心一张都不能少
         suspend fun missingCats(): List<String> {
@@ -250,13 +392,24 @@ object WriterEngine {
         var pass = 0
         var lastSnippet = ""
 
-        // v6.2：正常情况一遍写完（提示词已规定顺序与条数）；只有一条都没解析出来时才重试一次。
-        // 之前最多 3 轮"补缺"是重复生成设定卡的主要来源——第2轮模型经常把世界观再写一遍（名字不同=新卡）。
-        while (pass < 2) {
+        // v6.5：单卡分类先去重（老版本可能堆出两张世界观），再开始生成
+        mergeDuplicateSingles(projectId)
+
+        // v6.5：内容多一次保存不完就分多轮——每轮开始前播报「已保存好哪些/还缺哪些」，
+        // 自动继续补全，作者不用盯着；已保存的部分绝不重做。
+        while (pass < 4) {
             val have = dao.cards(projectId)
             val need = required.filter { cat -> have.none { c -> c.category == cat } }
             if (need.isEmpty()) break
             pass++
+            if (pass > 1) {
+                val savedList = have.groupBy { it.category }
+                    .entries.joinToString("、") { "${it.key}×${it.value.size}" }
+                dao.insertMessage(
+                    Message(projectId = projectId, role = "tool", kind = "tool",
+                        content = "📋 设定保存进度：已保存 $savedList。\n⚠️ 还缺：${need.joinToString("、")}——继续生成中，已保存的不会重做。")
+                )
+            }
             val msgs = listOf(
                 ChatMsg("system", Prompts.INSPIRE_SYSTEM),
                 ChatMsg("user", Prompts.buildInspireUser(project, inspiration, need, have))
@@ -288,6 +441,20 @@ object WriterEngine {
                 break
             }
         }
+
+        // v6.5：收尾播报——保存好了哪些、还缺哪些（内容都在设定卡里，写作时自动注入，聊天不刷全文）
+        if (count > 0) {
+            val have2 = dao.cards(projectId)
+            val stillMissing = required.filter { cat -> have2.none { c -> c.category == cat } }
+            val savedList = have2.filter { it.category in required }.groupBy { it.category }
+                .entries.joinToString("、") { "${it.key}×${it.value.size}" }
+            val msg = if (stillMissing.isEmpty())
+                "✅ 设定卡已全部建齐并保存：$savedList。内容都在设定卡和项目文件里，写正文时自动注入，聊天里不再重复刷全文。"
+            else
+                "⚠️ 设定卡还没建齐：已保存 $savedList；还缺：${stillMissing.joinToString("、")}。说「继续」我就接着补全缺的部分，已保存的不会重做。"
+            dao.insertMessage(Message(projectId = projectId, role = "tool", kind = "tool", content = msg))
+        }
+
         return if (count == 0)
             "AI未能生成可识别的设定（回复片段：$lastSnippet）。建议换一个模型，或把灵感说得更具体一点。"
         else null
@@ -352,12 +519,12 @@ object WriterEngine {
                 File(d, safeName(name) + ".md").writeText("# $cat · $name\n\n$content\n", Charsets.UTF_8)
             }
         } catch (_: Exception) { }
-        // v5.9：生成一张立即在聊天里显示一张（保存的同时不隐藏内容）
-        val show = if (content.length > 600) content.take(600) + "\n…（全文共 ${content.length} 字，已完整保存）" else content
+        // v6.5：只报「保存好了哪些」，不再把卡片全文刷进聊天——
+        // 内容完整保存在设定卡和项目文件里，写正文时自动注入，想看随时去设定卡页
         dao.insertMessage(
             Message(
                 projectId = projectId, role = "tool", kind = "tool",
-                content = "✅ 已生成设定卡：$cat / $name（${content.length} 字）\n\n$show"
+                content = "✅ 已保存设定卡：$cat / $name（${content.length} 字）"
             )
         )
         return 1
@@ -404,6 +571,7 @@ object WriterEngine {
         val liveTitle = ch0.title.ifBlank { "未命名" }
         var liveId = 0L
         var lastUi = 0L
+        var lastSave = 0L
         val live = StringBuilder()
         val streamed = try {
             AiClient.chatStream(cfg, messages, temperature = 0.85) { delta ->
@@ -418,6 +586,17 @@ object WriterEngine {
                 } else if (now - lastUi > 400) {
                     lastUi = now
                     dao.updateMessageContent(liveId, "📖 第${ch0.chapterIndex}章《$liveTitle》\n\n" + live.toString())
+                }
+                // v6.5：边生成边保存——每 3 秒把已生成部分写进章节库 + 正文文件，中途断了也不丢
+                if (live.length > 500 && now - lastSave > 3000) {
+                    lastSave = now
+                    dao.updateChapter(ch0.copy(content = live.toString(), wordCount = live.length, updatedAt = now))
+                    try {
+                        dir(context, project.id, "正文")?.let { d ->
+                            File(d, safeName("第${ch0.chapterIndex}章-$liveTitle") + ".txt")
+                                .writeText(live.toString(), Charsets.UTF_8)
+                        }
+                    } catch (_: Exception) { }
                 }
             }.text
         } catch (e: Exception) {
