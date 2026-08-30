@@ -664,6 +664,28 @@ object Tools {
         return ToolResult(true, head, body + older)
     }
 
+    /** v6.9.31 手动修改第N章大纲：唯一的大纲人工修改入口（UI 只读），改完自动同步分章大纲镜像卡 */
+    suspend fun setChapterOutline(pid: Long, idx: Int, text: String): ToolResult {
+        val clean = text.trim()
+        if (idx <= 0 || clean.isEmpty())
+            return ToolResult(false, "用法：修改第3章大纲：新大纲内容（也可《新标题》：新大纲 同时改标题）")
+        val dao = Repo.dao
+        val chs = dao.chapters(pid)
+        val ch = chs.firstOrNull { it.chapterIndex == idx }
+            ?: return ToolResult(false, "第 $idx 章不存在（本书已建 ${chs.size} 章）")
+        var title = ch.title
+        var outline = clean.take(500)
+        // 《新标题》：新大纲 同时改标题；否则只改大纲
+        Regex("^《([^》]{1,40})》[：:]\\s*(.+)$", RegexOption.DOT_MATCHES_ALL).find(clean)?.let { m ->
+            title = m.groupValues[1]
+            outline = m.groupValues[2].trim().take(500)
+        }
+        dao.updateChapter(ch.copy(title = title, outline = outline, updatedAt = System.currentTimeMillis()))
+        WriterEngine.syncChapterOutlineCard(pid, Repo.app)
+        val titleNote = if (title != ch.title) "（标题改为《$title》）" else ""
+        return ToolResult(true, "✅ 第${idx}章大纲已更新$titleNote，分章大纲卡已同步", "新大纲：$outline")
+    }
+
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao
@@ -872,6 +894,7 @@ object Tools {
             "subplotCheck" -> subplotCheck(pid)
             "cardsCheck" -> cardsCheck(pid)
             "cardsCheckReport" -> cardsCheckReport(pid)
+            "setChapterOutline" -> setChapterOutline(pid, args.optInt("index"), args.optString("text"))
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
             "genBlurb" -> genBlurb(pid, context)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))

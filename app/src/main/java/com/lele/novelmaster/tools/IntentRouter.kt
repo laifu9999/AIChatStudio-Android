@@ -121,7 +121,7 @@ object IntentRouter {
             // 否则会在这里被当成「查看/写第N章」截胡（回归模拟确认 v6.9.8~v6.9.18 的 14 条用例全部中招）。
             // v6.9.20：动作词补「改成对话/对话体/对话」（覆盖扩写路由的「把第N章改成对话体/对话改生动」语序）
             if (m.value.startsWith("第") &&
-                Regex("自检|检查|体检|撤销|还原|回滚|恢复|重写|补写|润色|扩写|风格|钩子|金句|伏笔|支线|推演|一致性|矛盾|改成对话|对话体|对话").containsMatchIn(raw)
+                Regex("自检|检查|体检|撤销|还原|回滚|恢复|重写|补写|润色|扩写|风格|钩子|金句|伏笔|支线|推演|一致性|矛盾|改成对话|对话体|对话|大纲").containsMatchIn(raw)
             ) return@let
             val idx = parseChineseNum(m.groupValues[1])
             if (idx in 1..100000) {
@@ -217,6 +217,16 @@ object IntentRouter {
                 .removePrefix("根据以下灵感：").removePrefix("根据以下灵感:")
             val pid = needPid() ?: return ToolResult(false, "请先创建一本书或告诉我写哪一本")
             return Tools.inspireFromText(pid, text, context)
+        }
+
+        // v6.9.31：手动修改第N章大纲——唯一的大纲人工修改入口，改完自动同步分章大纲镜像卡；
+        // 放在生成大纲路由之前（「修改第3章大纲」不被「写大纲」类截胡）
+        Regex("(?:修改|改成?|更新|换掉?|重设)\\s*(?:一下)?\\s*第\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章\\s*(?:的)?大纲|第\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章\\s*的?\\s*大纲\\s*(?:改成|改为|换成|修改为)").find(raw)?.let { m ->
+            val idx = parseChineseNum(m.groupValues[1].ifBlank { m.groupValues[2] })
+            val pid = needPid() ?: return ToolResult(false, "请先告诉我改哪本书")
+            // 新大纲 = 命中词之后的内容（去掉引导冒号），为空时工具内部返回用法提示
+            val rest = raw.substring(m.range.last + 1).trim().trimStart('：', ':', ' ', '，', ',')
+            return Tools.setChapterOutline(pid, idx, rest)
         }
 
         if (Regex("(补|写|生成|生)(全|所有)?大纲|大纲生成|自动大纲").containsMatchIn(raw)) {
