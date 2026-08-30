@@ -107,6 +107,65 @@ object WriterEngine {
         return null
     }
 
+    /** v6.4：写正文必须建全的八类核心设定卡，一张都不能少 */
+    val REQUIRED_CATS = listOf(
+        "世界观", "人物设定", "主线剧情", "核心冲突", "支线任务", "伏笔钩子", "设定圣经", "全书大纲"
+    )
+
+    /**
+     * v6.4：写正文的硬性前置门槛（writeNextChapter / startAutoWrite 都要过这道门）。
+     * 返回 null = 全部就绪可以开写；否则返回缺失说明。
+     * 检测到缺什么会先自动补什么（并全程在聊天里播报进度），补不齐绝不放行。
+     */
+    suspend fun ensurePreconditions(projectId: Long, context: Context? = null): String? {
+        val dao = Repo.dao
+        val project = dao.project(projectId) ?: return "项目不存在"
+
+        // 1) 设定卡：八类核心一张都不能少
+        fun missingCats(): List<String> {
+            val have = dao.cards(projectId).map { it.category }.toSet()
+            return REQUIRED_CATS.filter { it !in have }
+        }
+        var missing = missingCats()
+        if (missing.isNotEmpty()) {
+            dao.insertMessage(
+                Message(projectId = projectId, role = "tool", kind = "tool",
+                    content = "🧱 还不能开写：设定卡还没建全（缺：${missing.joinToString("、")}）。正在自动补全全部设定卡…")
+            )
+            val inspiration = buildString {
+                append("书名《${project.title}》")
+                if (project.genre.isNotBlank()) append("，类型：${project.genre}")
+                append("。")
+                if (project.description.isNotBlank()) append("创作方向：${project.description}")
+                else append("请依据书名与类型展开完整设定。")
+            }
+            val err = generateCardsFromInspire(projectId, inspiration, context)
+            if (err != null) return "设定卡未建全（缺：${missing.joinToString("、")}），自动补全失败：$err"
+            missing = missingCats()
+            if (missing.isNotEmpty()) {
+                return "设定卡仍缺少：${missing.joinToString("、")}。必须先用 addCard 把这些卡补全，才能开始写正文。"
+            }
+        }
+
+        // 2) 分章大纲：下一章必须有标题+剧情要点，否则写的章节没有标题
+        val chs = dao.chapters(projectId)
+        val nextCh = chs.firstOrNull { it.content.isBlank() }
+        if (nextCh != null && nextCh.outline.isBlank()) {
+            dao.insertMessage(
+                Message(projectId = projectId, role = "tool", kind = "tool",
+                    content = "🧭 还不能开写：第${nextCh.chapterIndex}章还没有大纲。正在自动生成分章大纲（每章标题+剧情核心）…")
+            )
+            val err = ensureOutlines(projectId, context = context)
+            if (err != null) return "分章大纲生成失败：$err"
+        }
+
+        // 3) 分卷大纲卡：设定卡里必须有「分卷大纲」（含旧项目升级补建）
+        val hasVol = dao.cards(projectId).any { it.name == "分卷大纲" }
+        if (!hasVol) syncVolumeOutlineCard(projectId, context)
+
+        return null
+    }
+
     /**
      * v6.3：把章节标题+大纲核心按卷整理成「分卷大纲」设定卡。
      * 用户要求"设定卡里面要包含分卷大纲"——这样在设定卡页面也能看到全书骨架，
@@ -134,16 +193,17 @@ object WriterEngine {
             }
         }
 
-        // 单卡分类去重：全书大纲一类只允许一张
-        val exist = cards.firstOrNull { it.category == "全书大纲" }
+        // v6.4：分卷大纲独立成卡（辅助设定/分卷大纲）——不再覆盖 AI 生成的「全书大纲」主卡，
+        // 两张卡都在：全书大纲=起承转合阶段规划，分卷大纲=每章标题+剧情核心逐章列表
+        val exist = cards.firstOrNull { it.name == "分卷大纲" }
         val text = md.trim()
-        if (exist != null) dao.updateCard(exist.copy(name = "分卷大纲", content = text, priority = 2))
+        if (exist != null) dao.updateCard(exist.copy(category = "辅助设定", content = text, priority = 2))
         else dao.insertCard(
-            SettingCard(projectId = projectId, category = "全书大纲", name = "分卷大纲", content = text, priority = 2)
+            SettingCard(projectId = projectId, category = "辅助设定", name = "分卷大纲", content = text, priority = 2)
         )
         try {
-            dir(context, projectId, "设定卡/全书大纲")?.let { d ->
-                File(d, safeName("分卷大纲") + ".md").writeText("# 全书大纲 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
+            dir(context, projectId, "设定卡/辅助设定")?.let { d ->
+                File(d, safeName("分卷大纲") + ".md").writeText("# 辅助设定 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
             }
         } catch (_: Exception) { }
     }
@@ -585,6 +645,12 @@ object AutoWriteManager {
                 val project = dao.project(projectId) ?: run { log("项目不存在"); return@launch }
                 val cfg = dao.activeApi() ?: run { log("未启用AI模型：请到【AI模型】添加并设为启用"); return@launch }
                 log("开始自动写作《${project.title}》第$from~$to 章（模型：${cfg.model}）")
+
+                // v6.4：硬门槛——设定卡八类+分章大纲+分卷大纲不齐全，先自动补全再开写
+                state.value = state.value.copy(currentChapter = "检查设定卡与大纲…")
+                val gateErr = WriterEngine.ensurePreconditions(projectId, context)
+                if (gateErr != null) { log(gateErr); return@launch }
+                log("设定卡与大纲已就绪")
 
                 // 1) 先补齐范围内缺失的大纲
                 state.value = state.value.copy(currentChapter = "生成缺失大纲中…")

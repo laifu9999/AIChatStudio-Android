@@ -229,24 +229,19 @@ object Tools {
         val chs = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
         val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val next = chs.firstOrNull { it.content.isBlank() } ?: return ToolResult(false, "全部章节都已写完 ✅")
+        // v6.4：硬门槛——设定卡八类全部建全 + 分章大纲 + 分卷大纲卡就绪才允许写正文；
+        // 缺什么自动先补什么（聊天里实时播报），补不齐绝不放行，杜绝"没建完设定就开始写第一章"
+        val gateErr = WriterEngine.ensurePreconditions(pid, context)
+        if (gateErr != null) return ToolResult(false, gateErr)
         return try {
-            // v6.3：写章前先确保分章大纲（标题+剧情要点）已生成——
-            // 之前 AI 常常跳过 generateOutlines 直接开写，导致章节全是「未命名」且注入里没有大纲核心
-            val noOutline = chs.count { it.outline.isBlank() }
-            if (next.outline.isBlank()) {
-                withContext(Dispatchers.IO) {
-                    Repo.dao.insertMessage(
-                        Message(projectId = pid, role = "tool", kind = "tool",
-                            content = "🧭 检测到 $noOutline 章还没有大纲，正在自动补全分章大纲（标题+剧情要点）…")
-                    )
-                }
-                WriterEngine.ensureOutlines(pid, context = context)
-            }
-            WriterEngine.writeOne(project, cfg, Repo.dao, next, context)
-            val fresh = withContext(Dispatchers.IO) { Repo.dao.chapter(next.id) }!!
-            ToolResult(true, "✅ 第${fresh.chapterIndex}章《${fresh.title}》已写入（${fresh.wordCount} 字）",
-                "完整正文已在上方聊天里实时显示，并已保存到章节库和正文文件，不会重复输出。\n摘要：${fresh.summary.take(120)}",
-                navigateTo = "editor/${fresh.id}")
+            // 补全过程改过数据库，重新取最新章节（标题/大纲已就位）
+            val fresh = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
+                .firstOrNull { it.id == next.id } ?: next
+            WriterEngine.writeOne(project, cfg, Repo.dao, fresh, context)
+            val done = withContext(Dispatchers.IO) { Repo.dao.chapter(fresh.id) }!!
+            ToolResult(true, "✅ 第${done.chapterIndex}章《${done.title}》已写入（${done.wordCount} 字）",
+                "完整正文已在上方聊天里实时显示，并已保存到章节库和正文文件，不会重复输出。\n摘要：${done.summary.take(120)}",
+                navigateTo = "editor/${done.id}")
         } catch (e: Exception) {
             ToolResult(false, "写作失败：${e.message?.take(200)}")
         }
@@ -262,6 +257,9 @@ object Tools {
     // ---------- 自动写作 / 大纲 ----------
 
     suspend fun startAutoWrite(pid: Long, from: Int, to: Int, context: Context? = null): ToolResult {
+        // v6.4：自动写作同样过硬门槛——设定卡+分章大纲+分卷大纲不齐全，先自动补全再开写
+        val gateErr = WriterEngine.ensurePreconditions(pid, context)
+        if (gateErr != null) return ToolResult(false, gateErr)
         // 自定义范围 1~600；实际章节不足时按实际章节遍历，写完自动停
         val f = from.coerceIn(1, 600)
         val t = to.coerceIn(f, 600)
