@@ -496,6 +496,32 @@ object Tools {
         return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out) else ToolResult(false, err)
     }
 
+    /** 8.0b 伏笔体检：对照伏笔钩子卡与各章摘要，评估埋设/回收状态并给回收建议（只分析不修改） */
+    suspend fun foreshadowCheck(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val hooks = dao.cards(pid).filter { it.category == "伏笔钩子" }
+        if (hooks.isEmpty()) return ToolResult(false, "这本书还没有「伏笔钩子」卡。写正文时 AI 会自动记录伏笔，也可在设定卡里手动添加。")
+        val open = hooks.filter { it.status != "已回收" }
+        val done = hooks.filter { it.status == "已回收" }
+        val chapters = dao.chapters(pid).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
+        val summaryBlock = chapters.takeLast(30)
+            .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary.take(60)}" }
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：伏笔体检（只分析，不修改任何卡与正文）。\n" +
+                "【伏笔清单】\n" +
+                (if (open.isNotEmpty()) "未回收：\n" + open.joinToString("\n") { "· ${it.name}：${it.content.take(80)}" } + "\n" else "") +
+                (if (done.isNotEmpty()) "已回收：\n" + done.joinToString("\n") { "· ${it.name}" } + "\n" else "") +
+                "\n【最近章节摘要】\n$summaryBlock\n\n" +
+                "请输出：\n" +
+                "1) 每条未回收伏笔一行：评估状态——「已过很久未回收（剧情已推进较远，读者可能遗忘）」/「仍在合理埋设期」/「摘要显示其实已回收但未标记」；\n" +
+                "2) 对应尽快回收的伏笔，给出建议的回收时机与方式（各一句话）；\n" +
+                "3) 已回收伏笔若与最近摘要明显矛盾也要指出。\n" +
+                "按紧急度从高到低排序，不要解释格式。"
+        )
+        return if (err == null) ToolResult(true, "🪝 伏笔体检（未回收 ${open.size} 条 / 已回收 ${done.size} 条）：", out) else ToolResult(false, err)
+    }
+
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao

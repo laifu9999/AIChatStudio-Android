@@ -270,6 +270,11 @@ object IntentRouter {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.chapterSelfCheck(pid, chapterNum)
         }
+        // v6.9.12：伏笔体检——必须放在「全书体检」路由之前（后者含裸「体检」正则会误拦截）
+        if (raw.contains("伏笔")) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.foreshadowCheck(pid)
+        }
         if (Regex("全书体检|一致性体检|一致性检查|体检|找矛盾|查矛盾").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.consistencyCheck(pid)
