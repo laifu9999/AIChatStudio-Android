@@ -513,9 +513,10 @@ object Tools {
         val sumBlock = written.joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary}" }
         val (err, out) = WriterEngine.freeTask(
             pid,
-            "任务：全书一致性体检。各章摘要如下：\n$sumBlock\n\n请检查：1) 设定矛盾（能力/称谓/人数/物品）；2) 时间线错误；3) 未回收或异常的伏笔；4) 平台敏感内容风险提示。逐条列出（注明章号）并给修复建议；没问题就明确说【通过】。"
+            "任务：全书一致性体检。各章摘要如下：\n$sumBlock\n\n请检查：1) 设定矛盾（能力/称谓/人数/物品）；2) 时间线错误；3) 未回收或异常的伏笔；4) 平台敏感内容风险提示。逐条列出（注明章号）并给修复建议；没问题就明确说【通过】。\n（本体检只列问题不修改；如需自动修正，可说「全书自检」）"
         )
-        return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out) else ToolResult(false, err)
+        val tip = if (err == null) "\n\n💡 本报告只诊断不修改。想让系统逐章自动修正矛盾，请说「全书自检」。" else ""
+        return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out + tip) else ToolResult(false, err)
     }
 
     /** 8.0b 伏笔体检：对照伏笔钩子卡与各章摘要，评估埋设/回收状态并给回收建议（只分析不修改） */
@@ -542,6 +543,19 @@ object Tools {
                 "按紧急度从高到低排序，不要解释格式。"
         )
         return if (err == null) ToolResult(true, "🪝 伏笔体检（未回收 ${open.size} 条 / 已回收 ${done.size} 条）：", out) else ToolResult(false, err)
+    }
+
+    /** 8.0c 标记伏笔已回收：伏笔体检发现「已回收但未标记」时的人工确认入口（v6.9.16） */
+    suspend fun markHookRecovered(pid: Long, name: String): ToolResult {
+        if (name.isBlank()) return ToolResult(false, "请说明要标记哪条伏笔，如：标记伏笔「神秘令牌」已回收")
+        val dao = Repo.dao
+        val hooks = dao.cards(pid).filter { it.category == "伏笔钩子" }
+        val target = hooks.firstOrNull { it.name == name }
+            ?: hooks.firstOrNull { it.name.contains(name) || name.contains(it.name) }
+            ?: return ToolResult(false, "找不到伏笔「$name」。可用「伏笔体检」或设定卡页查看现有伏笔清单。")
+        if (target.status == "已回收") return ToolResult(false, "伏笔「${target.name}」已经是已回收状态")
+        dao.updateCard(target.copy(status = "已回收", updatedAt = System.currentTimeMillis()))
+        return ToolResult(true, "🪝 已标记伏笔「${target.name}」为已回收", "该伏笔不再出现在「未回收」清单中。若标错了，可在设定卡页改回「埋设中」。")
     }
 
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
@@ -740,6 +754,14 @@ object Tools {
             "plotBrainstorm" -> plotBrainstorm(pid)
             "characterCheck" -> characterCheck(pid, args.optString("name"))
             "consistencyCheck" -> consistencyCheck(pid)
+            // v6.9.16：一致性体系新工具（v6.9.8~v6.9.15）接入 AI 工具协议
+            "chapterSelfCheck" -> chapterSelfCheck(pid, args.optInt("index", -1))
+            "fullSelfCheck" -> fullSelfCheck(pid)
+            "selfCheckProgress" -> selfCheckProgress(pid)
+            "undoSelfCheck" -> undoSelfCheck(pid, args.optInt("index", 0))
+            "supplementChapter" -> supplementChapter(pid, args.optInt("index", -1))
+            "foreshadowCheck" -> foreshadowCheck(pid)
+            "markHookRecovered" -> markHookRecovered(pid, args.optString("name"))
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
             "genBlurb" -> genBlurb(pid, context)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))

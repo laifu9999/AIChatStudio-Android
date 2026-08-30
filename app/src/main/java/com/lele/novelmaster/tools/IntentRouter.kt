@@ -280,6 +280,13 @@ object IntentRouter {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.chapterSelfCheck(pid, chapterNum)
         }
+        // v6.9.16：标记伏笔已回收——必须放在伏笔体检路由之前（后者匹配一切含「伏笔」的输入）
+        if (Regex("标记.*伏笔.{0,6}(已回收|回收)|(已回收|回收).{0,4}标记").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            val hookName = Regex("标记.{0,4}伏笔[「'\"]?([^」'\"]{1,20})[」'\"]?.{0,4}(已回收|回收)")
+                .find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            return Tools.markHookRecovered(pid, hookName)
+        }
         // v6.9.12：伏笔体检——必须放在「全书体检」路由之前（后者含裸「体检」正则会误拦截）
         if (raw.contains("伏笔")) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
