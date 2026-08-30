@@ -45,6 +45,7 @@ import com.lele.novelmaster.data.CardCategories
 import com.lele.novelmaster.data.Repo
 import com.lele.novelmaster.data.SettingCard
 import com.lele.novelmaster.data.WriterEngine
+import com.lele.novelmaster.tools.Tools
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,6 +58,7 @@ fun CardsScreen(nav: NavController, pid: Long) {
     var showAdd by remember { mutableStateOf(false) }
     var editCard by remember { mutableStateOf<SettingCard?>(null) }
     var showInspire by remember { mutableStateOf(false) }
+    var outlineBusy by remember { mutableStateOf(false) }
 
     // v6.9.22：「分章大纲」独立页签与「全书大纲」并列（分章大纲卡 category=全书大纲、name=分章大纲，由系统自动同步）
     val cats = listOf("全部", "全书大纲", "分章大纲") + CardCategories.all.filter { it != "全书大纲" }
@@ -81,23 +83,39 @@ fun CardsScreen(nav: NavController, pid: Long) {
                     Tab(selected = tab == cat, onClick = { tab = cat }, text = { Text(cat) })
                 }
             }
-            if (list.isEmpty()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        if (tab == "分章大纲")
-                            "还没有分章大纲卡。\n\n生成章节大纲后会自动同步到这里；也可以点下面按钮，从已有章节直接重建。"
-                        else
-                            "该分类还没有设定卡。\n\n推荐：点右上角「灵感分析」，把你的灵感告诉AI，它会自动生成整套设定。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (tab == "分章大纲") {
-                        Button(
-                            onClick = { scope.launch(Dispatchers.IO) { WriterEngine.syncChapterOutlineCard(pid, Repo.app) } },
-                            modifier = Modifier.padding(top = 12.dp)
-                        ) { Text("🔄 从章节重建大纲卡") }
-                    }
+            // v6.9.26：分章大纲页签常驻操作行——AI 补全缺失大纲（章节也没大纲时的从 0 生成）+ 从章节重建镜像卡
+            if (tab == "分章大纲") {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        enabled = !outlineBusy,
+                        onClick = {
+                            outlineBusy = true
+                            scope.launch(Dispatchers.IO) {
+                                Tools.generateOutlines(pid)
+                                withContext(Dispatchers.Main) { outlineBusy = false }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text(if (outlineBusy) "AI 生成中…" else "🧭 AI 补全缺失大纲", maxLines = 1) }
+                    OutlinedButton(
+                        onClick = { scope.launch(Dispatchers.IO) { WriterEngine.syncChapterOutlineCard(pid, Repo.app) } },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("🔄 从章节重建", maxLines = 1) }
                 }
+            }
+            if (list.isEmpty()) {
+                Text(
+                    if (tab == "分章大纲")
+                        "还没有分章大纲。\n\n点上面「AI 补全缺失大纲」生成；已有章节大纲时也可「从章节重建」镜像卡。"
+                    else
+                        "该分类还没有设定卡。\n\n推荐：点右上角「灵感分析」，把你的灵感告诉AI，它会自动生成整套设定。",
+                    modifier = Modifier.padding(16.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
                 items(list, key = { it.id }) { card ->
