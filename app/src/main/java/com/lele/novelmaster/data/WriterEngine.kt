@@ -104,6 +104,8 @@ object WriterEngine {
 
         // v6.3：分卷大纲必须进设定卡 —— 按卷分组（每 20 章一卷）写入「全书大纲/分卷大纲」卡
         syncVolumeOutlineCard(projectId, context)
+        // v6.6：分章大纲整卡进设定卡（辅助设定/分章大纲），章节标题以此为唯一来源
+        syncChapterOutlineCard(projectId, context)
         return null
     }
 
@@ -305,6 +307,10 @@ object WriterEngine {
         val hasVol = dao.cards(projectId).any { it.name == "分卷大纲" }
         if (!hasVol) syncVolumeOutlineCard(projectId, context)
 
+        // 4) v6.6：分章大纲卡：设定卡里必须有「分章大纲」（含旧项目升级补建）
+        val hasChOutline = dao.cards(projectId).any { it.name == "分章大纲" }
+        if (!hasChOutline) syncChapterOutlineCard(projectId, context)
+
         return null
     }
 
@@ -346,6 +352,39 @@ object WriterEngine {
         try {
             dir(context, projectId, "设定卡/辅助设定")?.let { d ->
                 File(d, safeName("分卷大纲") + ".md").writeText("# 辅助设定 · 分卷大纲\n\n$text\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * v6.6：把分章大纲（每章标题+剧情核心）整卡存进设定卡「辅助设定/分章大纲」。
+     * 用户要求：设定卡里必须有分章大纲，章节标题也从这里调取，生成时不漏掉。
+     * 写章注入只取该卡的窗口（前两章+当前章+后一章），不再整卡注入。
+     */
+    suspend fun syncChapterOutlineCard(projectId: Long, context: Context? = null) {
+        val dao = Repo.dao
+        val withOutline = dao.chapters(projectId).filter { it.outline.isNotBlank() || it.title.isNotBlank() }
+        if (withOutline.isEmpty()) return
+
+        val md = buildString {
+            appendLine("分章大纲 = 每章的标题与剧情核心。写作时章节标题一律以此为准。")
+            appendLine()
+            withOutline.forEach { ch ->
+                val title = ch.title.ifBlank { "未命名" }
+                val core = ch.outline.replace(Regex("\\s+"), " ").take(80)
+                appendLine("第${ch.chapterIndex}章《$title》：${core.ifBlank { "（待补大纲）" }}")
+            }
+        }
+        val text = md.trim()
+
+        val exist = dao.cards(projectId).firstOrNull { it.name == "分章大纲" }
+        if (exist != null) dao.updateCard(exist.copy(category = "辅助设定", content = text, priority = 2))
+        else dao.insertCard(
+            SettingCard(projectId = projectId, category = "辅助设定", name = "分章大纲", content = text, priority = 2)
+        )
+        try {
+            dir(context, projectId, "设定卡/辅助设定")?.let { d ->
+                File(d, safeName("分章大纲") + ".md").writeText("# 辅助设定 · 分章大纲\n\n$text\n", Charsets.UTF_8)
             }
         } catch (_: Exception) { }
     }

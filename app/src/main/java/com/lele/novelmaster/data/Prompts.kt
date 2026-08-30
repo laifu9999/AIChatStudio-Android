@@ -80,9 +80,23 @@ object Prompts {
             .filter { it.chapterIndex < chapter.chapterIndex && it.summary.isNotBlank() }
             .takeLast(5)
         val prev = chapters.firstOrNull { it.chapterIndex == chapter.chapterIndex - 1 }
-        val neighbors = chapters
-            .filter { it.chapterIndex in (chapter.chapterIndex - 1)..(chapter.chapterIndex + 1) && it.outline.isNotBlank() }
-            .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》:${it.outline}" }
+
+        // v6.6：大纲窗口注入——只注入分章大纲的「前两章 + 当前章 + 后一章」，
+        // 不再注入整卷/整卡（之前 20 章本卷全景太浪费 token，弱模型也跟不上）
+        val window = chapters
+            .filter { it.chapterIndex in (chapter.chapterIndex - 2)..(chapter.chapterIndex + 1) }
+            .sortedBy { it.chapterIndex }
+            .joinToString("\n") { ch ->
+                val t = ch.title.ifBlank { "未命名" }
+                val core = ch.outline.replace(Regex("\\s+"), " ")
+                val mark = if (ch.chapterIndex == chapter.chapterIndex) "\u25b6" else "\u00b7"
+                if (ch.chapterIndex < chapter.chapterIndex)
+                    "$mark 第${ch.chapterIndex}章《$t》（已写）：${core.take(40).ifBlank { "（无大纲）" }}"
+                else if (ch.chapterIndex == chapter.chapterIndex)
+                    "$mark 第${ch.chapterIndex}章《$t》（本章）：${core.take(120).ifBlank { "（无大纲）" }}"
+                else
+                    "$mark 第${ch.chapterIndex}章《$t》（下一章引向这里）：${core.take(80).ifBlank { "（待补大纲）" }}"
+            }
 
         val user = buildString {
             appendLine("【书名】${project.title}　【类型】${project.genre}")
@@ -97,25 +111,10 @@ object Prompts {
                 appendLine("【上一章结尾（本章开头要自然衔接）】")
                 appendLine(prev.content.takeLast(300))
             }
-            if (neighbors.isNotBlank()) {
+            if (window.isNotBlank()) {
                 appendLine()
-                appendLine("【相邻章节大纲（保持连贯）】")
-                appendLine(neighbors)
-            }
-            // v6.3：本章所在卷的全景（标题 + 剧情核心），保证 600 章也不跑偏
-            val volStart = ((chapter.chapterIndex - 1) / 20) * 20 + 1
-            val volEnd = volStart + 19
-            val volLines = chapters.filter { it.chapterIndex in volStart..volEnd }
-                .joinToString("\n") { ch ->
-                    val t = ch.title.ifBlank { "未命名" }
-                    val core = ch.outline.replace(Regex("\\s+"), " ").take(30)
-                    val mark = if (ch.chapterIndex == chapter.chapterIndex) "\u25b6" else "\u00b7"
-                    "$mark 第${ch.chapterIndex}章《$t》：${core.ifBlank { "（待补）" }}"
-                }
-            if (volLines.isNotBlank()) {
-                appendLine()
-                appendLine("【本卷全景（第${volStart}~${volEnd}章，标题+剧情核心）】")
-                appendLine(volLines)
+                appendLine("【分章大纲窗口（前两章+本章+后一章，章节标题以此为准）】")
+                appendLine(window)
             }
             appendLine()
             appendLine("【本章任务】第${chapter.chapterIndex}章")
