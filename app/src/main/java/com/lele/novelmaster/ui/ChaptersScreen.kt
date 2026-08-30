@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +31,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.lele.novelmaster.data.Chapter
@@ -45,6 +47,12 @@ fun ChaptersScreen(nav: NavController, pid: Long) {
     val scope = rememberCoroutineScope()
     var generating by remember { mutableStateOf(false) }
     var genMsg by remember { mutableStateOf("") }
+    // v6.9.17：自检状态徽标（✅通过/🔧修复过/⚠️疑似/无=未自检），数据来自本地「自检记录」
+    val context = LocalContext.current
+    var selfCheckMap by remember(pid) { mutableStateOf<Map<Int, String>>(emptyMap()) }
+    LaunchedEffect(pid, chapters.size) {
+        selfCheckMap = withContext(Dispatchers.IO) { WriterEngine.readSelfCheckRecord(pid, context) }
+    }
 
     AppScaffold(
         "章节列表",
@@ -106,6 +114,19 @@ fun ChaptersScreen(nav: NavController, pid: Long) {
                                 1 -> "AI稿" to MaterialTheme.colorScheme.primary
                                 2 -> "已编辑" to MaterialTheme.colorScheme.secondary
                                 else -> "待写" to MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                            // v6.9.17：自检状态徽标
+                            val scBadge = when (selfCheckMap[c.chapterIndex]) {
+                                "pass" -> "✅"
+                                "fixed" -> "🔧"
+                                "suspect" -> "⚠️"
+                                else -> ""
+                            }
+                            if (scBadge.isNotEmpty()) {
+                                Text(
+                                    scBadge,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
                             }
                             Text(
                                 statusText,
