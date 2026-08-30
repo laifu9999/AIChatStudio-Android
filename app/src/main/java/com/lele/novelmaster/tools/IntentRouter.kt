@@ -253,6 +253,12 @@ object IntentRouter {
             if (name.isBlank()) return ToolResult(false, "请说明检查哪个人物，如：体检林墨")
             return Tools.characterCheck(pid, name)
         }
+        // v6.9.10：撤销自检修改——必须放在单章自检路由之前（「撤销第N章自检修改」含「自检」会被误拦截）
+        if (Regex("撤销|还原|回滚|恢复第").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            if (chapterNum <= 0) return ToolResult(false, "请说明要撤销哪一章，如：撤销第5章自检修改")
+            return Tools.undoSelfCheck(pid, chapterNum)
+        }
         // v6.9.9：全书逐章自检修复——必须放在单章自检路由之前（「全书自检」含「自检」会被误拦截）
         if (Regex("全书自检|自检全书|逐章自检|自检所有|所有章.{0,4}自检").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")

@@ -532,6 +532,16 @@ object Tools {
         )
     }
 
+    /** 8.2 撤销第N章最近一次自检修改：用正文备份恢复（v6.9.10 安全网） */
+    suspend fun undoSelfCheck(pid: Long, chapterIndex: Int): ToolResult {
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
+        if (chapterIndex <= 0) return ToolResult(false, "请说明要撤销哪一章，如：撤销第5章自检修改")
+        val (err, out) = WriterEngine.restoreLastSelfCheck(cfg, dao, project, chapterIndex, Repo.app)
+        return if (err == null) ToolResult(true, "↩️ 第${chapterIndex}章已恢复到自检前版本", out) else ToolResult(false, err)
+    }
+
     /** 9. 起名器 */
     suspend fun nameGen(pid: Long, kind: String, count: Int): ToolResult {
         val (err, out) = WriterEngine.freeTask(

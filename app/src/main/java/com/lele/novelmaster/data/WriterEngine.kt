@@ -780,12 +780,28 @@ object WriterEngine {
         val fixes = mutableListOf<String>()
         text.lines().filter { it.contains("=>") }.take(5).forEach { line ->
             val (bad, good) = line.split("=>", limit = 2).map { it.trim().trim('`', '"') }
-            if (bad.length in 2..120 && good.isNotBlank() && content.contains(bad)) {
-                content = content.replace(bad, good)
-                fixes.add("「${bad.take(30)}」→「${good.take(30)}」")
+            if (bad.length in 2..120 && good.isNotBlank()) {
+                if (content.contains(bad)) {
+                    content = content.replace(bad, good)
+                    fixes.add("「${bad.take(30)}」→「${good.take(30)}」")
+                } else if (bad.length >= 4) {
+                    // v6.9.10：宽松匹配兜底——AI 给的片段常因空白/标点差异对不上精确匹配
+                    val loose = Regex(bad.map { Regex.escape(it.toString()) }.joinToString("\\s*"))
+                    if (loose.containsMatchIn(content)) {
+                        content = loose.replace(content) { good }
+                        fixes.add("「${bad.take(30)}」→「${good.take(30)}」（宽松匹配）")
+                    }
+                }
             }
         }
         if (fixes.isNotEmpty()) {
+            // v6.9.10：修复前备份原文到「正文备份」目录（供撤销恢复），绝不无备份地改正文
+            try {
+                dir(context, project.id, "正文备份")?.let { d ->
+                    File(d, safeName("第${ch0.chapterIndex}章-${ch0.title.ifBlank { "未命名" }}") + "-备份" + System.currentTimeMillis() + ".txt")
+                        .writeText(ch0.content + "\n", Charsets.UTF_8)
+                }
+            } catch (_: Exception) { }
             dao.updateChapter(ch0.copy(content = content, wordCount = content.length, updatedAt = System.currentTimeMillis()))
             try {
                 dir(context, project.id, "正文")?.let { d ->
@@ -842,6 +858,32 @@ object WriterEngine {
             "修正模式已沉淀进【写作禁忌】卡，后续章节不再重犯同类错误。"
         dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool", content = summary))
         return null to summary
+    }
+
+    /**
+     * v6.9.10：撤销第 N 章最近一次自检修改——用「正文备份」目录里该章最新的备份覆盖回去。
+     * 恢复后同步本地正文文件并重新生成摘要。返回 (err, msg)。
+     */
+    suspend fun restoreLastSelfCheck(cfg: ApiConfig, dao: NovelDao, project: Project, chapterIndex: Int, context: Context?): Pair<String?, String> {
+        val ch = dao.chapters(project.id).firstOrNull { it.chapterIndex == chapterIndex }
+            ?: return "第 $chapterIndex 章不存在" to ""
+        val d = dir(context, project.id, "正文备份") ?: return "无法访问备份目录（本章可能从未被自动修正过）" to ""
+        val prefix = safeName("第${chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + "-备份"
+        val latest = d.listFiles { f -> f.isFile && f.name.startsWith(prefix) }
+            ?.maxByOrNull { it.name }
+            ?: return "第 ${chapterIndex} 章没有自检修复备份（该章可能从未被自动修正过）" to ""
+        val restored = latest.readText(Charsets.UTF_8).trim()
+        if (restored.isBlank()) return "备份文件为空，放弃恢复" to ""
+        val newCh = ch.copy(content = restored, wordCount = restored.length, updatedAt = System.currentTimeMillis())
+        dao.updateChapter(newCh)
+        try {
+            dir(context, project.id, "正文")?.let { dd ->
+                File(dd, safeName("第${chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + ".txt")
+                    .writeText(restored + "\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+        regenerateSummary(cfg, dao, project, newCh)
+        return null to "↩️ 已把第 ${chapterIndex} 章恢复到最近一次自检修复前的版本（备份：${latest.name}），摘要已重新生成。"
     }
 
     /**
