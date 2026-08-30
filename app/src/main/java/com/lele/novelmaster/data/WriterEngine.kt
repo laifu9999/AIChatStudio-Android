@@ -746,7 +746,7 @@ object WriterEngine {
     suspend fun selfCheckChapter(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter, context: Context? = null, quiet: Boolean = false): String {
         val cards = dao.cards(project.id)
         val hard = cards.filter { it.category == "人物设定" || it.category == "世界观" || it.category == "设定圣经" }
-        if (hard.isEmpty()) return
+        if (hard.isEmpty()) return "pass"
         val settingBlock = hard.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" }
         // v6.9.4：前 5 章摘要——检查章与章之间的矛盾（时间线/称谓/人数/物品/事件）
         val recentBlock = dao.chapters(project.id)
