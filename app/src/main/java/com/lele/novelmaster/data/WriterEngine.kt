@@ -753,6 +753,8 @@ object WriterEngine {
             .filter { it.chapterIndex < ch0.chapterIndex && it.summary.isNotBlank() }
             .takeLast(5)
             .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary.take(80)}" }
+        // v6.9.11：本章大纲——正文漏写关键事件/剧情走向跑偏也是「AI 不听」，纳入自检对照
+        val outlineBlock = if (ch0.outline.isNotBlank()) "【本章大纲（正文应完成它）】\n${ch0.outline.take(250)}\n\n" else ""
         val reply = AiClient.chat(
             cfg,
             listOf(
@@ -760,11 +762,14 @@ object WriterEngine {
                 ChatMsg("user",
                     "【设定（硬性标准）】\n$settingBlock\n\n" +
                         (if (recentBlock.isNotBlank()) "【前情摘要（本章不得与之矛盾）】\n$recentBlock\n\n" else "") +
+                        outlineBlock +
                         "【第${ch0.chapterIndex}章正文】\n${ch0.content.take(3000)}\n\n" +
                         "任务：只检查正文是否矛盾——1) 违背设定（体质/灵根/境界/功法/称谓/世界观规则）；\n" +
-                        "2) 与前情摘要冲突（时间线颠倒、人数/物品对不上、事件衔接矛盾）。\n" +
+                        "2) 与前情摘要冲突（时间线颠倒、人数/物品对不上、事件衔接矛盾）；\n" +
+                        "3) 遗漏或违背本章大纲：大纲要求的关键事件没写、剧情走向明显跑偏（轻微措辞/详略差异不算）。\n" +
                         "无矛盾：只输出【通过】。\n" +
-                        "有矛盾：每行一条，格式：原文片段=>修正后片段（原文片段必须是正文里连续出现的文字，最多3条，改最小的范围）。"
+                        "有矛盾：每行一条，格式：原文片段=>修正后片段（原文片段必须是正文里连续出现的文字，最多3条，改最小的范围）。\n" +
+                        "若是大纲关键事件遗漏等无法局部修改的结构性问题，输出一行：重大偏离：<一句话说明>。"
                     )
             ),
             temperature = 0.2,
@@ -773,7 +778,7 @@ object WriterEngine {
         val text = reply.trim()
         if (text.contains("【通过】") || text.isBlank()) {
             if (!quiet) dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
-                content = "✅ 第${ch0.chapterIndex}章自检通过：与设定及前情均无矛盾"))
+                content = "✅ 第${ch0.chapterIndex}章自检通过：与设定、前情及本章大纲均无矛盾"))
             return "pass"
         }
         var content = ch0.content
