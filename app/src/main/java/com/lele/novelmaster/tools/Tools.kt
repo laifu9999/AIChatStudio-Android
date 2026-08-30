@@ -649,6 +649,21 @@ object Tools {
         return ToolResult(true, head, out + fixNote + "\n\n📄 报告已存档到 设定卡/备份/")
     }
 
+    /** v6.9.29 查看体检报告：读 设定卡/备份/ 下最近的「设定体检报告-*.md」，只读不跑AI */
+    fun cardsCheckReport(pid: Long): ToolResult {
+        val appCtx = Repo.app ?: return ToolResult(false, "无法访问存储")
+        val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+        val files = d.listFiles { f -> f.name.startsWith("设定体检报告-") && f.name.endsWith(".md") }
+            ?.sortedByDescending { it.name } ?: emptyList()
+        if (files.isEmpty()) return ToolResult(false, "还没有体检报告。先说「设定体检」跑一次，报告会自动存档到这里。")
+        val head = "📄 共 ${files.size} 份体检报告，最新：${files[0].name}（${files[0].length() / 1024}KB）"
+        val content = files[0].readText(Charsets.UTF_8)
+        // 控 token：报告太长只回传前 3000 字，其余指引用文件管理器看
+        val body = if (content.length > 3000) content.take(3000) + "\n\n…（报告超长已截断，全文见 设定卡/备份/${files[0].name}）" else content
+        val older = if (files.size > 1) "\n\n（更早的报告：${files.drop(1).take(3).joinToString("、") { it.name }}${if (files.size > 4) " 等" else ""}）" else ""
+        return ToolResult(true, head, body + older)
+    }
+
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao
@@ -856,6 +871,7 @@ object Tools {
             "markHookRecovered" -> markHookRecovered(pid, args.optString("name"))
             "subplotCheck" -> subplotCheck(pid)
             "cardsCheck" -> cardsCheck(pid)
+            "cardsCheckReport" -> cardsCheckReport(pid)
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
             "genBlurb" -> genBlurb(pid, context)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))

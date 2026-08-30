@@ -167,6 +167,12 @@ object IntentRouter {
             return Tools.cardsCheck(pid)
         }
 
+        // v6.9.29：查看体检报告——放在设定体检之后（「体检报告」不含"设定"不会撞上面的路由），只读最近一份报告不跑AI
+        if (Regex("(查看|看|打开|调出).{0,4}体检报告|体检报告|体检结果|上(一次|次|回).{0,3}体检").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先告诉我要看哪本书的报告")
+            return Tools.cardsCheckReport(pid)
+        }
+
         // ------- 设定卡 -------
         if (Regex("(所有)?设定卡(列表)?$|列出?(所有)?设定|列出?(所有)?卡片|我的设定").containsMatchIn(raw) ||
             Regex("^设定").containsMatchIn(raw)
