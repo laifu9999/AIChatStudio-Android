@@ -746,7 +746,10 @@ object WriterEngine {
     suspend fun selfCheckChapter(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter, context: Context? = null, quiet: Boolean = false): String {
         val cards = dao.cards(project.id)
         val hard = cards.filter { it.category == "人物设定" || it.category == "世界观" || it.category == "设定圣经" }
-        if (hard.isEmpty()) return "pass"
+        if (hard.isEmpty()) {
+            recordSelfCheck(project.id, ch0.chapterIndex, "pass", context)
+            return "pass"
+        }
         val settingBlock = hard.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" }
         // v6.9.4：前 5 章摘要——检查章与章之间的矛盾（时间线/称谓/人数/物品/事件）
         val recentBlock = dao.chapters(project.id)
@@ -779,6 +782,7 @@ object WriterEngine {
         if (text.contains("【通过】") || text.isBlank()) {
             if (!quiet) dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "✅ 第${ch0.chapterIndex}章自检通过：与设定、前情及本章大纲均无矛盾"))
+            recordSelfCheck(project.id, ch0.chapterIndex, "pass", context)
             return "pass"
         }
         var content = ch0.content
@@ -819,13 +823,36 @@ object WriterEngine {
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "🔧 第${ch0.chapterIndex}章自检发现 ${fixes.size} 处与设定矛盾，已自动修正：\n" +
                     fixes.joinToString("\n") { "· $it" }))
+            recordSelfCheck(project.id, ch0.chapterIndex, "fixed", context)
             return "fixed"
         } else {
             // AI 报了矛盾但给出的片段无法精确匹配——只播报，让作者决定是否重写
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                 content = "⚠️ 第${ch0.chapterIndex}章自检发现疑似设定矛盾，请复核：\n${text.take(300)}"))
+            recordSelfCheck(project.id, ch0.chapterIndex, "suspect", context)
             return "suspect"
         }
+    }
+
+    /** v6.9.13：把单章自检结果追加到「自检记录/记录.txt」（每行：章号|状态|时间戳），供自检进度查询 */
+    private fun recordSelfCheck(pid: Long, chapterIndex: Int, status: String, context: Context?) {
+        try {
+            dir(context, pid, "自检记录")?.let { d ->
+                File(d, "记录.txt").appendText("$chapterIndex|$status|${System.currentTimeMillis()}\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+    }
+
+    /** v6.9.13：读取自检记录，返回每章最新状态 Map<章号, pass|fixed|suspect>（后写覆盖先写=最新） */
+    fun readSelfCheckRecord(pid: Long, context: Context?): Map<Int, String> {
+        return try {
+            val f = dir(context, pid, "自检记录")?.let { File(it, "记录.txt") } ?: return emptyMap()
+            if (!f.exists()) return emptyMap()
+            f.readLines(Charsets.UTF_8).mapNotNull { l ->
+                val p = l.split("|")
+                p.getOrNull(0)?.toIntOrNull()?.let { idx -> idx to (p.getOrNull(1) ?: "pass") }
+            }.toMap()
+        } catch (_: Exception) { emptyMap() }
     }
 
     /**

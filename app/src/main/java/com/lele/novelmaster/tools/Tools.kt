@@ -568,6 +568,27 @@ object Tools {
         return if (err == null) ToolResult(true, "↩️ 第${chapterIndex}章已恢复到自检前版本", out) else ToolResult(false, err)
     }
 
+    /** 8.3 自检进度：哪些章已自检/修过/待复核，哪些还没检（v6.9.13） */
+    suspend fun selfCheckProgress(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
+        val chapters = dao.chapters(pid).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
+        if (chapters.isEmpty()) return ToolResult(false, "还没有已写章节")
+        val rec = WriterEngine.readSelfCheckRecord(pid, Repo.app)
+        val idx = chapters.map { it.chapterIndex }
+        val pass = idx.filter { rec[it] == "pass" }
+        val fixed = idx.filter { rec[it] == "fixed" }
+        val suspect = idx.filter { rec[it] == "suspect" }
+        val unchecked = idx.filter { !rec.containsKey(it) }
+        val sb = StringBuilder("已自检 ${rec.size}/${chapters.size} 章\n")
+        if (unchecked.isNotEmpty()) sb.append("· ⬜ 未自检（${unchecked.size}）：第${unchecked.joinToString("、")}章\n")
+        if (fixed.isNotEmpty()) sb.append("· 🔧 自检时修复过（${fixed.size}）：第${fixed.joinToString("、")}章\n")
+        if (suspect.isNotEmpty()) sb.append("· ⚠️ 有疑似矛盾待复核（${suspect.size}）：第${suspect.joinToString("、")}章\n")
+        if (pass.isNotEmpty()) sb.append("· ✅ 通过（${pass.size}）：第${pass.joinToString("、")}章\n")
+        sb.append(if (unchecked.isEmpty()) "全书所有章节均已自检过。" else "可说「全书自检」或「自检第N章」补检。")
+        return ToolResult(true, "📋 自检进度：", sb.toString())
+    }
+
     /** 9. 起名器 */
     suspend fun nameGen(pid: Long, kind: String, count: Int): ToolResult {
         val (err, out) = WriterEngine.freeTask(
