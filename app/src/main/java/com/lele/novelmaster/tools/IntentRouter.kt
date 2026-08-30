@@ -116,6 +116,12 @@ object IntentRouter {
 
         Regex("(?:写|写好|生成|产?出|第)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章(?!.*重写)").find(raw)?.let { m ->
             if (asking) return null   // 疑问句：让 AI 回答，不执行
+            // v6.9.19：纯「第N章」命中（前面没有写/生成等动词）且输入含专家动作词时，
+            // 这是「自检第5章/撤销第5章/重写第5章/补写第5章」这类指令的一部分，必须放行给后面的专家路由，
+            // 否则会在这里被当成「查看/写第N章」截胡（回归模拟确认 v6.9.8~v6.9.18 的 14 条用例全部中招）。
+            if (m.value.startsWith("第") &&
+                Regex("自检|检查|体检|撤销|还原|回滚|恢复|重写|补写|润色|扩写|风格|钩子|金句|伏笔|支线|推演|一致性|矛盾").containsMatchIn(raw)
+            ) return@let
             val idx = parseChineseNum(m.groupValues[1])
             if (idx in 1..100000) {
                 val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
@@ -129,6 +135,13 @@ object IntentRouter {
             }
         }
 
+        // v6.9.19：章节号提取上移 + 风格改写路由上移——「用金庸的风格重写第5章」应走风格改写而非被重写截胡
+        val chapterNum = Regex("(?:第\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章)").find(raw)?.let { parseChineseNum(it.groupValues[1]) } ?: -1
+        Regex("(?:模仿|按|用)\\s*([^，。,]{2,15}?)\\s*(?:的)?风格|风格改写").find(raw)?.let { m ->
+            val style = m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() && !it.contains("风格") } ?: ""
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.styleRewrite(pid, chapterNum, style)
+        }
         Regex("重写第?([0-9零一二三四五六七八九十百千]{1,4})章|重写这一?章").find(raw)?.let { m ->
             val idx = parseChineseNum(m.groupValues[1])
             val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
@@ -221,7 +234,6 @@ object IntentRouter {
         }
 
         // ------- 专家级写作功能 -------
-        val chapterNum = Regex("(?:第\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章)").find(raw)?.let { parseChineseNum(it.groupValues[1]) } ?: -1
         if (Regex("润色").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.polishChapter(pid, chapterNum)
@@ -235,12 +247,7 @@ object IntentRouter {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.supplementChapter(pid, chapterNum)
         }
-        Regex("(?:模仿|按|用)\\s*([^，。,]{2,15}?)\\s*(?:的)?风格|风格改写").find(raw)?.let { m ->
-            val style = m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() && !it.contains("风格") } ?: ""
-            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
-            return Tools.styleRewrite(pid, chapterNum, style)
-        }
-        if (Regex("章末钩子|强化钩子|结尾钩子|优化钩子|钩子").containsMatchIn(raw)) {
+        if (Regex("章末钩子|强化钩子|结尾钩子|优化钩子|钩子").containsMatchIn(raw) && !raw.contains("伏笔")) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.hookChapter(pid, chapterNum)
         }
@@ -252,10 +259,23 @@ object IntentRouter {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.plotBrainstorm(pid)
         }
-        Regex("人物?\\s*(体检|一致性)|检查(一下)?人物\\s*([^，。,\\s]{1,10})").find(raw)?.let { m ->
-            val name = m.groupValues.drop(1).lastOrNull { it.isNotEmpty() && !it.contains("体检") && !it.contains("一致性") }?.trim() ?: ""
+        // v6.9.19：人物体检重写——旧正则 `人物?\s*(体检|一致性)` 里「人」必选，导致「体检林墨」
+        // 根本进不了本路由（漏到全书体检）；现在裸「体检+人名」也命中，但名字含「第/章/数字」
+        // 或是「进度/记录」等垃圾词时放行给后面的路由，避免误拦「体检进度」「体检第3章」「全书体检」。
+        Regex("人物\\s*(体检|一致性)|体检\\s*([^，。,\\s]{1,10})|检查(一下)?人物\\s*([^，。,\\s]{1,10})").find(raw)?.let { m ->
+            fun cleanName(s: String?): String? {
+                val n = s?.trim()?.removePrefix("一下")?.trim().orEmpty()
+                if (n.isEmpty() || n in setOf("怎么样", "如何", "进度", "记录", "结果", "吧", "啊", "呢", "吗", "了")) return null
+                if (n.any { it == '第' || it == '章' || it.isDigit() }) return null
+                return n
+            }
+            val name = cleanName(m.groupValues.getOrNull(4)) ?: cleanName(m.groupValues.getOrNull(2)) ?: ""
+            val hasRenwu = m.groupValues[1].isNotEmpty() || m.groupValues[3].isNotEmpty()
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
-            if (name.isBlank()) return ToolResult(false, "请说明检查哪个人物，如：体检林墨")
+            if (name.isBlank()) {
+                if (hasRenwu) return ToolResult(false, "请说明检查哪个人物，如：体检林墨")
+                return@let   // 裸「体检X」但 X 不是人名 → 放行给自检进度/全书体检等路由
+            }
             return Tools.characterCheck(pid, name)
         }
         // v6.9.13：自检进度——必须放在撤销/自检各路由之前（「自检进度」含「自检」「进度」会被误拦截）
@@ -286,10 +306,12 @@ object IntentRouter {
             return Tools.subplotCheck(pid)
         }
         // v6.9.16：标记伏笔已回收——必须放在伏笔体检路由之前（后者匹配一切含「伏笔」的输入）
-        if (Regex("标记.*伏笔.{0,6}(已回收|回收)|(已回收|回收).{0,4}标记").containsMatchIn(raw)) {
+        // v6.9.19：新增「把伏笔X标记回收 / 伏笔X已回收」语序识别
+        if (Regex("标记.{0,4}伏笔.{0,6}(已回收|回收)|伏笔[「'\"]?[^」'\"]{1,20}[」'\"]?.{0,6}(标记|已回收|回收)|(已回收|回收).{0,4}标记").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
-            val hookName = Regex("标记.{0,4}伏笔[「'\"]?([^」'\"]{1,20})[」'\"]?.{0,4}(已回收|回收)")
-                .find(raw)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            val hookName = (Regex("标记.{0,4}伏笔[「'\"]?([^」'\"]{1,20})[」'\"]?").find(raw)?.groupValues?.getOrNull(1)
+                ?: Regex("伏笔[「'\"]?([^」'\"]{1,20})[」'\"]?.{0,6}(标记|已回收|回收)").find(raw)?.groupValues?.getOrNull(1)
+                )?.trim().orEmpty()
             return Tools.markHookRecovered(pid, hookName)
         }
         // v6.9.12：伏笔体检——必须放在「全书体检」路由之前（后者含裸「体检」正则会误拦截）
@@ -297,7 +319,7 @@ object IntentRouter {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.foreshadowCheck(pid)
         }
-        if (Regex("全书体检|一致性体检|一致性检查|体检|找矛盾|查矛盾").containsMatchIn(raw)) {
+        if (Regex("全书体检|一致性体检|一致性检查|体检|找矛盾|查矛盾|矛盾").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.consistencyCheck(pid)
         }
