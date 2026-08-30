@@ -196,10 +196,16 @@ object Tools {
                     .writeText("# $category · $name\n\n$content\n", Charsets.UTF_8)
             } catch (_: Exception) { }
         }
+        // v6.9.15：硬约束设定（人物/世界观/圣经）变更而项目已有正文时，主动提醒全书自检
+        var detail = "已完整保存到 设定卡/$category/$name.md，写正文时自动注入；聊天里不再重复显示全文，想看随时到设定卡页查看。"
+        if (category in setOf("人物设定", "世界观", "设定圣经")) {
+            val hasBody = Repo.dao.chapters(pid).any { it.content.isNotBlank() }
+            if (hasBody) detail += "\n⚠️ 该设定已变更，此前写的章节基于旧设定，建议说「全书自检」让系统逐章校验并自动修正冲突。"
+        }
         return ToolResult(
             true,
             "✅ 已保存设定卡：$category / $name（${content.length} 字）",
-            "已完整保存到 设定卡/$category/$name.md，写正文时自动注入；聊天里不再重复显示全文，想看随时到设定卡页查看。"
+            detail
         )
     }
 

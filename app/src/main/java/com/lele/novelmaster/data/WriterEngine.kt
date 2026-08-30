@@ -958,6 +958,7 @@ object WriterEngine {
                         "user",
                         "请用120字以内概括以下章节的剧情要点（含出场人物、关键事件、新埋的伏笔）。" +
                             "若本章明确回收了之前的伏笔，最后另起一行，用【回收伏笔】开头列出名称；否则不要输出该行。\n" +
+                            "若本章新埋了之前没有的伏笔，每条另起一行，用【新埋伏笔】开头，格式：名称：一句话说明；否则不要输出。\n" +
                             "第${ch.chapterIndex}章《${ch.title}》正文：\n${ch.content.take(4000)}"
                     )
                 ),
@@ -968,7 +969,7 @@ object WriterEngine {
                 .firstOrNull { it.contains("回收伏笔") }
                 ?.substringAfter("】")?.trim().orEmpty()
             val summary = sumReply.lines()
-                .filter { !it.contains("回收伏笔") }
+                .filter { !it.contains("回收伏笔") && !it.contains("新埋伏笔") }
                 .joinToString(" ").trim()
             if (summary.isNotBlank()) {
                 ch = ch.copy(summary = summary)
@@ -978,6 +979,26 @@ object WriterEngine {
                 dao.cards(project.id)
                     .filter { it.category == "伏笔钩子" && it.status != "已回收" && recovered.contains(it.name) }
                     .forEach { dao.updateCard(it.copy(status = "已回收", updatedAt = System.currentTimeMillis())) }
+            }
+            // v6.9.15：新埋伏笔自动建档（去重）——保证「伏笔体检」有完整数据，不依赖 AI 主动建卡
+            sumReply.lines().filter { it.contains("新埋伏笔") }.forEach { line ->
+                val body = line.substringAfter("】").trim()
+                val name = body.substringBefore("：").substringBefore(":").trim().take(30)
+                if (name.isNotBlank()) {
+                    val desc = body.substringAfter("：", "").substringAfter(":", "").trim()
+                    val exists = dao.cards(project.id).any { it.category == "伏笔钩子" && it.name == name }
+                    if (!exists) {
+                        dao.insertCard(
+                            SettingCard(
+                                projectId = project.id, category = "伏笔钩子", name = name,
+                                content = desc.ifBlank { "第${ch.chapterIndex}章埋设" },
+                                status = "埋设中"
+                            )
+                        )
+                        dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                            content = "🪝 新伏笔已记录：【$name】（${desc.ifBlank { "第${ch.chapterIndex}章埋设" }}），可随时说「伏笔体检」查看埋收状态。"))
+                    }
+                }
             }
         } catch (_: Exception) {
             // 摘要失败不影响正文
