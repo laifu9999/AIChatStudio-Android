@@ -92,6 +92,36 @@ object WriterEngine {
                         content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
                 )
             }
+
+            // v6.9.5：漏网验证——AI 偶尔少写几行导致部分章仍无大纲（用户多次踩坑"漏掉分章大纲"）。
+            // 重查一遍，仍缺的按 5 章小批次自动补一轮，补完播报最终结果
+            val chaptersNow = dao.chapters(projectId)
+            val stillMissing = chaptersNow.filter { it.outline.isBlank() && it.chapterIndex in from..to }
+            if (stillMissing.isNotEmpty()) {
+                dao.insertMessage(
+                    Message(projectId = projectId, role = "tool", kind = "tool",
+                        content = "🔍 检测到 ${stillMissing.size} 章大纲仍缺失（第${stillMissing.first().chapterIndex}~${stillMissing.last().chapterIndex}章），自动补齐中…")
+                )
+                for (batch in stillMissing.chunked(5)) {
+                    val f = batch.first().chapterIndex
+                    val t = batch.last().chapterIndex
+                    val user = Prompts.buildOutlineUser(project, cards, chaptersNow, f, t, batch.size)
+                    val reply = AiClient.chat(
+                        cfg,
+                        listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
+                        temperature = 0.7,
+                        maxTokens = 3000
+                    )
+                    applyOutlines(dao, chaptersNow, reply)
+                }
+                val left = dao.chapters(projectId).count { it.outline.isBlank() && it.chapterIndex in from..to }
+                dao.insertMessage(
+                    Message(projectId = projectId, role = "tool", kind = "tool",
+                        content = if (left == 0) "✅ 分章大纲补齐完成：范围内所有章节均有标题与剧情核心"
+                        else "⚠️ 仍有 $left 章大纲缺失，开写前系统会再次尝试自动补齐"
+                )
+                )
+            }
         }
 
         // v6.7：分章大纲文件只放 设定卡/分章大纲/ 文件夹；v6.9：分卷大纲废弃，清理旧卡
