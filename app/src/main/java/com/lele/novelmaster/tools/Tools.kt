@@ -636,7 +636,17 @@ object Tools {
             "\n\n未修改任何卡。若上面的问题需要改大纲或剧情进度，请直接说明，系统会走对应工具。"
         else
             "\n\n✅ 已自动修复 ${fixed.size} 张卡：${fixed.joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
-        return ToolResult(true, head, out + fixNote)
+        // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查）
+        try {
+            val appCtx = Repo.app
+            if (appCtx != null) {
+                val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+                d.mkdirs()
+                val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
+                File(d, "设定体检报告-$ts.md").writeText("# 设定体检报告 $ts\n\n$out$fixNote\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+        return ToolResult(true, head, out + fixNote + "\n\n📄 报告已存档到 设定卡/备份/")
     }
 
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */

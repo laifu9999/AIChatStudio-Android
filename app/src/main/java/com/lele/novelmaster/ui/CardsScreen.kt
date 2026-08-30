@@ -1,5 +1,6 @@
 package com.lele.novelmaster.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +66,8 @@ fun CardsScreen(nav: NavController, pid: Long) {
     // v6.9.27：页内设定体检（summary to detail；ok=false 时 title=体检未执行、detail=原因）
     var checkBusy by remember { mutableStateOf(false) }
     var checkResult by remember { mutableStateOf<Pair<String, String>?>(null) }
+    // v6.9.28：分章大纲系统卡点按查看全文
+    var viewCard by remember { mutableStateOf<SettingCard?>(null) }
 
     // v6.9.22：「分章大纲」独立页签与「全书大纲」并列（分章大纲卡 category=全书大纲、name=分章大纲，由系统自动同步）
     val cats = listOf("全部", "全书大纲", "分章大纲") + CardCategories.all.filter { it != "全书大纲" }
@@ -138,7 +141,11 @@ fun CardsScreen(nav: NavController, pid: Long) {
             }
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
                 items(list, key = { it.id }) { card ->
-                    ElevatedCard(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    val sysOutline = card.name == "分章大纲"  // v6.9.28：系统镜像卡防误删/误改，点按看全文
+                    ElevatedCard(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                            .then(if (sysOutline) Modifier.clickable { viewCard = card } else Modifier)
+                    ) {
                         Row(
                             Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -175,13 +182,15 @@ fun CardsScreen(nav: NavController, pid: Long) {
                                     maxLines = if (card.name == "分章大纲") 12 else 3
                                 )
                             }
-                            IconButton(onClick = { editCard = card }) {
-                                Icon(Icons.Default.Edit, contentDescription = "编辑", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            IconButton(onClick = {
-                                scope.launch(Dispatchers.IO) { Repo.dao.deleteCard(card) }
-                            }) {
-                                Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (!sysOutline) {
+                                IconButton(onClick = { editCard = card }) {
+                                    Icon(Icons.Default.Edit, contentDescription = "编辑", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                IconButton(onClick = {
+                                    scope.launch(Dispatchers.IO) { Repo.dao.deleteCard(card) }
+                                }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -203,6 +212,19 @@ fun CardsScreen(nav: NavController, pid: Long) {
                 }
             },
             confirmButton = { TextButton(onClick = { checkResult = null }) { Text("知道了") } }
+        )
+    }
+    // v6.9.28：系统卡（分章大纲镜像）全文查看，只读不可编辑
+    viewCard?.let { c ->
+        AlertDialog(
+            onDismissRequest = { viewCard = null },
+            title = { Text(c.name) },
+            text = {
+                Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
+                    Text(c.content, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { viewCard = null }) { Text("关闭") } }
         )
     }
 }
