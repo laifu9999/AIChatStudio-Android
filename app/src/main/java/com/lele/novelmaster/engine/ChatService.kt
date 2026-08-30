@@ -501,10 +501,12 @@ object ChatService {
                     cards.groupBy { it.category }.forEach { (cat, list) ->
                         appendLine("· $cat：${list.joinToString("、") { it.name }}")
                     }
-                    val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS }
+                    // v6.9.24：分章大纲卡不整卡注入（600章可达数万字，每轮对话都付不起），
+                    // 核心卡改 budgetCardBlock 预算截断（总3200/单卡600），与 freeTask 同款；AI 需要时可调 listCards
+                    val core = cards.filter { it.name != "分章大纲" && (it.priority == 2 || it.category in CardCategories.KEY_CATS) }
                     if (core.isNotEmpty()) {
                         appendLine("【本书核心设定】")
-                        appendLine(Prompts.cardBlock(core))
+                        appendLine(Prompts.budgetCardBlock(core, budget = 3200, perCard = 600))
                     }
                 } else {
                     appendLine("【本书核心设定】尚未创建。作者给出灵感后，你要用 addCard 一条条把设定建全，一次做完不要停。")
