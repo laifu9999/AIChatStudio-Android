@@ -429,11 +429,20 @@ object IntentRouter {
         if (s.all { it.isDigit() }) return s.toIntOrNull() ?: 0
         var total = 0; var cur = 0; var lastUnit = 0
         for (ch in s) {
-            val v = map[ch.toString()]
-            when {
-                v == null -> {}
-                v == 10 -> { if (cur == 0) cur = 1; total += cur * 10; cur = 0; lastUnit = 10 }
-                v < 10 -> if (lastUnit == 10) { cur = v; lastUnit = 0; total += v } else cur = v
+            when (ch) {
+                // v6.9.21：支持「百/千」——此前「第一百零五章」「六百章」中的百/千被直接跳过（解析成 5/6）
+                '百' -> { if (cur == 0) cur = 1; total += cur * 100; cur = 0; lastUnit = 100 }
+                '千' -> { if (cur == 0) cur = 1; total += cur * 1000; cur = 0; lastUnit = 1000 }
+                else -> {
+                    val v = map[ch.toString()]
+                    when {
+                        v == null -> {}
+                        v == 10 -> { if (cur == 0) cur = 1; total += cur * 10; cur = 0; lastUnit = 10 }
+                        // v6.9.21：修复双重计数——旧代码 cur=v 后又 total+=v，而结尾 return total+cur
+                        // 会把 v 再加一次，「十五」算成 20、「九十九」算成 108
+                        v < 10 -> if (lastUnit == 10) { cur = v; lastUnit = 0 } else cur = v
+                    }
+                }
             }
         }
         return total + cur
