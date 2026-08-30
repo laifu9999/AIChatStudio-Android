@@ -117,7 +117,13 @@ fun CardsScreen(nav: NavController, pid: Long) {
                                             else MaterialTheme.colorScheme.tertiary
                                         )
                                     }
-                                    if (card.priority == 2) {
+                                    if (card.name == "分章大纲") {
+                                        Text(
+                                            "  系统·大纲窗口注入",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary
+                                        )
+                                    } else if (card.priority == 2) {
                                         Text(
                                             "  必发",
                                             style = MaterialTheme.typography.labelSmall,

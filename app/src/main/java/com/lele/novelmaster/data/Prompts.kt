@@ -32,11 +32,14 @@ object Prompts {
 
     /** 按优先级与关键词相关度挑选要注入的设定卡 */
     fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
+        // v6.9.23：分章大纲系统卡不参与整卡注入——写章走「大纲窗口」（前两章+本章+后一章）独立注入，
+        // 整卡必发在长篇里只会被预算截成开头几章（无用内容），还挤占其他卡的预算
+        val pool = all.filter { it.name != "分章大纲" }
         // v6.8.2/v6.8.3：硬约束分类强制必发——手动建卡默认优先级是「常规」，用户忘选必发时
         // 人物卡/世界观/圣经可能落选导致体质灵根、力量体系等硬设定丢失
-        val always = all.filter { it.priority == 2 || it.category in HARD_CATS }
-        val foreshadow = all.filter { it.category == "伏笔钩子" && it.status != "已回收" }
-        val normal = all.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
+        val always = pool.filter { it.priority == 2 || it.category in HARD_CATS }
+        val foreshadow = pool.filter { it.category == "伏笔钩子" && it.status != "已回收" }
+        val normal = pool.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
 
         fun score(c: SettingCard): Int {
             var s = if (c.category in CardCategories.KEY_CATS) 1 else 0

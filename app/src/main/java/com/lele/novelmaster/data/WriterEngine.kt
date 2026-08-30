@@ -1139,8 +1139,11 @@ object WriterEngine {
         val sys = buildString {
             appendLine("你是资深网文主编。基于以下设定完成任务，只输出要求的内容。")
             appendLine("《${project.title}》类型：${project.genre}")
-            val core = cards.filter { it.priority == 2 || it.category in CardCategories.KEY_CATS || it.category == "人物设定" }
-            if (core.isNotEmpty()) appendLine(Prompts.cardBlock(core))
+            // v6.9.23：分章大纲卡不整卡注入（600章大纲可达数万字，写作走大纲窗口）；核心卡改预算截断，注入总量有界
+            val core = cards.filter {
+                it.name != "分章大纲" && (it.priority == 2 || it.category in CardCategories.KEY_CATS || it.category == "人物设定")
+            }
+            if (core.isNotEmpty()) appendLine(Prompts.budgetCardBlock(core, budget = 3200, perCard = 600))
         }
         val out = AiClient.chat(
             cfg,
