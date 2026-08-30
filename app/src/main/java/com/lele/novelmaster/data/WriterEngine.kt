@@ -916,6 +916,8 @@ object WriterEngine {
             }
         } catch (_: Exception) { }
         regenerateSummary(cfg, dao, project, newCh)
+        // v6.9.18：撤销后记录 restored——该章视为未检（徽标消失、进度按未检统计）
+        recordSelfCheck(project.id, chapterIndex, "restored", context)
         return null to "↩️ 已把第 ${chapterIndex} 章恢复到最近一次修改（自检修复/补写/润色等）前的版本（备份：${latest.name}），摘要已重新生成。"
     }
 

@@ -558,6 +558,27 @@ object Tools {
         return ToolResult(true, "🪝 已标记伏笔「${target.name}」为已回收", "该伏笔不再出现在「未回收」清单中。若标错了，可在设定卡页改回「埋设中」。")
     }
 
+    /** 8.0d 支线任务体检：对照支线任务卡与各章摘要，评估推进状态并给收束建议（只分析不修改，v6.9.18） */
+    suspend fun subplotCheck(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val subs = dao.cards(pid).filter { it.category == "支线任务" }
+        if (subs.isEmpty()) return ToolResult(false, "这本书还没有「支线任务」卡。可在设定卡里添加支线（名称+一句话目标），或聊天里让 AI 创建。")
+        val chapters = dao.chapters(pid).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
+        val summaryBlock = chapters.takeLast(30)
+            .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary.take(60)}" }
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：支线任务体检（只分析，不修改任何卡与正文）。\n" +
+                "【支线任务清单】\n" + subs.joinToString("\n") { "· ${it.name}：${it.content.take(80)}" } + "\n\n" +
+                "【最近章节摘要】\n$summaryBlock\n\n" +
+                "请输出：\n" +
+                "1) 每条支线一行：评估状态——「活跃推进中」/「多章未推进，可能被读者遗忘」/「摘要显示实际已完成，可正式收束」/「与主线冲突或价值存疑，建议砍掉」；\n" +
+                "2) 对停滞或该收束的支线，给出建议（何时推进/如何收束/如何并入主线，各一句话）；\n" +
+                "按紧迫度从高到低排序，不要解释格式。"
+        )
+        return if (err == null) ToolResult(true, "🧵 支线任务体检（共 ${subs.size} 条支线）：", out) else ToolResult(false, err)
+    }
+
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao
@@ -615,7 +636,8 @@ object Tools {
         val pass = idx.filter { rec[it] == "pass" }
         val fixed = idx.filter { rec[it] == "fixed" }
         val suspect = idx.filter { rec[it] == "suspect" }
-        val unchecked = idx.filter { !rec.containsKey(it) }
+        // v6.9.18：restored（撤销后）视为未检
+        val unchecked = idx.filter { rec[it] !in setOf("pass", "fixed", "suspect") }
         val sb = StringBuilder("已自检 ${rec.size}/${chapters.size} 章\n")
         if (unchecked.isNotEmpty()) sb.append("· ⬜ 未自检（${unchecked.size}）：第${unchecked.joinToString("、")}章\n")
         if (fixed.isNotEmpty()) sb.append("· 🔧 自检时修复过（${fixed.size}）：第${fixed.joinToString("、")}章\n")
@@ -762,6 +784,7 @@ object Tools {
             "supplementChapter" -> supplementChapter(pid, args.optInt("index", -1))
             "foreshadowCheck" -> foreshadowCheck(pid)
             "markHookRecovered" -> markHookRecovered(pid, args.optString("name"))
+            "subplotCheck" -> subplotCheck(pid)
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
             "genBlurb" -> genBlurb(pid, context)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))

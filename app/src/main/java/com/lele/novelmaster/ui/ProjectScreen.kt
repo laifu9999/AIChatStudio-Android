@@ -15,6 +15,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,12 +24,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
+import com.lele.novelmaster.data.WriterEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun ProjectScreen(nav: NavController, id: Long) {
@@ -42,6 +46,15 @@ fun ProjectScreen(nav: NavController, id: Long) {
     val written = chapters.sumOf { it.wordCount }
     val done = chapters.count { it.content.isNotBlank() }
     val openForeshadow = cards.count { it.category == "伏笔钩子" && it.status != "已回收" }
+    // v6.9.18：自检覆盖统计（来自本地「自检记录」）
+    val context = LocalContext.current
+    var scMap by remember(id) { mutableStateOf<Map<Int, String>>(emptyMap()) }
+    LaunchedEffect(id, done) {
+        scMap = withContext(Dispatchers.IO) { WriterEngine.readSelfCheckRecord(id, context) }
+    }
+    val writtenChs = chapters.filter { it.content.isNotBlank() }
+    val scChecked = writtenChs.count { scMap[it.chapterIndex] in setOf("pass", "fixed", "suspect") }
+    val scSuspect = writtenChs.count { scMap[it.chapterIndex] == "suspect" }
 
     AppScaffold(p.title, onBack = { nav.popBackStack() }) { pv ->
         Column(
@@ -58,6 +71,12 @@ fun ProjectScreen(nav: NavController, id: Long) {
             Spacer(Modifier.height(14.dp))
 
             MenuButton("章节列表", "${chapters.size}章 · 点开阅读/编辑/AI续写") { nav.navigate("chapters/${p.id}") }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "🔬 自检覆盖：$scChecked/$done 章" + (if (scSuspect > 0) "（⚠️ $scSuspect 章疑似矛盾待复核）" else "") + " · 说「全书自检」可补检修复",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.height(8.dp))
             MenuButton("设定卡 · 灵感分析", "${cards.size}项设定：世界观/人物/大纲/伏笔…") { nav.navigate("cards/${p.id}") }
             Spacer(Modifier.height(8.dp))
