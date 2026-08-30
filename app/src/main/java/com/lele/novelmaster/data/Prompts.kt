@@ -27,11 +27,14 @@ object Prompts {
         return sb.toString().trim()
     }
 
+    /** 硬约束分类：无论优先级强制必发（人物/世界观/圣经是写作的一致性底线） */
+    val HARD_CATS = setOf("人物设定", "世界观", "设定圣经")
+
     /** 按优先级与关键词相关度挑选要注入的设定卡 */
     fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
-        // v6.8.2：人物设定类强制必发——手动建卡默认优先级是「常规」，用户忘选必发时人物卡
-        // 可能落选导致体质/灵根等硬设定丢失；人物卡是写作硬约束，一张都不能漏
-        val always = all.filter { it.priority == 2 || it.category == "人物设定" }
+        // v6.8.2/v6.8.3：硬约束分类强制必发——手动建卡默认优先级是「常规」，用户忘选必发时
+        // 人物卡/世界观/圣经可能落选导致体质灵根、力量体系等硬设定丢失
+        val always = all.filter { it.priority == 2 || it.category in HARD_CATS }
         val foreshadow = all.filter { it.category == "伏笔钩子" && it.status != "已回收" }
         val normal = all.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
 
@@ -64,16 +67,26 @@ object Prompts {
         appendLine("8. 不写任何创作说明：不要出现“本章完”“作者有话”“（此处省略）”“由于篇幅”之类的话，写完最后一个句号就停。")
         appendLine("9. 笔法：场景、动作、对话、心理交替推进；每 300~500 字给一个新的信息点或小转折，保持张力。")
         appendLine()
-        // v6.8：人物设定卡单独一层完整注入（硬约束），不参与 900 字预算竞争、不被 300 字截断——
-        // 之前人物卡和世界观/圣经/大纲卡挤 900 字预算，排后面的整卡被 break 丢掉，正文就出现了
-        // 「设定卡写先天剑体天灵根、正文却写五行杂灵根」这类设定丢失
+        // v6.8.3：三层注入——
+        //  第1层 人物设定（硬约束，600字/张全量）；
+        //  第2层 世界观+设定圣经（硬约束，800字/张全量）——力量/规则体系（灵根规则等）多写在这里，
+        //        之前和普通卡挤 900 字预算会被截断/丢弃，导致体系自相矛盾；
+        //  第3层 其余卡（伏笔/主线/大纲/相关卡）维持 900 字预算，注入总量基本恒定
         val charCards = selected.filter { it.category == "人物设定" }
-        val rest = selected.filter { it.category != "人物设定" }
+        val worldCards = selected.filter { it.category == "世界观" || it.category == "设定圣经" }
+        val rest = selected.filter { it.category != "人物设定" && it.category != "世界观" && it.category != "设定圣经" }
         if (charCards.isNotEmpty()) {
             appendLine("【人物设定（硬性约束，体质/灵根/功法/称谓必须与此完全一致）】")
             // 预算按张数动态给足：每张 600 字上限，一张不丢、一字不截
             append(budgetCardBlock(charCards, budget = charCards.size * 600, perCard = 600))
             appendLine()
+        }
+        if (worldCards.isNotEmpty()) {
+            appendLine("【世界观与力量体系（硬性约束，修炼体系/灵根规则/势力格局不得违背）】")
+            append(budgetCardBlock(worldCards, budget = worldCards.size * 800, perCard = 800))
+            appendLine()
+        }
+        if (charCards.isNotEmpty() || worldCards.isNotEmpty()) {
             appendLine("【其他设定资料】")
         } else {
             appendLine("【设定资料】")
