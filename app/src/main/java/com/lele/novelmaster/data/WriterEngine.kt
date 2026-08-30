@@ -426,6 +426,43 @@ object WriterEngine {
     }
 
     /**
+     * v6.9.30 单章大纲兜底：重写/润色/补写等手动指定章的场景，该章大纲空白时先补一条再动手，
+     * 避免正文脱离主线自由发挥。复用批次大纲的 prompt（全书大纲卡预算注入+窗口），单次小调用。
+     */
+    private suspend fun ensureOneOutline(project: Project, ch: Chapter, context: Context? = null): Chapter {
+        if (ch.outline.isNotBlank()) return ch
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return ch
+        val cards = dao.cards(project.id)
+        val chapters = dao.chapters(project.id)
+        dao.insertMessage(
+            Message(projectId = project.id, role = "tool", kind = "tool",
+                content = "🧭 第${ch.chapterIndex}章还没有大纲，先自动补一条再动手（避免正文偏离主线）…")
+        )
+        return try {
+            val user = Prompts.buildOutlineUser(project, cards, chapters, ch.chapterIndex, ch.chapterIndex, 1)
+            val reply = AiClient.chat(
+                cfg,
+                listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
+                temperature = 0.7,
+                maxTokens = 1000
+            )
+            applyOutlines(dao, chapters, reply)
+            syncChapterOutlineCard(project.id, context)
+            val fresh = dao.chapters(project.id).firstOrNull { it.chapterIndex == ch.chapterIndex } ?: ch
+            if (fresh.outline.isBlank()) {
+                dao.insertMessage(
+                    Message(projectId = project.id, role = "tool", kind = "tool",
+                        content = "⚠️ 第${ch.chapterIndex}章大纲自动补全失败，本次按前情摘要续写，建议稍后用「AI 补全缺失大纲」补齐")
+                )
+            }
+            fresh
+        } catch (_: Exception) {
+            ch // 生成失败不阻塞原任务
+        }
+    }
+
+    /**
      * 灵感分析：自动生成一整套设定卡（并全部落盘到 files/设定卡/）
      * v5.9：改为流式生成——AI 每写完一行就立即落库落盘并在聊天里显示一张，
      *      边输出边保存边显示，不再"卡很久然后突然全部显示"。
@@ -1047,8 +1084,10 @@ object WriterEngine {
     suspend fun rewriteChapter(chapterId: Long): String? {
         val dao = Repo.dao
         val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型"
-        val ch = dao.chapter(chapterId) ?: return "章节不存在"
-        val project = dao.project(ch.projectId) ?: return "项目不存在"
+        val ch0 = dao.chapter(chapterId) ?: return "章节不存在"
+        val project = dao.project(ch0.projectId) ?: return "项目不存在"
+        // v6.9.30：大纲空白先补一条再动手（AI 不脱轨）
+        val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(ch.projectId)
         val chapters = dao.chapters(ch.projectId)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
@@ -1098,10 +1137,12 @@ object WriterEngine {
         val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型" to ""
         val project = dao.project(projectId) ?: return "项目不存在" to ""
         val chapters = dao.chapters(projectId)
-        val ch = chapters.firstOrNull { it.chapterIndex == chapterIndex }
+        val ch0 = chapters.firstOrNull { it.chapterIndex == chapterIndex }
             ?: return "第 $chapterIndex 章不存在" to ""
+        // v6.9.30：大纲空白先补一条再动手（AI 不脱轨）；重取 chapters 保证窗口里是补好的大纲
+        val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(projectId)
-        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
+        val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch).toMutableList()
         messages.add(ChatMsg("user", instruction))
         val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
