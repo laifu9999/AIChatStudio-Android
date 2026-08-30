@@ -8,10 +8,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -59,6 +62,9 @@ fun CardsScreen(nav: NavController, pid: Long) {
     var editCard by remember { mutableStateOf<SettingCard?>(null) }
     var showInspire by remember { mutableStateOf(false) }
     var outlineBusy by remember { mutableStateOf(false) }
+    // v6.9.27：页内设定体检（summary to detail；ok=false 时 title=体检未执行、detail=原因）
+    var checkBusy by remember { mutableStateOf(false) }
+    var checkResult by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     // v6.9.22：「分章大纲」独立页签与「全书大纲」并列（分章大纲卡 category=全书大纲、name=分章大纲，由系统自动同步）
     val cats = listOf("全部", "全书大纲", "分章大纲") + CardCategories.all.filter { it != "全书大纲" }
@@ -73,6 +79,19 @@ fun CardsScreen(nav: NavController, pid: Long) {
         "设定卡",
         onBack = { nav.popBackStack() },
         actions = {
+            TextButton(
+                enabled = !checkBusy,
+                onClick = {
+                    checkBusy = true
+                    scope.launch(Dispatchers.IO) {
+                        val r = Tools.cardsCheck(pid)
+                        withContext(Dispatchers.Main) {
+                            checkResult = if (r.ok) r.summary to r.detail else "体检未执行" to r.summary
+                            checkBusy = false
+                        }
+                    }
+                }
+            ) { Text(if (checkBusy) "体检中…" else "🧾体检") }
             TextButton(onClick = { showInspire = true }) { Text("灵感分析") }
             TextButton(onClick = { showAdd = true }) { Text("＋新增") }
         }
@@ -174,6 +193,18 @@ fun CardsScreen(nav: NavController, pid: Long) {
     if (showAdd) CardEditDialog(null, pid) { showAdd = false }
     editCard?.let { CardEditDialog(it, pid) { editCard = null } }
     if (showInspire) InspireDialog(pid) { showInspire = false }
+    checkResult?.let { (title, detail) ->
+        AlertDialog(
+            onDismissRequest = { checkResult = null },
+            title = { Text(title) },
+            text = {
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    Text(detail, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { checkResult = null }) { Text("知道了") } }
+        )
+    }
 }
 
 @Composable
