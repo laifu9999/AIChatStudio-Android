@@ -704,8 +704,10 @@ object WriterEngine {
 
     /**
      * v6.9：写后轻量自检（全书体检的单章版）。
-     * 全书体检的原理 = 拿设定卡对照各章摘要找矛盾；这里只拿硬约束设定（人物/世界观/圣经）
-     * 对照本章正文，约 2000~3000 token（正文成本的 ~15%），不浪费。
+     * 全书体检的原理 = 拿设定卡对照各章摘要找矛盾；这里拿两类标准对照本章正文：
+     *  1) 硬约束设定（人物/世界观/圣经）——体质/灵根/功法/称谓/规则；
+     *  2) v6.9.4：前 5 章摘要——时间线/人数/物品/事件衔接（全书体检最有价值的部分）。
+     * 约 2500~3500 token（正文成本的 ~18%），不浪费。
      * AI 输出「原文=>修正」修正对，程序只做精确匹配替换——替换不动就只播报问题，绝不瞎改。
      */
     suspend fun selfCheckChapter(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter, context: Context? = null) {
@@ -713,14 +715,21 @@ object WriterEngine {
         val hard = cards.filter { it.category == "人物设定" || it.category == "世界观" || it.category == "设定圣经" }
         if (hard.isEmpty()) return
         val settingBlock = hard.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" }
+        // v6.9.4：前 5 章摘要——检查章与章之间的矛盾（时间线/称谓/人数/物品/事件）
+        val recentBlock = dao.chapters(project.id)
+            .filter { it.chapterIndex < ch0.chapterIndex && it.summary.isNotBlank() }
+            .takeLast(5)
+            .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary.take(80)}" }
         val reply = AiClient.chat(
             cfg,
             listOf(
                 ChatMsg("system", "你是小说一致性校对员，只按格式输出，不解释。"),
                 ChatMsg("user",
                     "【设定（硬性标准）】\n$settingBlock\n\n" +
+                        (if (recentBlock.isNotBlank()) "【前情摘要（本章不得与之矛盾）】\n$recentBlock\n\n" else "") +
                         "【第${ch0.chapterIndex}章正文】\n${ch0.content.take(3000)}\n\n" +
-                        "任务：只检查正文是否违背上述设定（体质/灵根/境界/功法/称谓/世界观规则）。\n" +
+                        "任务：只检查正文是否矛盾——1) 违背设定（体质/灵根/境界/功法/称谓/世界观规则）；\n" +
+                        "2) 与前情摘要冲突（时间线颠倒、人数/物品对不上、事件衔接矛盾）。\n" +
                         "无矛盾：只输出【通过】。\n" +
                         "有矛盾：每行一条，格式：原文片段=>修正后片段（原文片段必须是正文里连续出现的文字，最多3条，改最小的范围）。"
                     )
@@ -731,7 +740,7 @@ object WriterEngine {
         val text = reply.trim()
         if (text.contains("【通过】") || text.isBlank()) {
             dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
-                content = "✅ 第${ch0.chapterIndex}章自检通过：与人物/世界观设定无矛盾"))
+                content = "✅ 第${ch0.chapterIndex}章自检通过：与设定及前情均无矛盾"))
             return
         }
         var content = ch0.content
