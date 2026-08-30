@@ -29,7 +29,9 @@ object Prompts {
 
     /** 按优先级与关键词相关度挑选要注入的设定卡 */
     fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
-        val always = all.filter { it.priority == 2 }
+        // v6.8.2：人物设定类强制必发——手动建卡默认优先级是「常规」，用户忘选必发时人物卡
+        // 可能落选导致体质/灵根等硬设定丢失；人物卡是写作硬约束，一张都不能漏
+        val always = all.filter { it.priority == 2 || it.category == "人物设定" }
         val foreshadow = all.filter { it.category == "伏笔钩子" && it.status != "已回收" }
         val normal = all.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
 
