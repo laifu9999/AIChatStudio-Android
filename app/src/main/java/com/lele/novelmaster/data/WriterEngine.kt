@@ -860,6 +860,11 @@ object WriterEngine {
         } catch (_: Exception) { }
         // v6.8.1：重新生成摘要 + 伏笔回收 + 剧情进度卡（之前 summary 置空不再生成，前情摘要断链）
         regenerateSummary(cfg, dao, project, newCh)
+        // v6.9.1：重写后同样过一遍写后自检——用户用「重写本章」修复写错设定时也享受矛盾自动修正
+        try {
+            val ctx = Repo.app
+            if (ctx != null) selfCheckChapter(cfg, dao, project, newCh, ctx)
+        } catch (_: Exception) { }
         return null
     }
 
@@ -905,6 +910,11 @@ object WriterEngine {
                 }
             } catch (_: Exception) { }
             regenerateSummary(cfg, dao, project, newCh)
+            // v6.9.1：润色/扩写/改文风等替换正文后同样过写后自检
+            try {
+                val ctx2 = Repo.app
+                if (ctx2 != null) selfCheckChapter(cfg, dao, project, newCh, ctx2)
+            } catch (_: Exception) { }
         }
         return null to out
     }
