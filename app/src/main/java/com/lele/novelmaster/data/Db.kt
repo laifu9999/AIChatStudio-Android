@@ -207,7 +207,12 @@ object Repo {
     lateinit var dao: NovelDao
         private set
 
+    // v6.8.1：全局 Context，供 rewriteChapter/chapterTask 等无 context 参数的路径同步本地文件用
+    var app: Context? = null
+        private set
+
     fun init(context: Context) {
+        app = context.applicationContext
         if (!::dao.isInitialized) {
             dao = Room.databaseBuilder(context, AppDb::class.java, "novel_master.db")
                 .fallbackToDestructiveMigration()

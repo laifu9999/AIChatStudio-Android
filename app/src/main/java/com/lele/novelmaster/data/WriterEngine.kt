@@ -715,7 +715,17 @@ object WriterEngine {
             }
         } catch (_: Exception) { }
 
-        // 摘要 + 伏笔回收检测
+        // v6.8.1：摘要 + 伏笔回收 + 剧情进度卡抽成公共函数（重写/润色替换正文后也走同一套，不再断链）
+        ch = regenerateSummary(cfg, dao, project, ch)
+    }
+
+    /**
+     * v6.8.1：重生成章节摘要 + 伏笔回收 + 剧情进度卡。
+     * 之前 rewriteChapter / chapterTask(replace=true) 重写正文后 summary 置空且从不重新生成，
+     * 导致该章从此不进「前情摘要」（下一章断链）、剧情进度卡不更新；统一走这里修复。
+     */
+    suspend fun regenerateSummary(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter): Chapter {
+        var ch = ch0
         try {
             val sumReply = AiClient.chat(
                 cfg,
@@ -725,7 +735,7 @@ object WriterEngine {
                         "user",
                         "请用120字以内概括以下章节的剧情要点（含出场人物、关键事件、新埋的伏笔）。" +
                             "若本章明确回收了之前的伏笔，最后另起一行，用【回收伏笔】开头列出名称；否则不要输出该行。\n" +
-                            "第${ch.chapterIndex}章《${ch.title}》正文：\n${content.take(4000)}"
+                            "第${ch.chapterIndex}章《${ch.title}》正文：\n${ch.content.take(4000)}"
                     )
                 ),
                 temperature = 0.3,
@@ -737,9 +747,10 @@ object WriterEngine {
             val summary = sumReply.lines()
                 .filter { !it.contains("回收伏笔") }
                 .joinToString(" ").trim()
-            ch = ch.copy(summary = summary)
-            dao.updateChapter(ch)
-
+            if (summary.isNotBlank()) {
+                ch = ch.copy(summary = summary)
+                dao.updateChapter(ch)
+            }
             if (recovered.isNotBlank()) {
                 dao.cards(project.id)
                     .filter { it.category == "伏笔钩子" && it.status != "已回收" && recovered.contains(it.name) }
@@ -748,17 +759,19 @@ object WriterEngine {
         } catch (_: Exception) {
             // 摘要失败不影响正文
         }
-
         // 自动维护「剧情进度」卡
-        val progressText = "已完成至第${ch.chapterIndex}章《${ch.title}》:${ch.summary}"
-        val existing = dao.findCard(project.id, "剧情进度", "最新进度")
-        if (existing != null) {
-            dao.updateCard(existing.copy(content = progressText, updatedAt = System.currentTimeMillis()))
-        } else {
-            dao.insertCard(
-                SettingCard(projectId = project.id, category = "剧情进度", name = "最新进度", content = progressText)
-            )
+        if (ch.summary.isNotBlank()) {
+            val progressText = "已完成至第${ch.chapterIndex}章《${ch.title}》:${ch.summary}"
+            val existing = dao.findCard(project.id, "剧情进度", "最新进度")
+            if (existing != null) {
+                dao.updateCard(existing.copy(content = progressText, updatedAt = System.currentTimeMillis()))
+            } else {
+                dao.insertCard(
+                    SettingCard(projectId = project.id, category = "剧情进度", name = "最新进度", content = progressText)
+                )
+            }
         }
+        return ch
     }
 
     /** 编辑器：续写当前章 */
@@ -785,15 +798,26 @@ object WriterEngine {
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
         val content = cleanBody(AiClient.chat(cfg, messages).trim(), ch.chapterIndex, ch.title)
         if (content.isBlank()) return "AI返回空内容"
-        dao.updateChapter(
-            ch.copy(
-                content = content,
-                wordCount = content.length,
-                status = 1,
-                summary = "",
-                updatedAt = System.currentTimeMillis()
-            )
+        val newCh = ch.copy(
+            content = content,
+            wordCount = content.length,
+            status = 1,
+            summary = "",
+            updatedAt = System.currentTimeMillis()
         )
+        dao.updateChapter(newCh)
+        // v6.8.1：重写后把新正文同步到本地文件（之前只改库，本地文件滞留旧版）
+        try {
+            val ctx = Repo.app
+            if (ctx != null) {
+                dir(ctx, ch.projectId, "正文")?.let { d ->
+                    File(d, safeName("第${newCh.chapterIndex}章-${newCh.title.ifBlank { "未命名" }}") + ".txt")
+                        .writeText(content + "\n", Charsets.UTF_8)
+                }
+            }
+        } catch (_: Exception) { }
+        // v6.8.1：重新生成摘要 + 伏笔回收 + 剧情进度卡（之前 summary 置空不再生成，前情摘要断链）
+        regenerateSummary(cfg, dao, project, newCh)
         return null
     }
 
@@ -820,15 +844,25 @@ object WriterEngine {
         val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
         if (replace && out.length >= 300) {
-            dao.updateChapter(
-                ch.copy(
-                    content = out,
-                    wordCount = out.length,
-                    status = 1,
-                    summary = "",
-                    updatedAt = System.currentTimeMillis()
-                )
+            val newCh = ch.copy(
+                content = out,
+                wordCount = out.length,
+                status = 1,
+                summary = "",
+                updatedAt = System.currentTimeMillis()
             )
+            dao.updateChapter(newCh)
+            // v6.8.1：替换正文后同步本地文件 + 重新生成摘要/剧情进度卡（之前断链）
+            try {
+                val ctx = Repo.app
+                if (ctx != null) {
+                    dir(ctx, projectId, "正文")?.let { d ->
+                        File(d, safeName("第${newCh.chapterIndex}章-${newCh.title.ifBlank { "未命名" }}") + ".txt")
+                            .writeText(out + "\n", Charsets.UTF_8)
+                    }
+                }
+            } catch (_: Exception) { }
+            regenerateSummary(cfg, dao, project, newCh)
         }
         return null to out
     }
