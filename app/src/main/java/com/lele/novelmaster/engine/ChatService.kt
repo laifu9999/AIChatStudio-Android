@@ -183,7 +183,7 @@ object ChatService {
                 onProjectChange(np)
             }
             appendToolResult(pid, r)
-            if (r.ok) doneTools.add("$name：${r.message.take(50)}")
+            if (r.ok) doneTools.add("$name：${r.summary.take(50)}")
             if (name == "deleteProject" && r.ok) deletedCurrent = true
             return true
         }
