@@ -161,6 +161,12 @@ object IntentRouter {
             return Tools.listChapters(pid, onlyMissing)
         }
 
+        // v6.9.22：设定体检——必须放在设定卡列表路由之前（「设定体检」以「设定」开头、「检查设定卡」以「设定卡」结尾，都会被下面两条截胡）
+        if (Regex("设定体检|卡片体检|检查设定|设定一致性|(体检|检查|校对).{0,2}设定卡").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先告诉我体检哪本书")
+            return Tools.cardsCheck(pid)
+        }
+
         // ------- 设定卡 -------
         if (Regex("(所有)?设定卡(列表)?$|列出?(所有)?设定|列出?(所有)?卡片|我的设定").containsMatchIn(raw) ||
             Regex("^设定").containsMatchIn(raw)

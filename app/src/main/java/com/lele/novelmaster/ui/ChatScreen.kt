@@ -508,6 +508,7 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
         Triple("🩺", "全书自检修复", FRun("全书自检修复")),
         Triple("🪝", "伏笔体检", FRun("伏笔体检")),
         Triple("🧵", "支线体检", FRun("支线体检")),
+        Triple("🧾", "设定体检", FRun("设定体检")),
         Triple("💡", "剧情推演", FRun("推演后续剧情")),
         Triple("✨", "润色最新章", FRun("润色最新章")),
         Triple("💬", "生成金句", FRun("生成金句")),

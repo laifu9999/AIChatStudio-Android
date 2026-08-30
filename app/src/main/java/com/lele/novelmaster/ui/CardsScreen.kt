@@ -58,8 +58,14 @@ fun CardsScreen(nav: NavController, pid: Long) {
     var editCard by remember { mutableStateOf<SettingCard?>(null) }
     var showInspire by remember { mutableStateOf(false) }
 
-    val cats = listOf("全部") + CardCategories.all
-    val list = cards.filter { tab == "全部" || it.category == tab }
+    // v6.9.22：「分章大纲」独立页签与「全书大纲」并列（分章大纲卡 category=全书大纲、name=分章大纲，由系统自动同步）
+    val cats = listOf("全部", "全书大纲", "分章大纲") + CardCategories.all.filter { it != "全书大纲" }
+    val list = when (tab) {
+        "全部" -> cards
+        "分章大纲" -> cards.filter { it.name == "分章大纲" || it.category == "分章大纲" }
+        "全书大纲" -> cards.filter { it.category == "全书大纲" && it.name != "分章大纲" }
+        else -> cards.filter { it.category == tab }
+    }
 
     AppScaffold(
         "设定卡",
@@ -76,12 +82,22 @@ fun CardsScreen(nav: NavController, pid: Long) {
                 }
             }
             if (list.isEmpty()) {
-                Text(
-                    "该分类还没有设定卡。\n\n推荐：点右上角「灵感分析」，把你的灵感告诉AI，它会自动生成整套设定。",
-                    modifier = Modifier.padding(16.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        if (tab == "分章大纲")
+                            "还没有分章大纲卡。\n\n生成章节大纲后会自动同步到这里；也可以点下面按钮，从已有章节直接重建。"
+                        else
+                            "该分类还没有设定卡。\n\n推荐：点右上角「灵感分析」，把你的灵感告诉AI，它会自动生成整套设定。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (tab == "分章大纲") {
+                        Button(
+                            onClick = { scope.launch(Dispatchers.IO) { WriterEngine.syncChapterOutlineCard(pid, Repo.app) } },
+                            modifier = Modifier.padding(top = 12.dp)
+                        ) { Text("🔄 从章节重建大纲卡") }
+                    }
+                }
             }
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
                 items(list, key = { it.id }) { card ->
@@ -113,7 +129,7 @@ fun CardsScreen(nav: NavController, pid: Long) {
                                     card.content,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 3
+                                    maxLines = if (card.name == "分章大纲") 12 else 3
                                 )
                             }
                             IconButton(onClick = { editCard = card }) {

@@ -484,7 +484,7 @@ object ChatService {
                 CardCategories.all.joinToString("/") + ") | deleteCard{cardId} | listCards{category可空}\n" +
                 "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to} | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
                 "— 专家功能(index可空=最新章)：polishChapter | expandDialogue | styleRewrite{style} | hookChapter | goldenLines | plotBrainstorm{} | characterCheck{name} | consistencyCheck{}(全书体检·只列矛盾) | nameGen{kind,count} | genBlurb{}\n" +
-                "— 一致性体检/修复：chapterSelfCheck{index}(单章自检·矛盾自动修正) | fullSelfCheck{}(全书逐章自检修复) | selfCheckProgress{}(自检进度) | undoSelfCheck{index}(撤销最近一次修改) | supplementChapter{index}(按大纲补写缺失剧情)\n" +
+                "— 一致性体检/修复：chapterSelfCheck{index}(单章自检·矛盾自动修正) | fullSelfCheck{}(全书逐章自检修复) | selfCheckProgress{}(自检进度) | undoSelfCheck{index}(撤销最近一次修改) | supplementChapter{index}(按大纲补写缺失剧情) | cardsCheck{}(设定体检·检查全部设定卡+分章大纲矛盾并自动修复)\n" +
                 "— 伏笔/支线：foreshadowCheck{}(伏笔体检·埋收状态审计) | markHookRecovered{name}(标记伏笔已回收) | subplotCheck{}(支线体检·推进状态与收束建议)\n" +
                 "— 文件系统(path相对当前会话独立文件夹)：createFolder{path} | deleteFolder{path} | renameFolder{path,newName} | createFile{path,content} | writeFile{path,content} | appendFile{path,content} | readFile{path} | deleteFile{path} | renameFile{path,newName} | listFiles{path可空}\n" +
                 "注意：可以一次输出多个工具块；闲聊/回答问题时不要输出任何工具块。"

@@ -579,6 +579,65 @@ object Tools {
         return if (err == null) ToolResult(true, "🧵 支线任务体检（共 ${subs.size} 条支线）：", out) else ToolResult(false, err)
     }
 
+    /** 8.0e 设定体检：检查全部设定卡与分章大纲是否自洽合理，能改文字解决的矛盾自动修复卡片（v6.9.22） */
+    suspend fun cardsCheck(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val cards = dao.cards(pid)
+        if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。可到设定卡页点右上角「灵感分析」自动生成。")
+        // 控 token：普通卡每张截 160 字，分章大纲卡截 900 字
+        val cardBlock = cards.joinToString("\n") {
+            val cap = if (it.name == "分章大纲") 900 else 160
+            "· [${it.category}] ${it.name}：" + it.content.replace(Regex("\\s+"), " ").take(cap)
+        }
+        val chs = dao.chapters(pid)
+        val stat = "（已建${chs.size}章，其中${chs.count { it.outline.isNotBlank() }}章有大纲）"
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：设定体检——检查所有设定卡与分章大纲是否自洽、合理。\n" +
+                "【设定卡清单】\n$cardBlock\n\n【分章大纲】$stat\n\n" +
+                "检查：1) 卡与卡矛盾（人物/世界观/主线/冲突/圣经互相冲突）；2) 设定与分章大纲矛盾（大纲走向违背设定或主线）；3) 明显不合理或缺失（如内容空洞、主线断裂）。\n" +
+                "输出格式严格（不要任何其他解释）：\n" +
+                "【问题】每条一行：涉及卡名｜问题一句话\n" +
+                "【修复】只对能直接改文字解决的卡（最多5张，严禁修复「剧情进度」和「分章大纲」卡——它们由系统自动维护），每条一行：卡名｜修正后的完整卡片内容\n" +
+                "整体没有问题就只输出【通过】。"
+        )
+        if (err != null) return ToolResult(false, err)
+        // 解析【修复】行并应用：同名/包含匹配到卡，改前先备份原卡内容
+        val fixed = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        for (line in out.lines()) {
+            val t = line.trim()
+            if (!t.startsWith("【修复】")) continue
+            val parts = t.removePrefix("【修复】").split("｜", "|", limit = 2)
+            if (parts.size < 2) continue
+            val name = parts[0].trim()
+            val newContent = parts[1].trim()
+            if (name.isBlank() || newContent.length < 20 || !seen.add(name)) continue
+            if (name == "分章大纲" || name == "剧情进度") continue
+            val card = cards.firstOrNull { it.name == name }
+                ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
+                ?: continue
+            if (card.name == "分章大纲" || card.name == "剧情进度" || card.content == newContent) continue
+            try {
+                val d = File(FileTools.baseDir(Repo.app, pid), "设定卡/备份")
+                d.mkdirs()
+                File(d, "设定体检备份.md").appendText(
+                    "==== ${card.category}/${card.name}（${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())} 体检修改前） ====\n${card.content}\n\n",
+                    Charsets.UTF_8
+                )
+            } catch (_: Exception) { }
+            dao.updateCard(card.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+            fixed.add(card.name)
+        }
+        val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
+        val fixNote = if (fixed.isEmpty())
+            "\n\n未修改任何卡。若上面的问题需要改大纲或剧情进度，请直接说明，系统会走对应工具。"
+        else
+            "\n\n✅ 已自动修复 ${fixed.size} 张卡：${fixed.joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
+        return ToolResult(true, head, out + fixNote)
+    }
+
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao
@@ -785,6 +844,7 @@ object Tools {
             "foreshadowCheck" -> foreshadowCheck(pid)
             "markHookRecovered" -> markHookRecovered(pid, args.optString("name"))
             "subplotCheck" -> subplotCheck(pid)
+            "cardsCheck" -> cardsCheck(pid)
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
             "genBlurb" -> genBlurb(pid, context)
             "moveChapter" -> moveChapter(pid, args.optInt("from"), args.optInt("to"))
