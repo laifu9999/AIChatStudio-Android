@@ -64,7 +64,15 @@ object WriterEngine {
     }
 
     /** 补齐缺失的分章大纲（只处理 from..to 范围内）；结尾同步「分章大纲」设定卡并清理已废弃的分卷大纲 */
+    // v6.9.38：补大纲并发闸门——聊天指令/设定卡页/章节页/灵感落地四个入口共用，同时只允许一个在跑，防并发重复烧 token
+    private val outlineGate = java.util.concurrent.atomic.AtomicBoolean(false)
+
     suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
+        if (!outlineGate.compareAndSet(false, true)) return "分章大纲正在补齐中，请等当前补齐完成"
+        return try { ensureOutlinesInner(projectId, from, to, context) } finally { outlineGate.set(false) }
+    }
+
+    private suspend fun ensureOutlinesInner(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在"
         val cards = dao.cards(projectId)

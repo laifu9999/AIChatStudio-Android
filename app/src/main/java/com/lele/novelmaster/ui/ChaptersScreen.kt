@@ -47,7 +47,7 @@ fun ChaptersScreen(nav: NavController, pid: Long) {
     val scope = rememberCoroutineScope()
     // v6.9.37：补大纲忙闲从 AppTasks 全局取——离开本页任务照常完成，回来自动显示进度/结果
     val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
-    val generating = "choutline:$pid" in appTasks.running
+    val generating = "outline:$pid" in appTasks.running
     var genMsg by remember { mutableStateOf("") }
     // v6.9.17：自检状态徽标（✅通过/🔧修复过/⚠️疑似/无=未自检），数据来自本地「自检记录」
     val context = LocalContext.current
@@ -69,7 +69,8 @@ fun ChaptersScreen(nav: NavController, pid: Long) {
             TextButton(onClick = {
                 genMsg = ""
                 // v6.9.37：跑在 AppTasks 单例——中途离开本页，补大纲照常完成并落库
-                com.lele.novelmaster.engine.AppTasks.launch("choutline:$pid") {
+                // v6.9.38：key 与设定卡页「AI补全缺失大纲」统一为 outline:pid，两处入口互斥
+                com.lele.novelmaster.engine.AppTasks.launch("outline:$pid") {
                     val err = WriterEngine.ensureOutlines(pid)
                     withContext(Dispatchers.Main) {
                         if (err != null) genMsg = err
