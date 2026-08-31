@@ -35,10 +35,10 @@ object ChatService {
         "startAutoWrite", "stopAutoWrite", "generateOutlines", "inspireFromText",
         "readChapter", "listCards", "listChapters", "exportTxt", "deleteProject",
         "contextPreview", "moveChapter", "copyChapter",
-        "polishChapter", "expandDialogue", "styleRewrite", "hookChapter", "goldenLines",
+        "polishChapter", "publishPolish", "expandDialogue", "styleRewrite", "hookChapter", "goldenLines",
         "plotBrainstorm", "characterCheck", "consistencyCheck", "nameGen", "genBlurb",
         "chapterSelfCheck", "fullSelfCheck", "selfCheckProgress", "undoSelfCheck", "supplementChapter",
-        "foreshadowCheck", "markHookRecovered", "subplotCheck", "cardsCheck", "cardsCheckReport", "setChapterOutline",
+        "foreshadowCheck", "markHookRecovered", "subplotCheck", "cardsCheck", "cardsCheckReport", "cardsSlim", "setChapterOutline",
         "createFolder", "deleteFolder", "renameFolder",
         "createFile", "writeFile", "appendFile", "readFile",
         "deleteFile", "renameFile", "listFiles"
@@ -487,8 +487,8 @@ object ChatService {
                 "— 项目/设定：createProject{title,genre,desc,totalCh,chWords}(仅无会话时) | updateProject{title,genre,desc,totalCh,chWords}(改当前会话，不跳出) | switchProject{pid} | listProjects{} | addCard{category,name,content}(category:" +
                 CardCategories.all.joinToString("/") + ") | deleteCard{cardId} | listCards{category可空}\n" +
                 "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to} | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
-                "— 专家功能(index可空=最新章)：polishChapter | expandDialogue | styleRewrite{style} | hookChapter | goldenLines | plotBrainstorm{} | characterCheck{name} | consistencyCheck{}(全书体检·只列矛盾) | nameGen{kind,count} | genBlurb{}\n" +
-                "— 一致性体检/修复：chapterSelfCheck{index}(单章自检·矛盾自动修正) | fullSelfCheck{}(全书逐章自检修复) | selfCheckProgress{}(自检进度) | undoSelfCheck{index}(撤销最近一次修改) | supplementChapter{index}(按大纲补写缺失剧情) | cardsCheck{}(设定体检·检查全部设定卡+分章大纲矛盾并自动修复) | cardsCheckReport{}(查看最近一次设定体检报告·只读) | setChapterOutline{index,text}(手动修改第N章大纲并同步镜像卡·text传新大纲全文)\n" +
+                "— 专家功能(index可空=最新章)：polishChapter | publishPolish{}(发布打磨·去AI味+开头+节奏+钩子，发布前最后一道工序) | expandDialogue | styleRewrite{style} | hookChapter | goldenLines | plotBrainstorm{} | characterCheck{name} | consistencyCheck{}(全书体检·只列矛盾) | nameGen{kind,count} | genBlurb{}\n" +
+                "— 一致性体检/修复：chapterSelfCheck{index}(单章自检·矛盾自动修正) | fullSelfCheck{}(全书逐章自检修复) | selfCheckProgress{}(自检进度) | undoSelfCheck{index}(撤销最近一次修改) | supplementChapter{index}(按大纲补写缺失剧情) | cardsCheck{}(设定体检·检查全部设定卡+分章大纲矛盾/重复并自动修复精简) | cardsCheckReport{}(查看最近一次设定体检报告·只读) | cardsSlim{}(设定瘦身·全部设定卡去重压缩抓重点) | setChapterOutline{index,text}(手动修改第N章大纲并同步镜像卡·text传新大纲全文)\n" +
                 "— 伏笔/支线：foreshadowCheck{}(伏笔体检·埋收状态审计) | markHookRecovered{name}(标记伏笔已回收) | subplotCheck{}(支线体检·推进状态与收束建议)\n" +
                 "— 文件系统(path相对当前会话独立文件夹)：createFolder{path} | deleteFolder{path} | renameFolder{path,newName} | createFile{path,content} | writeFile{path,content} | appendFile{path,content} | readFile{path} | deleteFile{path} | renameFile{path,newName} | listFiles{path可空}\n" +
                 "注意：可以一次输出多个工具块；闲聊/回答问题时不要输出任何工具块。"

@@ -429,6 +429,27 @@ object Tools {
         return if (err == null) ToolResult(true, "✅ 第${n}章润色完成", "文笔已升级，剧情未变。可在章节列表查看。") else ToolResult(false, err)
     }
 
+    /** v6.9.35 发布打磨：去AI味+开头入戏+节奏+对话潜台词+章末钩子，一键达到可发布水平（替换前自动备份） */
+    suspend fun publishPolish(pid: Long, idx: Int): ToolResult {
+        val (n, ch) = locate(pid, idx)
+        if (ch == null || ch.content.isBlank()) return ToolResult(false, "没有可打磨的章节")
+        val (err, _) = WriterEngine.chapterTask(
+            pid, n,
+            "发布级深度打磨（这是发布前的最后一道工序，目标是让读者看不出AI痕迹）：\n" +
+                "1) 去AI味：删除任何总结本章的段落；删掉「仿佛/似乎/宛如」式堆砌比喻；清除「眸中闪过一丝X」「嘴角勾起一抹弧度」「空气仿佛凝固」「不知道过了多久」等套路句；不滥用成语和四字排比；\n" +
+                "2) 开头直接入戏：前100字必须进入场景或冲突，删掉铺垫式开头；\n" +
+                "3) 节奏：每300~500字要有一个新信息点或小转折，删除拖沓的过渡句和重复交代；\n" +
+                "4) 对话至少占三成，对话要有潜台词和信息差，能推动剧情；全知解说（他知道/他明白/殊不知）改为用动作细节流露；\n" +
+                "5) 章末钩子必须是具体事件（危机/反转/来客/秘密/决定），删掉空泛的情绪渲染式结尾；\n" +
+                "6) 铁律：剧情走向、人物性格、设定事实、伏笔一律不变，字数与原章相近。\n" +
+                "只输出打磨后的完整正文。",
+            replace = true
+        )
+        return if (err == null)
+            ToolResult(true, "🚀 第${n}章发布打磨完成", "去AI味/开头/节奏/钩子已按发布标准处理，剧情未变。原文已自动备份，可直接导出发布。")
+        else ToolResult(false, err)
+    }
+
     /** 2. 对话扩写：把叙述改造成生动对话场景 */
     suspend fun expandDialogue(pid: Long, idx: Int): ToolResult {
         val (n, ch) = locate(pid, idx)
@@ -607,33 +628,41 @@ object Tools {
         val stat = "（已建${chs.size}章，其中${chs.count { it.outline.isNotBlank() }}章有大纲）"
         val (err, out) = WriterEngine.freeTask(
             pid,
-            "任务：设定体检——检查所有设定卡与分章大纲是否自洽、合理。\n" +
+            "任务：设定体检——检查所有设定卡与分章大纲是否自洽、合理、精炼。\n" +
                 "【设定卡清单】\n$cardBlock\n\n【分章大纲】$stat\n\n" +
-                "检查：1) 卡与卡矛盾（人物/世界观/主线/冲突/圣经互相冲突）；2) 设定与分章大纲矛盾（大纲走向违背设定或主线）；3) 事实性错误（同一设定前后说法不一）。\n" +
+                "检查：1) 卡与卡矛盾（人物/世界观/主线/冲突/圣经互相冲突）；2) 设定与分章大纲矛盾（大纲走向违背设定或主线）；3) 事实性错误（同一设定前后说法不一）；" +
+                "4) 冗余重复（多张卡写了同一件事——如主线剧情/核心冲突/全书大纲互相复述；或单卡啰嗦超长、塞满空话）。\n" +
                 "重要：卡片「内容不够详细/单薄」不算问题——这类放进【建议】行即可，严禁为它们输出【修复】（注入截断导致你只看到卡片前160字，不代表卡片内容真的单薄）。\n" +
                 "输出格式严格（不要任何其他解释）：\n" +
-                "【问题】每条一行：涉及卡名｜问题一句话（只列真实矛盾/错误，没有就不输出此行）\n" +
+                "【问题】每条一行：涉及卡名｜问题一句话（只列真实矛盾/错误/明显重复，没有就不输出此行）\n" +
                 "【建议】每条一行：卡名｜一句话扩写方向（可选）\n" +
                 "【修复】只对能直接改文字解决的真实矛盾（最多5张，严禁修复「剧情进度」和「分章大纲」卡——它们由系统自动维护），每条一行：卡名｜修正后的完整卡片内容\n" +
+                "【精简】只对明显重复/啰嗦的卡去重压缩（最多8张，严禁精简「剧情进度」「分章大纲」「写作禁忌」卡），每条一行：卡名｜去重后的完整卡片内容（抓重点：每卡60~200字，只留对写作有用的干货，不新增不改设定事实）\n" +
                 "整体没有问题就只输出【通过】。"
         )
         if (err != null) return ToolResult(false, err)
-        // 解析【修复】行并应用：同名/包含匹配到卡，改前先备份原卡内容
+        // 解析【修复】/【精简】行并应用：同名/包含匹配到卡，改前先备份原卡内容（v6.9.35 支持去重精简）
         val fixed = mutableListOf<String>()
+        val slimmed = mutableListOf<String>()
+        var savedChars = 0
         val seen = mutableSetOf<String>()
         for (line in out.lines()) {
             val t = line.trim()
-            if (!t.startsWith("【修复】")) continue
-            val parts = t.removePrefix("【修复】").split("｜", "|", limit = 2)
+            val isFix = t.startsWith("【修复】")
+            val isSlim = t.startsWith("【精简】")
+            if (!isFix && !isSlim) continue
+            val parts = t.removePrefix(if (isFix) "【修复】" else "【精简】").split("｜", "|", limit = 2)
             if (parts.size < 2) continue
             val name = parts[0].trim()
             val newContent = parts[1].trim()
             if (name.isBlank() || newContent.length < 20 || !seen.add(name)) continue
-            if (name == "分章大纲" || name == "剧情进度") continue
+            if (name == "分章大纲" || name == "剧情进度" || name == "写作禁忌") continue
             val card = cards.firstOrNull { it.name == name }
                 ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
                 ?: continue
-            if (card.name == "分章大纲" || card.name == "剧情进度" || card.content == newContent) continue
+            if (card.name == "分章大纲" || card.name == "剧情进度" || card.name == "写作禁忌" || card.content == newContent) continue
+            // 精简必须真的变短才应用（防止 AI 复读原文）
+            if (isSlim && newContent.length >= card.content.length) continue
             val appCtx = Repo.app
             if (appCtx != null) try {
                 val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
@@ -643,14 +672,15 @@ object Tools {
                     Charsets.UTF_8
                 )
             } catch (_: Exception) { }
+            savedChars += (card.content.length - newContent.length).coerceAtLeast(0)
             dao.updateCard(card.copy(content = newContent, updatedAt = System.currentTimeMillis()))
-            fixed.add(card.name)
+            if (isFix) fixed.add(card.name) else slimmed.add(card.name)
         }
         val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
-        val fixNote = if (fixed.isEmpty())
+        val fixNote = if (fixed.isEmpty() && slimmed.isEmpty())
             "\n\n未修改任何卡。若上面的问题需要改大纲或剧情进度，请直接说明，系统会走对应工具。"
         else
-            "\n\n✅ 已自动修复 ${fixed.size} 张卡：${fixed.joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
+            "\n\n✅ 已自动修复 ${fixed.size} 张卡${if (slimmed.isNotEmpty()) "、去重精简 ${slimmed.size} 张卡（约省 $savedChars 字）" else ""}：${(fixed + slimmed).joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
         // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查）
         try {
             val appCtx = Repo.app
@@ -677,6 +707,67 @@ object Tools {
         val body = if (content.length > 3000) content.take(3000) + "\n\n…（报告超长已截断，全文见 设定卡/备份/${files[0].name}）" else content
         val older = if (files.size > 1) "\n\n（更早的报告：${files.drop(1).take(3).joinToString("、") { it.name }}${if (files.size > 4) " 等" else ""}）" else ""
         return ToolResult(true, head, body + older)
+    }
+
+    /** v6.9.35 设定瘦身：全部设定卡一次性查重去冗——重复内容只留在最相关的卡里，其余卡压缩成干货（主线/冲突/大纲互抄的克星） */
+    suspend fun cardsSlim(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val cards = dao.cards(pid).filter { it.name != "分章大纲" && it.name != "剧情进度" && it.name != "写作禁忌" }
+        if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡，无需瘦身。")
+        // 瘦身需要看到较完整内容：每卡截 500 字（比体检的 160 宽），控总量
+        val cardBlock = cards.joinToString("\n") {
+            "· [${it.category}] ${it.name}：" + it.content.replace(Regex("\\s+"), " ").take(500)
+        }
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：设定卡瘦身——全书设定卡去重、压缩、抓重点。只动内容，不改任何设定事实，不新增设定。\n" +
+                "【全部设定卡】\n$cardBlock\n\n" +
+                "规则：\n" +
+                "1) 多张卡写了同一件事（主线剧情/核心冲突/全书大纲互相复述是最常见的病）：同一件事只保留在最相关的一张卡里，其余卡删掉这部分；\n" +
+                "2) 每卡只留对写作有用的干货：主线剧情=目标+阻力+结局走向(≤120字)；核心冲突=对立双方与不可调和点(≤80字)；全书大纲每条=阶段变化(≤80字)；世界观/圣经=规则体系；人物=身份/性格/能力/关系/目标；\n" +
+                "3) 内容超过200字的卡必须压缩；空话套话、抒情排比、与剧情无关的背景介绍全部删除；\n" +
+                "4) 严禁改动数值、名词、人物关系等设定事实本身。\n" +
+                "输出格式严格（不要任何解释）：\n" +
+                "【精简】卡名｜精简后的完整卡片内容（一行一张卡；只输出需要修改的卡，没有就只输出【通过】）"
+        )
+        if (err != null) return ToolResult(false, err)
+        if (out.contains("【通过】")) return ToolResult(true, "✂️ 设定瘦身完成：各卡已经很精炼，无需修改", out)
+        var applied = 0
+        var savedChars = 0
+        val names = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        for (line in out.lines()) {
+            val t = line.trim()
+            if (!t.startsWith("【精简】")) continue
+            val parts = t.removePrefix("【精简】").split("｜", "|", limit = 2)
+            if (parts.size < 2) continue
+            val name = parts[0].trim()
+            val newContent = parts[1].trim()
+            if (name.isBlank() || newContent.length < 20 || !seen.add(name)) continue
+            val card = cards.firstOrNull { it.name == name }
+                ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
+                ?: continue
+            if (card.content == newContent || newContent.length >= card.content.length) continue
+            val appCtx = Repo.app
+            if (appCtx != null) try {
+                val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+                d.mkdirs()
+                File(d, "设定瘦身备份.md").appendText(
+                    "==== ${card.category}/${card.name}（${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())} 瘦身前） ====\n${card.content}\n\n",
+                    Charsets.UTF_8
+                )
+            } catch (_: Exception) { }
+            savedChars += (card.content.length - newContent.length).coerceAtLeast(0)
+            dao.updateCard(card.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+            names.add(card.name)
+            applied++
+        }
+        val head = if (applied > 0) "✂️ 设定瘦身完成：精简 $applied 张卡，共减 $savedChars 字" else "✂️ 设定瘦身完成：没有需要精简的卡"
+        val note = if (applied > 0)
+            "\n\n已修改：${names.joinToString("、")}（原内容备份在 设定卡/备份/设定瘦身备份.md）\n注入 AI 的内容随之变少：响应更快、更省 token。"
+        else ""
+        return ToolResult(true, head, out.take(1500) + note)
     }
 
     /** v6.9.31 手动修改第N章大纲：唯一的大纲人工修改入口（UI 只读），改完自动同步分章大纲镜像卡 */
@@ -891,6 +982,7 @@ object Tools {
             "contextPreview" -> contextPreview(pid)
             // 专家级写作功能
             "polishChapter" -> polishChapter(pid, args.optInt("index", -1))
+            "publishPolish" -> publishPolish(pid, args.optInt("index", -1))
             "expandDialogue" -> expandDialogue(pid, args.optInt("index", -1))
             "styleRewrite" -> styleRewrite(pid, args.optInt("index", -1), args.optString("style"))
             "hookChapter" -> hookChapter(pid, args.optInt("index", -1))
@@ -909,6 +1001,7 @@ object Tools {
             "subplotCheck" -> subplotCheck(pid)
             "cardsCheck" -> cardsCheck(pid)
             "cardsCheckReport" -> cardsCheckReport(pid)
+            "cardsSlim" -> cardsSlim(pid)
             "setChapterOutline" -> setChapterOutline(pid, args.optInt("index"), args.optString("text"))
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))
             "genBlurb" -> genBlurb(pid, context)

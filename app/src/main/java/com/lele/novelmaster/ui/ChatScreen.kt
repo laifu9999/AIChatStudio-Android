@@ -142,15 +142,16 @@ fun ChatScreen(nav: NavHostController) {
     var showPanel by remember { mutableStateOf(false) }
     var showStyle by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var chatJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var style by remember { mutableStateOf(ChatStylePrefs.load(ctx)) }
     // v5.5：打字机效果当前显示到的位置（key=message id）
     var creatingSession by remember { mutableStateOf(false) }
-    // v5.7/v5.8：AI 流式输出的实时文本（自带打字效果）；聊天记录一律静态显示，不再重播逐字动画
-    var streamingText by remember { mutableStateOf<String?>(null) }
-    // v6.3：已用秒数（让长任务有进度反馈，不再是干转圈）
-    var elapsedSec by remember { mutableStateOf(0) }
+    // v6.9.35：忙闲/流式文本/计时全部来自 ChatEngine 单例——生成流不再挂在界面组合上，
+    // 点功能按钮、跳转页面、切会话都不会中断生成，回来还能看到实时进度。
+    // busy 只在「本次生成所属的会话」里显示，其他会话照常可操作。
+    val cs by com.lele.novelmaster.engine.ChatEngine.state.collectAsState()
+    val busy = cs.busy && cs.pid == currentPid
+    val streamingText = if (cs.pid == currentPid) cs.streamingText else null
+    val elapsedSec = cs.elapsedSec
 
     val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
     val messages by Repo.dao.messagesFlow(currentPid).collectAsState(initial = emptyList())
@@ -193,15 +194,9 @@ fun ChatScreen(nav: NavHostController) {
     // v6.0：手指滑动屏幕时显示悬浮箭头，停手即隐藏
     val showJumpBtns by remember { androidx.compose.runtime.derivedStateOf { listState.isScrollInProgress } }
 
-    // v6.3：忙时每秒计一次，界面显示已用秒数，用户知道没卡死
-    LaunchedEffect(busy) {
-        if (!busy) { elapsedSec = 0; return@LaunchedEffect }
-        var s = 0
-        while (busy) {
-            delay(1000)
-            s++
-            elapsedSec = s
-        }
+    // v6.9.35：计时移到 ChatEngine（离开界面也连续）；这里只负责生成结束时滚回底部
+    LaunchedEffect(cs.busy) {
+        if (!cs.busy) listState.scrollToItem(0)
     }
 
     fun newDefaultSession() {
@@ -219,51 +214,23 @@ fun ChatScreen(nav: NavHostController) {
 
     fun send(text: String) {
         val t = text.trim()
-        if (t.isEmpty() || busy) return
-        input = ""
-        busy = true
-        streamingText = ""
-        chatJob = scope.launch {
-            // v6.3/v6.9：兜底看门狗——改为「活动感知」：AI 每出一个字都算活着，
-            // 只有连续 5 分钟没有任何流式字节（真卡死/连接半开）才强制结束并恢复发送按钮。
-            // 之前是固定 5 分钟必杀，分章大纲等多批长任务会被误杀报"超时"
-            val guard = scope.launch {
-                while (true) {
-                    delay(15_000)
-                    if (!busy) break
-                    val idle = System.currentTimeMillis() - com.lele.novelmaster.data.AiClient.lastActivityMs
-                    if (idle > 300_000) {
-                        chatJob?.cancel()
-                        Repo.dao.insertMessage(
-                            Message(projectId = currentPid, role = "system", kind = "error",
-                                content = "⚠️ 本次请求超过 5 分钟没有任何响应，已自动停止。请再发一次，或换一个模型试试。")
-                        )
-                        streamingText = null
-                        busy = false
-                        break
-                    }
-                }
-            }
-            try {
-                ChatService.handle(ctx, currentPid, t, { newPid -> if (newPid != 0L) currentPid = newPid }) { s ->
-                    streamingText = s
-                }
-            } finally {
-                guard.cancel()
-                // v5.8：AI 回复的打字效果由流式实时呈现；落库后聊天记录静态显示，不再重播逐字动画
-                streamingText = null
-                busy = false
-                listState.scrollToItem(0)
-            }
+        if (t.isEmpty()) return
+        // v6.9.35：busy 时不再静默忽略，也不打断正在进行的生成——提示用户
+        if (com.lele.novelmaster.engine.ChatEngine.busy()) {
+            android.widget.Toast.makeText(ctx, "正在生成中，请等当前回复完成，或点发送键停止", android.widget.Toast.LENGTH_SHORT).show()
+            return
         }
+        input = ""
+        // 生成在 ChatEngine 单例里跑：任何界面操作/跳转都不会取消它
+        com.lele.novelmaster.engine.ChatEngine.send(ctx, currentPid, t) { newPid -> currentPid = newPid }
     }
 
     fun onSendClick() {
-        if (busy) {
-            chatJob?.cancel()
+        // v6.3：发送键=主动停止（唯一会中断生成的方式）
+        if (com.lele.novelmaster.engine.ChatEngine.busy()) {
+            com.lele.novelmaster.engine.ChatEngine.stop()
             // v6.9.34：只停当前这本书的自动写作（其他并行书不受影响）
             if (AutoWriteManager.isRunning(currentPid)) AutoWriteManager.stop(currentPid)
-            busy = false
             return
         }
         send(input)
@@ -512,8 +479,10 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
         Triple("🪝", "伏笔体检", FRun("伏笔体检")),
         Triple("🧵", "支线体检", FRun("支线体检")),
         Triple("🧾", "设定体检", FRun("设定体检")),
+        Triple("✂️", "设定瘦身", FRun("设定瘦身")),
         Triple("💡", "剧情推演", FRun("推演后续剧情")),
         Triple("✨", "润色最新章", FRun("润色最新章")),
+        Triple("🚀", "发布打磨", FRun("发布打磨最新章")),
         Triple("💬", "生成金句", FRun("生成金句")),
         Triple("📝", "简介书名", FRun("生成简介和书名")),
         Triple("🏷", "起名器", FRun("起8个人物名")),

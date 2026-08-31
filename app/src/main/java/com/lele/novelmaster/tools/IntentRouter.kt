@@ -121,7 +121,7 @@ object IntentRouter {
             // 否则会在这里被当成「查看/写第N章」截胡（回归模拟确认 v6.9.8~v6.9.18 的 14 条用例全部中招）。
             // v6.9.20：动作词补「改成对话/对话体/对话」（覆盖扩写路由的「把第N章改成对话体/对话改生动」语序）
             if (m.value.startsWith("第") &&
-                Regex("自检|检查|体检|撤销|还原|回滚|恢复|重写|补写|润色|扩写|风格|钩子|金句|伏笔|支线|推演|一致性|矛盾|改成对话|对话体|对话|大纲").containsMatchIn(raw)
+                Regex("自检|检查|体检|撤销|还原|回滚|恢复|重写|补写|润色|打磨|扩写|风格|钩子|金句|伏笔|支线|推演|一致性|矛盾|改成对话|对话体|对话|大纲").containsMatchIn(raw)
             ) return@let
             val idx = parseChineseNum(m.groupValues[1])
             if (idx in 1..100000) {
@@ -171,6 +171,12 @@ object IntentRouter {
         if (Regex("(查看|看|打开|调出).{0,4}体检报告|体检报告|体检结果|上(一次|次|回).{0,3}体检").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我要看哪本书的报告")
             return Tools.cardsCheckReport(pid)
+        }
+
+        // v6.9.35：设定瘦身——放在设定卡列表路由之前（「设定瘦身」以「设定」开头会被 ^设定 截胡）
+        if (Regex("设定瘦身|卡瘦身|精简设定|设定去重|设定卡瘦身").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先告诉我瘦身哪本书")
+            return Tools.cardsSlim(pid)
         }
 
         // ------- 设定卡 -------
@@ -259,6 +265,11 @@ object IntentRouter {
         }
 
         // ------- 专家级写作功能 -------
+        // v6.9.35：发布打磨——必须在「润色」路由之前（「发布打磨」含「打磨」语义更specific；且「发布打磨最新章」不带「润色」二字不冲突，但放前面防将来扩展误拦）
+        if (Regex("发布打磨|深度打磨|上架打磨|打磨(第|最新|本章)|打磨一下").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.publishPolish(pid, chapterNum)
+        }
         if (Regex("润色").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.polishChapter(pid, chapterNum)
