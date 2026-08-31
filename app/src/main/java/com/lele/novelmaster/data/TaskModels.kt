@@ -10,10 +10,25 @@ import android.content.Context
  * 典型用法：大纲/体检用便宜的免费模型，打磨用高质量付费模型。
  */
 object TaskModels {
-    const val OUTLINE = "outline"   // 分章大纲生成
-    const val CHECK = "check"       // 设定体检 / 设定瘦身
-    const val POLISH = "polish"     // 发布打磨 / 润色 / 扩写 / 补写
-    val ALL = listOf(OUTLINE, CHECK, POLISH)
+    const val OUTLINE = "outline"       // 分章大纲生成
+    const val CHECK = "check"           // 设定体检 / 设定瘦身 / 按报告修复
+    const val POLISH = "polish"         // 发布打磨 / 润色 / 扩写 / 补写
+    // v6.9.46：后台任务模型扩展——全部带「检/修复」性质的任务都可指定专用模型
+    const val CHAPTER = "chapter"       // 正文生成 / 续写 / 重写 / 自动写作
+    const val BOOKCHECK = "bookcheck"   // 全书体检（只诊断）
+    const val SELFCHK = "selfcheck"     // 全书自检 / 单章自检 / 自检一键修复
+    val ALL = listOf(OUTLINE, CHECK, POLISH, CHAPTER, BOOKCHECK, SELFCHK)
+
+    /** 任务显示名（后台 AI 设置页用，与 ALL 顺序一致） */
+    fun label(task: String): String = when (task) {
+        OUTLINE -> "🗂 设定卡（含分章大纲）"
+        CHECK -> "🧾 设定体检 / 瘦身"
+        POLISH -> "🚀 发布打磨"
+        CHAPTER -> "✍️ 正文生成 / 重写"
+        BOOKCHECK -> "🔍 全书体检"
+        SELFCHK -> "🔧 全书自检 / 单章自检"
+        else -> task
+    }
 
     private const val FILE = "task_models"
 

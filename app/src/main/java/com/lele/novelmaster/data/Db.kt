@@ -191,6 +191,10 @@ interface NovelDao {
     @Query("SELECT * FROM messages WHERE projectId = :pid ORDER BY createdAt ASC, id ASC")
     fun messagesFlow(pid: Long): Flow<List<Message>>
 
+    /** v6.9.46：最近的单章自检「疑似矛盾」消息（kind=selfcheck_fix），供一键修复取问题清单 */
+    @Query("SELECT * FROM messages WHERE projectId = :pid AND kind = 'selfcheck_fix' ORDER BY createdAt DESC, id DESC LIMIT 30")
+    suspend fun recentSelfCheckFix(pid: Long): List<Message>
+
     @Insert
     suspend fun insertMessage(m: Message): Long
 

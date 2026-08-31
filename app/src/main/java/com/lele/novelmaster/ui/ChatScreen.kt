@@ -689,7 +689,12 @@ private fun MessageBubble(m: Message, th: ChatThemeColors, font: FontFamily, siz
     val bubbleMax = screenW - 20.dp
     when (m.role) {
         "user" -> UserBubble(m, bubbleMax, th, font, size)
-        "tool" -> if (m.kind == "report") ReportBubble(m, bubbleMax, th, font, size) else ToolBubble(m, bubbleMax, th, font, size)
+        // v6.9.46：kind=selfcheck_fix = 单章自检「疑似矛盾」——带「确认修复」按钮，点击按问题清单+大纲重写本章
+        "tool" -> when {
+            m.kind == "report" -> ReportBubble(m, bubbleMax, th, font, size)
+            m.kind == "selfcheck_fix" -> SelfCheckFixBubble(m, bubbleMax, th, font, size)
+            else -> ToolBubble(m, bubbleMax, th, font, size)
+        }
         "system" -> SystemBubble(m, bubbleMax, font, size)
         else -> AiBubble(m, bubbleMax, th, font, size)
     }
@@ -864,6 +869,55 @@ private fun ToolBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: C
                     Text(lines.drop(1).joinToString("\n"), color = th.aiText.copy(alpha = 0.85f),
                         fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
                         textAlign = TextAlign.Center)
+                }
+            }
+        }
+    }
+}
+
+/** v6.9.46：单章自检「疑似矛盾」气泡——内容 + 「确认修复」按钮。
+ *  点击后 AppTasks 进程级宿主跑 chapterSelfCheckFix：按问题清单+本章大纲重写正文、备份原文、自动保存并复检。
+ *  章号从消息内容解析（消息由 WriterEngine.selfCheckChapter suspect 路径落库）。 */
+@Composable
+private fun SelfCheckFixBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: ChatThemeColors, font: FontFamily, size: Int) {
+    val lines = m.content.split("\n")
+    val chIdx = Regex("第(\\d+)章自检发现").find(m.content)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
+    val key = "selfcheckFix:${m.projectId}:$chIdx"
+    val running = key in appTasks.running
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = th.aiBubble),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.widthIn(max = bubbleMax)
+        ) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(lines.firstOrNull() ?: "", color = th.aiText, fontWeight = FontWeight.Bold,
+                    fontSize = (size - 1).sp, textAlign = TextAlign.Center)
+                if (lines.size > 1) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(lines.drop(1).joinToString("\n"), color = th.aiText.copy(alpha = 0.85f),
+                        fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
+                        textAlign = TextAlign.Center)
+                }
+                if (chIdx > 0) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        if (running) appTasks.progress[key] ?: "⏳ 正在按自检问题重写本章，请稍候…（可离开页面，修复照常进行）"
+                        else "🔧 确认修复：按问题清单+大纲重写本章（自动保存）",
+                        color = if (running) th.aiText.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primary,
+                        fontSize = (size - 1).sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !running) {
+                                com.lele.novelmaster.engine.AppTasks.launch(key) {
+                                    val r = com.lele.novelmaster.tools.Tools.chapterSelfCheckFix(m.projectId, chIdx)
+                                    ChatService.appendToolResult(m.projectId, r)
+                                }
+                            }
+                            .padding(vertical = 4.dp),
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         }

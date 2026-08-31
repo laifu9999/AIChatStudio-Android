@@ -236,7 +236,11 @@ object Tools {
     }
 
     suspend fun writeNextChapter(pid: Long, context: Context? = null): ToolResult {
-        val cfg = withContext(Dispatchers.IO) { Repo.apiFor(pid) } ?: return ToolResult(false, "请先在【AI模型】中添加并启用一个模型")
+        // v6.9.46：正文生成可走「任务专用模型」（后台 ✍️ 正文生成/重写）
+        val cfg = withContext(Dispatchers.IO) {
+            com.lele.novelmaster.data.TaskModels.apiFor(context ?: Repo.app, pid, com.lele.novelmaster.data.TaskModels.CHAPTER)
+        } ?: withContext(Dispatchers.IO) { Repo.apiFor(pid) }
+            ?: return ToolResult(false, "请先在【AI模型】中添加并启用一个模型")
         val chs = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
         val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val next = chs.firstOrNull { it.content.isBlank() } ?: return ToolResult(false, "全部章节都已写完 ✅")
@@ -558,7 +562,8 @@ object Tools {
         val sumBlock = written.joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary}" }
         val (err, out) = WriterEngine.freeTask(
             pid,
-            "任务：全书一致性体检。各章摘要如下：\n$sumBlock\n\n请检查：1) 设定矛盾（能力/称谓/人数/物品）；2) 时间线错误；3) 未回收或异常的伏笔；4) 平台敏感内容风险提示。逐条列出（注明章号）并给修复建议；没问题就明确说【通过】。\n（本体检只列问题不修改；如需自动修正，可说「全书自检」）"
+            "任务：全书一致性体检。各章摘要如下：\n$sumBlock\n\n请检查：1) 设定矛盾（能力/称谓/人数/物品）；2) 时间线错误；3) 未回收或异常的伏笔；4) 平台敏感内容风险提示。逐条列出（注明章号）并给修复建议；没问题就明确说【通过】。\n（本体检只列问题不修改；如需自动修正，可说「全书自检」）",
+            task = com.lele.novelmaster.data.TaskModels.BOOKCHECK // v6.9.46：全书体检可走专用模型
         )
         val tip = if (err == null) "\n\n💡 本报告只诊断不修改。想让系统逐章自动修正矛盾，请说「全书自检」。" else ""
         return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out + tip) else ToolResult(false, err)
@@ -637,10 +642,10 @@ object Tools {
         val dao = Repo.dao
         val cards = dao.cards(pid)
         if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。可到设定卡页点右上角「灵感分析」自动生成。")
-        // 控 token：普通卡每张截 160 字，分章大纲卡截 900 字
-        val cardBlock = cards.joinToString("\n") {
-            val cap = if (it.name == "分章大纲") 900 else 160
-            "· [${it.category}] ${it.name}：" + it.content.replace(Regex("\\s+"), " ").take(cap)
+        // v6.9.46：这里只列卡名清单——全部卡的完整原文已由 freeTask(CHECK) 全量注入系统上下文，
+        // 此前每卡截 160 字导致 AI「看不到设定圣经完整内容、无法输出完整卡」（用户实测踩坑）
+        val cardBlock = cards.filter { it.name != "分章大纲" }.joinToString("\n") {
+            "· [${it.category}] ${it.name}"
         }
         val chs = dao.chapters(pid)
         val stat = "（已建${chs.size}章，其中${chs.count { it.outline.isNotBlank() }}章有大纲）"
@@ -650,7 +655,8 @@ object Tools {
                 "【设定卡清单】\n$cardBlock\n\n【分章大纲】$stat\n\n" +
                 "检查：1) 卡与卡矛盾（人物/世界观/主线/冲突/圣经互相冲突）；2) 设定与分章大纲矛盾（大纲走向违背设定或主线）；3) 事实性错误（同一设定前后说法不一）；" +
                 "4) 冗余重复（多张卡写了同一件事——如主线剧情/核心冲突/全书大纲互相复述；或单卡啰嗦超长、塞满空话）。\n" +
-                "重要：卡片「内容不够详细/单薄」不算问题——这类放进【建议】行即可，严禁为它们输出【修复】（注入截断导致你只看到卡片前160字，不代表卡片内容真的单薄）。\n" +
+                "重要：卡片「内容不够详细/单薄」不算问题——这类放进【建议】行即可，严禁为它们输出【修复】。\n" +
+                "重要：你可以看到系统上下文里全部设定卡的完整原文（见【全部设定卡完整原文】）。允许修复除「剧情进度」「分章大纲」外的任意设定卡（含设定圣经、世界观）——输出整卡时必须以原文为准整体重写，严禁凭印象补写或截断原文。\n" +
                 "重要：只报硬伤（真矛盾/真错误/明显重复）。【问题】最多列 6 条，按严重程度从高到低排序；措辞差异、详略不同、风格偏好这类不算问题，严禁凑数罗列。\n" +
                 "重要：全程只用简体中文输出，严禁英文，严禁输出思考过程/内心独白，直接按格式给结果。\n" +
                 "输出格式严格（不要任何其他解释）：\n" +
@@ -763,7 +769,7 @@ object Tools {
                 "【体检报告】\n$report\n\n" +
                 "要求：\n" +
                 "1) 全程只用简体中文，严禁英文，严禁输出思考过程/内心分析，直接给结果；\n" +
-                "2) 只处理报告里指出的、能用改文字解决的真实矛盾；严禁动「剧情进度」「分章大纲」「写作禁忌」卡；\n" +
+                "2) 只处理报告里指出的、能用改文字解决的真实矛盾；严禁动「剧情进度」「分章大纲」「写作禁忌」卡，其余任意卡（含设定圣经/世界观）都可修——系统上下文已注入全部卡的完整原文，输出整卡以原文为准；\n" +
                 "3) 跨卡统一：同一事实（能力代价、关键事件的经过、专有名词与数字）在多张卡里必须统一成同一个版本，需要改几张就分几条【修复】输出，严禁改一张留一张互相矛盾；\n" +
                 "4) 只输出格式行，不要任何其他解释。\n" +
                 "输出格式严格：\n" +
@@ -896,7 +902,9 @@ object Tools {
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao
-        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        // v6.9.46：全书自检可走「任务专用模型」（后台 🔧 全书自检/单章自检）
+        val cfg = com.lele.novelmaster.data.TaskModels.apiFor(Repo.app, pid, com.lele.novelmaster.data.TaskModels.SELFCHK)
+            ?: Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
         val (err, out) = WriterEngine.fullSelfCheck(cfg, dao, project, Repo.app)
         return if (err == null) ToolResult(true, "🔬 全书逐章自检已完成（详见报告）", out) else ToolResult(false, err)
@@ -905,7 +913,9 @@ object Tools {
     /** 8.1 单章自检（写后自检的手动版）：对指定章跑体检逻辑，发现矛盾自动修正；chapterIndex<=0 表示最新已写章 */
     suspend fun chapterSelfCheck(pid: Long, chapterIndex: Int): ToolResult {
         val dao = Repo.dao
-        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        // v6.9.46：单章自检可走「任务专用模型」（后台 🔧 全书自检/单章自检）
+        val cfg = com.lele.novelmaster.data.TaskModels.apiFor(Repo.app, pid, com.lele.novelmaster.data.TaskModels.SELFCHK)
+            ?: Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
         val ch0 = if (chapterIndex > 0)
             dao.chapters(pid).firstOrNull { it.chapterIndex == chapterIndex }
@@ -927,6 +937,30 @@ object Tools {
             if (fixed) "发现与设定/前情矛盾并已自动修正（详见上方消息）。"
             else "未发现可自动修正的矛盾；若有疑似问题会在上方列出，供你复核。"
         )
+    }
+
+    /** 8.15 v6.9.46：单章自检一键修复——按自检问题清单+本章大纲重写本章正文并保存（原正文自动备份）。
+     *  由聊天页「⚠️ 疑似矛盾」消息下方的确认按钮触发（AppTasks 宿主），不走聊天工具链 */
+    suspend fun chapterSelfCheckFix(pid: Long, chapterIndex: Int): ToolResult {
+        val dao = Repo.dao
+        val chs = dao.chapters(pid)
+        val ch0 = if (chapterIndex > 0) chs.firstOrNull { it.chapterIndex == chapterIndex }
+        else chs.lastOrNull { it.content.isNotBlank() }
+        val ch = ch0 ?: return ToolResult(false, if (chapterIndex > 0) "第 $chapterIndex 章不存在" else "还没有已写章节")
+        // 取该章最近一次自检问题清单（kind=selfcheck_fix 消息，取问题正文、去掉引导语）
+        val issue = dao.recentSelfCheckFix(pid).firstOrNull {
+            it.content.contains("第${ch.chapterIndex}章自检发现")
+        }?.content?.replace(Regex("\\n+👇[\\s\\S]*$"), "")?.trim()
+        if (issue.isNullOrBlank()) return ToolResult(false, "没找到第${ch.chapterIndex}章的自检问题记录，请先跑一次「自检第${ch.chapterIndex}章」")
+        val instruction = "本章自检发现以下疑似矛盾：\n$issue\n\n" +
+            "请重写本章完整正文：①逐条修复上面列出的全部矛盾（与设定卡/前情冲突的地方以设定为准）；" +
+            "②本章大纲里列出的每个关键细节（外貌特征/物品/数字/事件及后果）必须全部具体写到；" +
+            "③未被点名的问题情节和整体文风保持不变。只输出正文。"
+        val (err, _) = WriterEngine.chapterTask(pid, ch.chapterIndex, instruction, replace = true,
+            task = com.lele.novelmaster.data.TaskModels.SELFCHK)
+        return if (err == null)
+            ToolResult(true, "🔧 第${ch.chapterIndex}章已按自检问题重写并保存", "已修复自检发现的矛盾并落实大纲细节；原正文已备份（可说「撤销第${ch.chapterIndex}章修改」恢复）。重写后自动又跑了一遍自检，如仍有疑似问题会在上方列出。")
+        else ToolResult(false, err)
     }
 
     /** 8.2 撤销第N章最近一次自检修改：用正文备份恢复（v6.9.10 安全网） */

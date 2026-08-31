@@ -57,14 +57,17 @@ object ChatEngine {
         if (t.isEmpty() || busy(pid)) return
         state.update { it + (pid to Ui(busy = true, streamingText = "", pid = pid)) }
         var lastStream = ""
+        // v6.9.46：发送即重置全局活动时间戳——不重置的话上一轮活动的旧 idle 会连累新任务开局被误杀
+        AiClient.lastActivityMs = System.currentTimeMillis()
         jobs[pid] = scope.launch {
             // 看门狗：活动感知，5 分钟无任何流式字节才判定卡死强制结束（每出一个字都算活着）
+            // v6.9.46：非流式调用（plainInflight>0，如体检/自检排队中）全程没有字节回流，豁免不杀
             val guard = launch {
                 while (true) {
                     delay(15_000)
                     if (!busy(pid)) break
                     val idle = System.currentTimeMillis() - AiClient.lastActivityMs
-                    if (idle > 300_000) {
+                    if (idle > 300_000 && AiClient.plainInflight == 0) {
                         runCatching {
                             Repo.dao.insertMessage(
                                 Message(projectId = pid, role = "system", kind = "error",

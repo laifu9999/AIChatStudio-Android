@@ -1059,8 +1059,9 @@ object WriterEngine {
             return "fixed"
         } else {
             // AI 报了矛盾但给出的片段无法精确匹配——只播报，让作者决定是否重写
-            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
-                content = "⚠️ 第${ch0.chapterIndex}章自检发现疑似设定矛盾，请复核：\n${text.take(300)}"))
+            // v6.9.46：kind=selfcheck_fix——聊天页渲染「确认修复」按钮，点击后按问题清单+大纲重写本章并保存
+            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "selfcheck_fix",
+                content = "⚠️ 第${ch0.chapterIndex}章自检发现疑似设定矛盾，请复核：\n${text.take(300)}\n\n👇 点下方按钮可按大纲重写本章并修复以上问题（原正文自动备份，可撤销）。"))
             recordSelfCheck(project.id, ch0.chapterIndex, "suspect", context)
             return "suspect"
         }
@@ -1257,8 +1258,8 @@ object WriterEngine {
         val dao = Repo.dao
         val ch = dao.chapter(chapterId) ?: throw IllegalStateException("章节不存在")
         val project = dao.project(ch.projectId) ?: throw IllegalStateException("项目不存在")
-        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
-        val cfg = Repo.apiFor(ch.projectId) ?: throw IllegalStateException("请先在【AI模型】中启用一个模型")
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用；v6.9.46：正文重写可走「任务专用模型」
+        val cfg = TaskModels.apiFor(Repo.app, ch.projectId, TaskModels.CHAPTER) ?: throw IllegalStateException("请先在【AI模型】中启用一个模型")
         val cards = dao.cards(ch.projectId)
         val messages = Prompts.continueMessages(project, cards, ch, currentText)
         val out = AiClient.chat(cfg, messages, temperature = 0.9)
@@ -1281,8 +1282,8 @@ object WriterEngine {
         val dao = Repo.dao
         val ch0 = dao.chapter(chapterId) ?: return "章节不存在"
         val project = dao.project(ch0.projectId) ?: return "项目不存在"
-        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
-        val cfg = Repo.apiFor(ch0.projectId) ?: return "请先在【AI模型】中启用一个模型"
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用；v6.9.46：正文重写可走「任务专用模型」
+        val cfg = TaskModels.apiFor(Repo.app, ch0.projectId, TaskModels.CHAPTER) ?: return "请先在【AI模型】中启用一个模型"
         // v6.9.30：大纲空白先补一条再动手（AI 不脱轨）
         val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(ch.projectId)
@@ -1414,7 +1415,16 @@ object WriterEngine {
             val core = cards.filter {
                 it.name != "分章大纲" && (it.priority == 2 || it.category in CardCategories.KEY_CATS || it.category == "人物设定")
             }
-            if (core.isNotEmpty()) appendLine(Prompts.budgetCardBlock(core, budget = 3200, perCard = 600))
+            if (task == TaskModels.CHECK) {
+                // v6.9.46：设定体检/修复必须看到【全部设定卡的完整原文】——此前核心卡 3200/单卡600 截断，
+                // AI 自述「看不到设定圣经完整内容，无法输出完整卡，只能凭感觉填」（用户实测踩坑）。
+                // 分章大纲卡仍不注入（数万字，且体检禁止改它，只对照统计）。
+                val all = cards.filter { it.name != "分章大纲" }
+                if (all.isNotEmpty()) {
+                    appendLine("【全部设定卡完整原文（你可以据此修改除分章大纲外的任意卡，输出整卡时必须以原文为准，严禁凭印象补写）】")
+                    all.forEach { appendLine("【${it.category}·${it.name}】\n${it.content}") }
+                }
+            } else if (core.isNotEmpty()) appendLine(Prompts.budgetCardBlock(core, budget = 3200, perCard = 600))
         }
         val out = AiClient.chat(
             cfg,
@@ -1482,8 +1492,9 @@ object AutoWriteManager {
             try {
                 val dao = Repo.dao
                 val project = dao.project(projectId) ?: run { log(projectId, "项目不存在"); return@launch }
-                // v6.9.34：本书绑定了独立模型就用它，否则回落全局启用的接口
-                val cfg = Repo.apiFor(projectId) ?: run { log(projectId, "未启用AI模型：请到【AI模型】添加并设为启用"); return@launch }
+                // v6.9.34：本书绑定了独立模型就用它，否则回落全局启用的接口；v6.9.46：正文生成可走「任务专用模型」
+                val cfg = TaskModels.apiFor(context ?: Repo.app, projectId, TaskModels.CHAPTER)
+                    ?: run { log(projectId, "未启用AI模型：请到【AI模型】添加并设为启用"); return@launch }
                 log(projectId, "开始自动写作《${project.title}》第$from~$to 章（模型：${cfg.model}）")
 
                 // v6.4：硬门槛——设定卡八类+分章大纲不齐全，先自动补全再开写

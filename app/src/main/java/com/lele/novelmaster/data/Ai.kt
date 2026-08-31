@@ -115,6 +115,14 @@ object AiClient {
     @Volatile
     var lastActivityMs: Long = System.currentTimeMillis()
 
+    /**
+     * v6.9.46：进行中的非流式调用计数。chatPlain 全程没有字节回流，喂不了看门狗——
+     * 体检/自检等长任务走普通对话时，看门狗只看 lastActivityMs 会误判「5 分钟无响应」。
+     * 计数 > 0 期间看门狗不得杀任务（任务真卡死由各自的闸门/超时兜底）。
+     */
+    @Volatile
+    var plainInflight: Int = 0
+
     private fun ladderFor(cfg: ApiConfig, maxTokens: Int): List<Int> {
         val cached = okMaxTokens[cfg.model]
         return (listOfNotNull(cached?.takeIf { it <= maxTokens }, maxTokens) + TOKEN_LADDER)
@@ -132,6 +140,9 @@ object AiClient {
         maxTokens: Int = MAX_TOKENS_HUGE,
         onDelta: suspend (String) -> Unit
     ): AiResult {
+        // v6.9.46：任务开始即重置活动时间戳——上一轮 AI 活动可能是几分钟前，
+        // 不重置的话新任务开局就带着旧 idle，几分钟无首字节就被看门狗误杀（用户实测：明明没到5分钟就报超时）
+        lastActivityMs = System.currentTimeMillis()
         val ladder = ladderFor(cfg, maxTokens)
         var lastErr: Exception? = null
         // v6.9：包装 onDelta——每个字节到达都刷新全局活动时间戳（喂看门狗）
@@ -189,8 +200,24 @@ object AiClient {
         if (t.isNotBlank()) t else throw RuntimeException("AI返回为空")
     }
 
-    /** 非流式兜底（max_tokens 过大时自动降级重试） */
+    /** 非流式兜底（max_tokens 过大时自动降级重试）。v6.9.46：全程喂不了看门狗，用 plainInflight 豁免 */
     private suspend fun chatPlain(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
+    ): String {
+        lastActivityMs = System.currentTimeMillis()
+        plainInflight++
+        try {
+            return plainInner(cfg, messages, temperature, maxTokens)
+        } finally {
+            plainInflight--
+            lastActivityMs = System.currentTimeMillis()
+        }
+    }
+
+    private suspend fun plainInner(
         cfg: ApiConfig,
         messages: List<ChatMsg>,
         temperature: Double,

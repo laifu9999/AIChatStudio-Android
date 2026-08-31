@@ -161,7 +161,7 @@ object Prompts {
                 if (ch.chapterIndex < chapter.chapterIndex)
                     "$mark 第${ch.chapterIndex}章《$t》（已写）：${core.take(40).ifBlank { "（无大纲）" }}"
                 else if (ch.chapterIndex == chapter.chapterIndex)
-                    "$mark 第${ch.chapterIndex}章《$t》（本章）：${core.take(120).ifBlank { "（无大纲）" }}"
+                    "$mark 第${ch.chapterIndex}章《$t》（本章）：${core.take(200).ifBlank { "（无大纲）" }}"
                 else
                     "$mark 第${ch.chapterIndex}章《$t》（下一章引向这里）：${core.take(80).ifBlank { "（待补大纲）" }}"
             }
@@ -188,11 +188,13 @@ object Prompts {
             appendLine("【本章任务】第${chapter.chapterIndex}章")
             if (chapter.title.isNotBlank()) appendLine("章节名：${chapter.title}")
             if (chapter.outline.isNotBlank()) {
-                appendLine("本章大纲：${chapter.outline.take(250)}")
+                // v6.9.46：完整注入不截断——此前 take(250) 把大纲细节截掉，正文漏写关键细节（用户实测：大纲里的泪痣没写）
+                appendLine("本章大纲：${chapter.outline.take(600)}")
             } else {
                 appendLine("本章大纲未给出，请根据前情与相邻章节大纲自然推进剧情。")
             }
             appendLine()
+            appendLine("硬性要求：本章大纲里列出的每一个关键细节——人物的外貌特征（如痣/伤疤/穿戴）、物品、能力表现、数字、关键事件及其后果——都必须在正文里具体写到，一个都不能漏；剧情走向必须与大纲一致，严禁只写大意而丢掉大纲细节。")
             val wt = project.chapterWordTarget
             val lo = (wt * 0.85).toInt()
             val hi = (wt * 1.15).toInt()

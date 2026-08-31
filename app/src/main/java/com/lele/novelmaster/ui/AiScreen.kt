@@ -115,13 +115,28 @@ fun AiScreen(nav: NavController) {
                 )
                 Spacer(Modifier.height(6.dp))
                 ElevatedCard(Modifier.fillMaxWidth()) {
+                    // v6.9.46：六类任务全部可指定模型；选择先进草稿，点「💾 保存」才落库（用户要求显式保存按钮）
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
-                        // v6.9.42：用户要求——不单独叫「分章大纲」，归入「设定卡」（设定卡生成含分章大纲）
-                        TaskModelRow("🗂 设定卡（含分章大纲）", com.lele.novelmaster.data.TaskModels.OUTLINE, configs)
-                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)
-                        TaskModelRow("🧾 设定体检 / 瘦身", com.lele.novelmaster.data.TaskModels.CHECK, configs)
-                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)
-                        TaskModelRow("🚀 发布打磨", com.lele.novelmaster.data.TaskModels.POLISH, configs)
+                        val ctx = androidx.compose.ui.platform.LocalContext.current
+                        val draft = remember { androidx.compose.runtime.mutableStateMapOf<String, Long>() }
+                        com.lele.novelmaster.data.TaskModels.ALL.forEachIndexed { i, task ->
+                            if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)
+                            TaskModelRow(com.lele.novelmaster.data.TaskModels.label(task), task, configs,
+                                currentId = draft[task] ?: com.lele.novelmaster.data.TaskModels.boundId(ctx, task),
+                                onSelect = { id -> draft[task] = id })
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        androidx.compose.material3.Button(
+                            onClick = {
+                                com.lele.novelmaster.data.TaskModels.ALL.forEach { t ->
+                                    draft[t]?.let { com.lele.novelmaster.data.TaskModels.set(ctx, t, it) }
+                                }
+                                draft.clear()
+                                android.widget.Toast.makeText(ctx, "✅ 任务模型已保存", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("💾 保存") }
+                        Spacer(Modifier.height(6.dp))
                     }
                 }
             }
@@ -132,14 +147,11 @@ fun AiScreen(nav: NavController) {
     editCfg?.let { ApiEditDialog(it) { editCfg = null } }
 }
 
-/** v6.9.41：单行任务模型绑定——点击弹出下拉，选「跟随默认」或任一接口 */
+/** v6.9.41：单行任务模型绑定——点击弹出下拉；v6.9.46：只改草稿由「💾 保存」统一落库 */
 @Composable
-private fun TaskModelRow(label: String, task: String, configs: List<ApiConfig>) {
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val scope = rememberCoroutineScope()
+private fun TaskModelRow(label: String, task: String, configs: List<ApiConfig>, currentId: Long, onSelect: (Long) -> Unit) {
     var menu by remember { mutableStateOf(false) }
-    val boundId = remember(task) { com.lele.novelmaster.data.TaskModels.boundId(ctx, task) }
-    val boundName = configs.firstOrNull { it.id == boundId }?.name
+    val boundName = configs.firstOrNull { it.id == currentId }?.name
     Row(
         modifier = Modifier.fillMaxWidth().clickable { menu = true }.padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -155,7 +167,7 @@ private fun TaskModelRow(label: String, task: String, configs: List<ApiConfig>) 
                 text = { Text("跟随默认（本书绑定/全局启用）") },
                 onClick = {
                     menu = false
-                    com.lele.novelmaster.data.TaskModels.set(ctx, task, 0L)
+                    onSelect(0L)
                 }
             )
             configs.forEach { c ->
@@ -163,7 +175,7 @@ private fun TaskModelRow(label: String, task: String, configs: List<ApiConfig>) 
                     text = { Text("${c.name} · ${c.model.ifBlank { "未选模型" }}") },
                     onClick = {
                         menu = false
-                        com.lele.novelmaster.data.TaskModels.set(ctx, task, c.id)
+                        onSelect(c.id)
                     }
                 )
             }
