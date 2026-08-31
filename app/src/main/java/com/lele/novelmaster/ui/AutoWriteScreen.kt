@@ -25,6 +25,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
@@ -34,6 +35,7 @@ import com.lele.novelmaster.data.Repo
 
 @Composable
 fun AutoWriteScreen(nav: NavController, pid: Long) {
+    val context = LocalContext.current
     val st by AutoWriteManager.state.collectAsState()
     val project by produceState<Project?>(null, pid) { value = Repo.dao.project(pid) }
     var from by remember { mutableStateOf("1") }
@@ -47,7 +49,7 @@ fun AutoWriteScreen(nav: NavController, pid: Long) {
     AppScaffold("自动写作", onBack = { nav.popBackStack() }) { pv ->
         Column(Modifier.padding(pv).padding(16.dp).fillMaxSize()) {
             Text(
-                "AI将自动完成：生成缺失大纲 → 逐章写作 → 每章自动保存 → 自动写摘要（供后续章节记住剧情）→ 自动登记进度、标记已回收伏笔。写作时请保持APP在前台。",
+                "AI将自动完成：生成缺失大纲 → 逐章写作 → 每章自动保存 → 自动写摘要（供后续章节记住剧情）→ 自动登记进度、标记已回收伏笔。v6.9.33 起支持后台写作：退出界面或息屏都不会中断，通知栏显示进度、可随时停止。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -72,7 +74,8 @@ fun AutoWriteScreen(nav: NavController, pid: Long) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
-                        AutoWriteManager.start(pid, from.toIntOrNull() ?: 1, to.toIntOrNull() ?: 1)
+                        // v6.9.33：传 context 拉起前台服务——退出界面/息屏后写作不中断，通知栏可停止
+                        AutoWriteManager.start(pid, from.toIntOrNull() ?: 1, to.toIntOrNull() ?: 1, context)
                     },
                     enabled = !st.running,
                     modifier = Modifier.weight(1f)

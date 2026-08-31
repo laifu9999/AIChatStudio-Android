@@ -1,6 +1,7 @@
 package com.lele.novelmaster.data
 
 import android.content.Context
+import com.lele.novelmaster.engine.GenerationService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1262,8 +1263,10 @@ object AutoWriteManager {
 
     fun start(projectId: Long, from: Int, to: Int, context: Context? = null) {
         if (state.value.running) return
+        // v6.9.33：同步置位再拉起前台服务（服务观察 state，避免启动时读到 running=false 误发"已结束"通知）
+        state.value = Progress(running = true, projectId = projectId)
+        GenerationService.start(context)
         job = scope.launch {
-            state.value = Progress(running = true, projectId = projectId)
             try {
                 val dao = Repo.dao
                 val project = dao.project(projectId) ?: run { log("项目不存在"); return@launch }
