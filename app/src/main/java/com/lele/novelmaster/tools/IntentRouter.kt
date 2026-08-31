@@ -207,7 +207,7 @@ object IntentRouter {
             return Tools.startAutoWrite(pid, from, to, context)
         }
         if (Regex("^(停止|暂停|中止|停).*(写|自动)|停止写作|别写了|暂停写作").containsMatchIn(raw)) {
-            return Tools.stopAutoWrite()
+            return Tools.stopAutoWrite(pid)
         }
 
         // ------- 灵感 / 大纲 -------

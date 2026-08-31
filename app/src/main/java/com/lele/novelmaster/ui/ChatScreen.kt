@@ -261,7 +261,8 @@ fun ChatScreen(nav: NavHostController) {
     fun onSendClick() {
         if (busy) {
             chatJob?.cancel()
-            if (AutoWriteManager.state.value.running) AutoWriteManager.stop()
+            // v6.9.34：只停当前这本书的自动写作（其他并行书不受影响）
+            if (AutoWriteManager.isRunning(currentPid)) AutoWriteManager.stop(currentPid)
             busy = false
             return
         }
@@ -338,7 +339,9 @@ fun ChatScreen(nav: NavHostController) {
                     .padding(pad)
                     .background(Brush.verticalGradient(listOf(th.pageBgTop, th.pageBgBottom)))
             ) {
-                if (aw.running && aw.projectId == currentPid) AutoWriteCard(aw) { AutoWriteManager.stop() }
+                // v6.9.34：多书并行——只显示当前这本书的写作卡，停止也只停本书
+                val awTask = aw.tasks[currentPid]
+                if (awTask?.running == true) AutoWriteCard(awTask) { AutoWriteManager.stop(currentPid) }
 
                 Box(Modifier.fillMaxSize()) {
                     LazyColumn(
@@ -770,7 +773,7 @@ private fun SystemBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, fon
 /* ---------------- 自动写作实时卡片 ---------------- */
 
 @Composable
-private fun AutoWriteCard(aw: com.lele.novelmaster.data.AutoWriteManager.Progress, onStop: () -> Unit) {
+private fun AutoWriteCard(aw: com.lele.novelmaster.data.AutoWriteManager.TaskState, onStop: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()

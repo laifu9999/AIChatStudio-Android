@@ -72,7 +72,7 @@ object WriterEngine {
         val missing = chapters.filter { it.outline.isBlank() && it.chapterIndex in from..to }
 
         if (missing.isNotEmpty()) {
-            val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
+            val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中添加并启用一个模型"
             // v6.9：批次 15→10 并每批播报进度——批次小、单次调用快，配合看门狗活动感知，
             // 大批量大纲生成不再触发「超时」；进度在聊天里可见
             val batches = missing.chunked(10)
@@ -459,7 +459,7 @@ object WriterEngine {
     private suspend fun ensureOneOutline(project: Project, ch: Chapter, context: Context? = null): Chapter {
         if (ch.outline.isNotBlank()) return ch
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return ch
+        val cfg = Repo.apiFor(project.id) ?: return ch
         val cards = dao.cards(project.id)
         val chapters = dao.chapters(project.id)
         dao.insertMessage(
@@ -496,7 +496,7 @@ object WriterEngine {
      */
     suspend fun generateCardsFromInspire(projectId: Long, inspiration: String, context: Context? = null): String? {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return "请先在【AI模型】中添加并启用一个模型"
+        val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中添加并启用一个模型"
         val project = dao.project(projectId) ?: return "项目不存在"
 
         // 一本小说必须建齐的核心分类
@@ -1098,9 +1098,10 @@ object WriterEngine {
     /** 编辑器：续写当前章 */
     suspend fun continueChapter(chapterId: Long, currentText: String): String {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: throw IllegalStateException("请先在【AI模型】中启用一个模型")
         val ch = dao.chapter(chapterId) ?: throw IllegalStateException("章节不存在")
         val project = dao.project(ch.projectId) ?: throw IllegalStateException("项目不存在")
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
+        val cfg = Repo.apiFor(ch.projectId) ?: throw IllegalStateException("请先在【AI模型】中启用一个模型")
         val cards = dao.cards(ch.projectId)
         val messages = Prompts.continueMessages(project, cards, ch, currentText)
         val out = AiClient.chat(cfg, messages, temperature = 0.9)
@@ -1110,9 +1111,10 @@ object WriterEngine {
     /** 编辑器：AI重写整章 */
     suspend fun rewriteChapter(chapterId: Long): String? {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型"
         val ch0 = dao.chapter(chapterId) ?: return "章节不存在"
         val project = dao.project(ch0.projectId) ?: return "项目不存在"
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
+        val cfg = Repo.apiFor(ch0.projectId) ?: return "请先在【AI模型】中启用一个模型"
         // v6.9.30：大纲空白先补一条再动手（AI 不脱轨）
         val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(ch.projectId)
@@ -1161,8 +1163,9 @@ object WriterEngine {
         replace: Boolean
     ): Pair<String?, String> { // (err, output)
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型" to ""
         val project = dao.project(projectId) ?: return "项目不存在" to ""
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
+        val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中启用一个模型" to ""
         val chapters = dao.chapters(projectId)
         val ch0 = chapters.firstOrNull { it.chapterIndex == chapterIndex }
             ?: return "第 $chapterIndex 章不存在" to ""
@@ -1212,8 +1215,9 @@ object WriterEngine {
     /** 非章节类自由任务（起名/简介/体检等）：带核心设定上下文问 AI */
     suspend fun freeTask(projectId: Long, instruction: String): Pair<String?, String> {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return "请先在【AI模型】中启用一个模型" to ""
         val project = dao.project(projectId) ?: return "项目不存在" to ""
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
+        val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中启用一个模型" to ""
         val cards = dao.cards(projectId)
         val sys = buildString {
             appendLine("你是资深网文主编。基于以下设定完成任务，只输出要求的内容。")
@@ -1238,91 +1242,120 @@ object WriterEngine {
 /**
  * 自动写作管理器：跨界面保持状态，逐章写完全书。
  * 每写完一章自动保存到数据库（即"保存到手机"），并自动生成摘要供后续章节引用。
+ * v6.9.34：多书并行——每本书一个独立任务，可同时启动多本书互不影响；
+ * 状态按 projectId 存在 Map 里，前台服务/聊天卡/自动写作页都按 pid 取自己那本书的状态；
+ * 每本书可用各自绑定的 AI 模型（Repo.apiFor），停止也可以只停某一本书。
  */
 object AutoWriteManager {
 
-    data class Progress(
-        val running: Boolean = false,
+    /** 单本书的写作任务状态 */
+    data class TaskState(
         val projectId: Long = 0,
+        val running: Boolean = false,
         val currentChapter: String = "",
         val done: Int = 0,
         val total: Int = 0,
         val logs: List<String> = emptyList()
     )
 
+    /** 全局状态：所有书的任务快照（并行键值） */
+    data class Progress(val tasks: Map<Long, TaskState> = emptyMap())
+
     val state = MutableStateFlow(Progress())
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var job: kotlinx.coroutines.Job? = null
+    private val jobs = java.util.concurrent.ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
 
     private val fmt = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
 
-    private fun log(msg: String) = state.update {
+    fun task(pid: Long): TaskState = state.value.tasks[pid] ?: TaskState(projectId = pid)
+
+    fun isRunning(pid: Long): Boolean = state.value.tasks[pid]?.running == true
+
+    fun anyRunning(): Boolean = state.value.tasks.values.any { it.running }
+
+    private fun update(pid: Long, f: (TaskState) -> TaskState) {
+        state.update { st ->
+            val cur = st.tasks[pid] ?: TaskState(projectId = pid)
+            st.copy(tasks = st.tasks + (pid to f(cur)))
+        }
+    }
+
+    private fun log(pid: Long, msg: String) = update(pid) {
         it.copy(logs = (listOf("${fmt.format(Date())} $msg") + it.logs).take(120))
     }
 
     fun start(projectId: Long, from: Int, to: Int, context: Context? = null) {
-        if (state.value.running) return
+        if (isRunning(projectId)) return
         // v6.9.33：同步置位再拉起前台服务（服务观察 state，避免启动时读到 running=false 误发"已结束"通知）
-        state.value = Progress(running = true, projectId = projectId)
+        update(projectId) { it.copy(running = true, currentChapter = "", done = 0, total = 0) }
         GenerationService.start(context)
-        job = scope.launch {
+        jobs[projectId] = scope.launch {
             try {
                 val dao = Repo.dao
-                val project = dao.project(projectId) ?: run { log("项目不存在"); return@launch }
-                val cfg = dao.activeApi() ?: run { log("未启用AI模型：请到【AI模型】添加并设为启用"); return@launch }
-                log("开始自动写作《${project.title}》第$from~$to 章（模型：${cfg.model}）")
+                val project = dao.project(projectId) ?: run { log(projectId, "项目不存在"); return@launch }
+                // v6.9.34：本书绑定了独立模型就用它，否则回落全局启用的接口
+                val cfg = Repo.apiFor(projectId) ?: run { log(projectId, "未启用AI模型：请到【AI模型】添加并设为启用"); return@launch }
+                log(projectId, "开始自动写作《${project.title}》第$from~$to 章（模型：${cfg.model}）")
 
                 // v6.4：硬门槛——设定卡八类+分章大纲不齐全，先自动补全再开写
-                state.value = state.value.copy(currentChapter = "检查设定卡与大纲…")
+                update(projectId) { it.copy(currentChapter = "检查设定卡与大纲…") }
                 val gateErr = WriterEngine.ensurePreconditions(projectId, context)
-                if (gateErr != null) { log(gateErr); return@launch }
-                log("设定卡与大纲已就绪")
+                if (gateErr != null) { log(projectId, gateErr); return@launch }
+                log(projectId, "设定卡与大纲已就绪")
 
                 // 1) 先补齐范围内缺失的大纲
-                state.value = state.value.copy(currentChapter = "生成缺失大纲中…")
+                update(projectId) { it.copy(currentChapter = "生成缺失大纲中…") }
                 val err = WriterEngine.ensureOutlines(projectId, from, to, context)
-                if (err != null) { log(err); return@launch }
-                log("大纲已就绪")
+                if (err != null) { log(projectId, err); return@launch }
+                log(projectId, "大纲已就绪")
 
                 // 2) 逐章写作
                 val targets = dao.chapters(projectId).filter { it.chapterIndex in from..to }
-                state.value = state.value.copy(total = targets.size, done = 0)
+                update(projectId) { it.copy(total = targets.size, done = 0) }
                 var done = 0
                 var fail = 0
                 for (t in targets) {
-                    if (!isActive || !state.value.running) break
-                    state.value = state.value.copy(currentChapter = "第${t.chapterIndex}章 ${t.title.ifBlank { "写作中…" }}")
+                    if (!isActive || !isRunning(projectId)) break
+                    update(projectId) { it.copy(currentChapter = "第${t.chapterIndex}章 ${t.title.ifBlank { "写作中…" }}") }
                     try {
                         val fresh = dao.chapter(t.id) ?: t
                         if (fresh.content.isNotBlank() && fresh.status == 2) {
-                            log("跳过第${t.chapterIndex}章（已编辑定稿，不覆盖）")
+                            log(projectId, "跳过第${t.chapterIndex}章（已编辑定稿，不覆盖）")
                             done++
-                            state.value = state.value.copy(done = done)
+                            update(projectId) { it.copy(done = done) }
                             continue
                         }
                         WriterEngine.writeOne(project, cfg, dao, fresh, context)
                         fail = 0
                         done++
-                        state.value = state.value.copy(done = done)
-                        log("✅ 第${t.chapterIndex}章完成（$done/${targets.size}）")
+                        update(projectId) { it.copy(done = done) }
+                        log(projectId, "✅ 第${t.chapterIndex}章完成（$done/${targets.size}）")
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         fail++
-                        log("❌ 第${t.chapterIndex}章失败：${e.message?.take(200)}")
-                        if (fail >= 3) { log("连续失败3次，已自动停止"); break }
+                        log(projectId, "❌ 第${t.chapterIndex}章失败：${e.message?.take(200)}")
+                        if (fail >= 3) { log(projectId, "连续失败3次，本任务已自动停止"); break }
                     }
                 }
-                log("任务结束：完成 $done/${targets.size} 章")
+                log(projectId, "任务结束：完成 $done/${targets.size} 章")
             } finally {
-                state.value = state.value.copy(running = false, currentChapter = "")
+                update(projectId) { it.copy(running = false, currentChapter = "") }
+                jobs.remove(projectId)
             }
         }
     }
 
-    fun stop() {
-        state.value = state.value.copy(running = false)
-        job?.cancel()
+    /** 停止指定书的任务；pid 为空时停止全部并行任务 */
+    fun stop(pid: Long? = null) {
+        val targets = if (pid != null) listOf(pid)
+        else state.value.tasks.values.filter { it.running }.map { it.projectId }
+        for (p in targets) {
+            if (state.value.tasks[p] == null) continue
+            update(p) { it.copy(running = false) }
+            jobs[p]?.cancel()
+            jobs.remove(p)
+        }
     }
 }

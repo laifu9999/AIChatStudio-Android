@@ -1,5 +1,6 @@
 package com.lele.novelmaster.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -7,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -23,9 +25,11 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
@@ -36,11 +40,16 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun ProjectScreen(nav: NavController, id: Long) {
-    val project by produceState<Project?>(null, id) { value = Repo.dao.project(id) }
+    // v6.9.34：modelTick——绑定模型后重新查询项目（produceState 不会自动感知 copy 更新）
+    var modelTick by remember { mutableStateOf(0) }
+    val project by produceState<Project?>(null, id, modelTick) { value = Repo.dao.project(id) }
     val chapters by Repo.dao.chaptersFlow(id).collectAsState(initial = emptyList())
     val cards by Repo.dao.cardsFlow(id).collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     var confirmDel by remember { mutableStateOf(false) }
+    var showModelPick by remember { mutableStateOf(false) }
+    // v6.9.34：全部 AI 配置（用于「本书AI模型」绑定展示与选择）
+    val apis by Repo.dao.apiConfigsFlow().collectAsState(initial = emptyList())
 
     val p = project ?: return
     val written = chapters.sumOf { it.wordCount }
@@ -80,7 +89,18 @@ fun ProjectScreen(nav: NavController, id: Long) {
             Spacer(Modifier.height(8.dp))
             MenuButton("设定卡 · 灵感分析", "${cards.size}项设定：世界观/人物/大纲/伏笔…") { nav.navigate("cards/${p.id}") }
             Spacer(Modifier.height(8.dp))
-            MenuButton("自动写作", "AI自动写完所有章节，逐章自动保存") { nav.navigate("autowrite/${p.id}") }
+            MenuButton("自动写作", "AI自动写完所有章节，逐章自动保存；多本书可并行") { nav.navigate("autowrite/${p.id}") }
+            Spacer(Modifier.height(8.dp))
+            // v6.9.34：本书独立 AI 模型绑定（并行写多本书时各书可用不同 API/平台/模型）
+            val activeApi = apis.firstOrNull { it.isActive }
+            val bound = apis.firstOrNull { it.id == p.apiConfigId }
+            MenuButton(
+                "本书AI模型",
+                if (p.apiConfigId == 0L)
+                    "跟随全局启用（${activeApi?.let { "${it.name} · ${it.model.ifBlank { "未选模型" }}" } ?: "尚未启用任何接口"}）"
+                else
+                    (bound?.let { "已绑定：${it.name} · ${it.model.ifBlank { "未选模型" }}" } ?: "绑定已失效，跟随全局启用")
+            ) { showModelPick = true }
             Spacer(Modifier.height(8.dp))
             MenuButton("导出与发布", "导出TXT/Markdown，发布平台指南") { nav.navigate("export/${p.id}") }
             Spacer(Modifier.height(8.dp))
@@ -97,6 +117,53 @@ fun ProjectScreen(nav: NavController, id: Long) {
                 Text("删除本书", color = MaterialTheme.colorScheme.error)
             }
         }
+    }
+
+    // v6.9.34：本书 AI 模型选择弹窗
+    if (showModelPick) {
+        val p0 = project ?: return
+        AlertDialog(
+            onDismissRequest = { showModelPick = false },
+            title = { Text("本书使用哪个AI模型") },
+            text = {
+                Column {
+                    Text(
+                        "为这本书单独指定 AI 接口：并行写多本书时，各书可分别用不同的 API/平台/模型，互不影响。不指定则跟随「AI模型设置」里已启用的接口。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    val active = apis.firstOrNull { it.isActive }
+                    ModelOption(
+                        name = "跟随全局启用" + (active?.let { "（${it.name} · ${it.model.ifBlank { "未选模型" }}）" } ?: "（尚未启用任何接口）"),
+                        selected = p0.apiConfigId == 0L
+                    ) {
+                        scope.launch(Dispatchers.IO) { Repo.dao.updateProject(p0.copy(apiConfigId = 0L)) }
+                        modelTick++
+                        showModelPick = false
+                    }
+                    apis.forEach { a ->
+                        ModelOption(
+                            name = "${a.name} · ${a.model.ifBlank { "未选模型" }}" + (if (a.isActive) "（全局启用中）" else ""),
+                            selected = p0.apiConfigId == a.id
+                        ) {
+                            scope.launch(Dispatchers.IO) { Repo.dao.updateProject(p0.copy(apiConfigId = a.id)) }
+                            modelTick++
+                            showModelPick = false
+                        }
+                    }
+                    if (apis.isEmpty()) {
+                        Text(
+                            "还没有添加任何 AI 配置，先到「AI模型设置」添加。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showModelPick = false }) { Text("关闭") } }
+        )
     }
 
     if (confirmDel) {
@@ -117,5 +184,21 @@ fun ProjectScreen(nav: NavController, id: Long) {
             },
             dismissButton = { TextButton(onClick = { confirmDel = false }) { Text("取消") } }
         )
+    }
+}
+
+/** v6.9.34：模型绑定选项行 */
+@Composable
+private fun ModelOption(name: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(if (selected) "🔵" else "⚪", fontSize = 15.sp)
+        Spacer(Modifier.width(8.dp))
+        Text(name, style = MaterialTheme.typography.bodyMedium)
     }
 }

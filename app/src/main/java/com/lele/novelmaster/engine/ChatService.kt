@@ -27,7 +27,9 @@ import org.json.JSONObject
  */
 object ChatService {
 
-    /** 全部可被 AI 触发的工具名 */
+    /** 全部可被 AI 触发的工具名。
+     *  v6.9.34 修复：补齐 11 个一致性体检/修复工具（此前系统提示里宣传了这些工具，
+     *  但 KNOWN_TOOLS 白名单没加——AI 自由对话输出工具块会被 runTool 静默拒绝） */
     val KNOWN_TOOLS = setOf(
         "createProject", "switchProject", "updateProject", "listProjects", "addCard", "deleteCard", "writeNextChapter", "rewriteChapter",
         "startAutoWrite", "stopAutoWrite", "generateOutlines", "inspireFromText",
@@ -35,6 +37,8 @@ object ChatService {
         "contextPreview", "moveChapter", "copyChapter",
         "polishChapter", "expandDialogue", "styleRewrite", "hookChapter", "goldenLines",
         "plotBrainstorm", "characterCheck", "consistencyCheck", "nameGen", "genBlurb",
+        "chapterSelfCheck", "fullSelfCheck", "selfCheckProgress", "undoSelfCheck", "supplementChapter",
+        "foreshadowCheck", "markHookRecovered", "subplotCheck", "cardsCheck", "cardsCheckReport", "setChapterOutline",
         "createFolder", "deleteFolder", "renameFolder",
         "createFile", "writeFile", "appendFile", "readFile",
         "deleteFile", "renameFile", "listFiles"
@@ -87,8 +91,8 @@ object ChatService {
             return null
         }
 
-        // 2. AI 对话
-        val cfg = Repo.dao.activeApi()
+        // 2. AI 对话（v6.9.34：本书绑定了独立模型就用它，无则回落全局启用）
+        val cfg = Repo.apiFor(currentPid)
         if (cfg == null) {
             Repo.dao.insertMessage(
                 Message(projectId = currentPid, role = "system",

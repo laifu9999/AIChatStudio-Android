@@ -23,6 +23,8 @@ data class Project(
     val description: String = "",
     val targetChapters: Int = 300,
     val chapterWordTarget: Int = 2500,
+    // v6.9.34：本书绑定的独立 AI 接口（0=跟随全局「已启用」接口；多书并行时各书可用不同模型）
+    val apiConfigId: Long = 0,
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -167,6 +169,10 @@ interface NovelDao {
     @Query("SELECT * FROM api_configs WHERE isActive = 1 LIMIT 1")
     suspend fun activeApi(): ApiConfig?
 
+    /** v6.9.34：按 id 取接口（本书独立模型绑定用） */
+    @Query("SELECT * FROM api_configs WHERE id = :id")
+    suspend fun apiConfig(id: Long): ApiConfig?
+
     @Insert
     suspend fun insertApi(c: ApiConfig): Long
 
@@ -196,11 +202,18 @@ interface NovelDao {
 
 @Database(
     entities = [Project::class, Chapter::class, SettingCard::class, ApiConfig::class, Message::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): NovelDao
+}
+
+/** v6.9.34：projects 新增本书独立 AI 模型绑定列——非破坏迁移，老用户数据（章节/设定卡/配置）全部保留 */
+private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE projects ADD COLUMN apiConfigId INTEGER NOT NULL DEFAULT 0")
+    }
 }
 
 object Repo {
@@ -215,9 +228,26 @@ object Repo {
         app = context.applicationContext
         if (!::dao.isInitialized) {
             dao = Room.databaseBuilder(context, AppDb::class.java, "novel_master.db")
+                .addMigrations(MIGRATION_2_3)
                 .fallbackToDestructiveMigration()
                 .build()
                 .dao()
         }
+    }
+
+    /**
+     * v6.9.34：解析一本书应使用的 AI 接口——本书绑定了独立模型就用它（绑定失效自动回落），
+     * 否则用全局「已启用」接口。多书并行时各书各用各的模型，互不影响。
+     */
+    suspend fun apiFor(pid: Long): ApiConfig? {
+        if (pid > 0L) {
+            try {
+                val p = dao.project(pid)
+                if (p != null && p.apiConfigId != 0L) {
+                    dao.apiConfig(p.apiConfigId)?.let { return it }
+                }
+            } catch (_: Exception) { }
+        }
+        return dao.activeApi()
     }
 }

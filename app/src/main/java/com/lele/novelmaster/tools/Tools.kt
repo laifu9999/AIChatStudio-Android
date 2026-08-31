@@ -236,7 +236,7 @@ object Tools {
     }
 
     suspend fun writeNextChapter(pid: Long, context: Context? = null): ToolResult {
-        val cfg = withContext(Dispatchers.IO) { Repo.dao.activeApi() } ?: return ToolResult(false, "请先在【AI模型】中添加并启用一个模型")
+        val cfg = withContext(Dispatchers.IO) { Repo.apiFor(pid) } ?: return ToolResult(false, "请先在【AI模型】中添加并启用一个模型")
         val chs = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
         val project = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val next = chs.firstOrNull { it.content.isBlank() } ?: return ToolResult(false, "全部章节都已写完 ✅")
@@ -278,7 +278,20 @@ object Tools {
         return ToolResult(true, "🚀 自动写作已开始", "范围：第 $f ~ $t 章（实际章节不足时写到最后一章自动停）。进度在聊天里实时播报，随时说「停止写作」中止。", navigateTo = "autowrite/$pid")
     }
 
-    suspend fun stopAutoWrite(): ToolResult { AutoWriteManager.stop(); return ToolResult(true, "已请求停止自动写作") }
+    suspend fun stopAutoWrite(pid: Long? = null): ToolResult {
+        // v6.9.34 多书并行：只停当前这本书的任务（其他书不受影响）；当前书没在写时才停全部
+        return when {
+            pid != null && AutoWriteManager.isRunning(pid) -> {
+                AutoWriteManager.stop(pid)
+                ToolResult(true, "已请求停止本书的自动写作（其他并行任务不受影响）")
+            }
+            AutoWriteManager.anyRunning() -> {
+                AutoWriteManager.stop()
+                ToolResult(true, "已请求停止全部自动写作")
+            }
+            else -> ToolResult(true, "当前没有进行中的自动写作")
+        }
+    }
 
     suspend fun generateOutlines(pid: Long, context: Context? = null): ToolResult {
         return withContext(Dispatchers.IO) {
@@ -582,7 +595,7 @@ object Tools {
     /** 8.0e 设定体检：检查全部设定卡与分章大纲是否自洽合理，能改文字解决的矛盾自动修复卡片（v6.9.22） */
     suspend fun cardsCheck(pid: Long): ToolResult {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val cards = dao.cards(pid)
         if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。可到设定卡页点右上角「灵感分析」自动生成。")
         // 控 token：普通卡每张截 160 字，分章大纲卡截 900 字
@@ -691,7 +704,7 @@ object Tools {
     /** 8.0 全书逐章自检修复：对每章跑写后自检（发现矛盾自动修正），与「全书体检」（只列问题不修）互补 */
     suspend fun fullSelfCheck(pid: Long): ToolResult {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
         val (err, out) = WriterEngine.fullSelfCheck(cfg, dao, project, Repo.app)
         return if (err == null) ToolResult(true, "🔬 全书逐章自检已完成（详见报告）", out) else ToolResult(false, err)
@@ -700,7 +713,7 @@ object Tools {
     /** 8.1 单章自检（写后自检的手动版）：对指定章跑体检逻辑，发现矛盾自动修正；chapterIndex<=0 表示最新已写章 */
     suspend fun chapterSelfCheck(pid: Long, chapterIndex: Int): ToolResult {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
         val ch0 = if (chapterIndex > 0)
             dao.chapters(pid).firstOrNull { it.chapterIndex == chapterIndex }
@@ -727,7 +740,7 @@ object Tools {
     /** 8.2 撤销第N章最近一次自检修改：用正文备份恢复（v6.9.10 安全网） */
     suspend fun undoSelfCheck(pid: Long, chapterIndex: Int): ToolResult {
         val dao = Repo.dao
-        val cfg = dao.activeApi() ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
+        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
         if (chapterIndex <= 0) return ToolResult(false, "请说明要撤销哪一章，如：撤销第5章自检修改")
         val (err, out) = WriterEngine.restoreLastSelfCheck(cfg, dao, project, chapterIndex, Repo.app)
@@ -867,7 +880,7 @@ object Tools {
             "writeNextChapter" -> writeNextChapter(pid, context)
             "rewriteChapter" -> rewriteChapter(pid, args.optInt("index"))
             "startAutoWrite" -> startAutoWrite(pid, args.optInt("from", 1), args.optInt("to", 300), context)
-            "stopAutoWrite" -> stopAutoWrite()
+            "stopAutoWrite" -> stopAutoWrite(pid)
             "generateOutlines" -> generateOutlines(pid, context)
             "inspireFromText" -> inspireFromText(pid, args.optString("inspiration"), context)
             "readChapter" -> readChapter(pid, args.optInt("index"))
