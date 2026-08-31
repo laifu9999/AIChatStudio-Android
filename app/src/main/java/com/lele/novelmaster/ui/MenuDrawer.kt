@@ -158,6 +158,8 @@ fun MenuDrawer(
             text = { Text("确定删除《$name》？\n该会话的章节、设定卡、聊天记录、项目文件夹将一并删除，不可恢复。") },
             confirmButton = {
                 TextButton(onClick = {
+                    // v6.9.40：删除前停掉该书全部关联任务（自动写作/聊天生成/页面长任务），防白烧 token
+                    com.lele.novelmaster.data.AutoWriteManager.stopProjectTasks(pid)
                     scope.launch(Dispatchers.IO) { Tools.deleteProject(pid) }
                     deleteTarget = null
                 }) { Text("删除", color = Color(0xFFB91C1C)) }

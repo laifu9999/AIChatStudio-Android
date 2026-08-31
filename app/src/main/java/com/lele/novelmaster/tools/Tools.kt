@@ -315,6 +315,10 @@ object Tools {
     /** 删除会话（= 删除小说项目，级联删章节/设定卡/聊天记录） */
     suspend fun deleteProject(pid: Long): ToolResult {
         val p = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "会话不存在")
+        // v6.9.40：删除前停掉该书关联任务（自动写作/页面长任务），防书没了任务还继续烧 token。
+        // 注意不能停 ChatEngine——聊天里执行本指令时 ChatEngine 正 busy 在本书上，停掉会把删除指令自己掐断
+        AutoWriteManager.stop(pid)
+        com.lele.novelmaster.engine.AppTasks.cancelProject(pid)
         withContext(Dispatchers.IO) {
             Repo.dao.deleteChaptersOf(pid)
             Repo.dao.deleteCardsOf(pid)

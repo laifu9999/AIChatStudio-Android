@@ -21,6 +21,8 @@ object AppTasks {
     val state = MutableStateFlow(St())
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // v6.9.40：登记任务句柄，支持删除书时按 pid 取消关联任务
+    private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     fun isRunning(key: String): Boolean = key in state.value.running
 
@@ -34,12 +36,24 @@ object AppTasks {
             if (key in cur.running) return null
             if (state.compareAndSet(cur, cur.copy(running = cur.running + key))) break
         }
-        return scope.launch {
+        val job = scope.launch {
             try {
                 block()
             } finally {
+                jobs.remove(key)
                 state.update { it.copy(running = it.running - key) }
             }
         }
+        jobs[key] = job
+        return job
+    }
+
+    /**
+     * v6.9.40：取消该书关联的全部页面长任务（key 以 ":pid" 结尾的，如 inspire/outline/cardsCheck）。
+     * 删除书时调用——书都没了，任务继续跑只会白烧 token。按章 id 为 key 的任务（编辑器续写/重写）
+     * 在章节被级联删除后会自然快速失败，无需专门取消。
+     */
+    fun cancelProject(pid: Long) {
+        jobs.keys.filter { it.endsWith(":$pid") }.forEach { jobs[it]?.cancel() }
     }
 }

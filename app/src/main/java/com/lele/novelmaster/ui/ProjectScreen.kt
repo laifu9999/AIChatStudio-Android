@@ -175,6 +175,8 @@ fun ProjectScreen(nav: NavController, id: Long) {
                 TextButton(onClick = {
                     confirmDel = false
                     scope.launch(Dispatchers.IO) {
+                        // v6.9.40：删除前停掉该书全部关联任务（自动写作/聊天生成/页面长任务），防白烧 token
+                        com.lele.novelmaster.data.AutoWriteManager.stopProjectTasks(p.id)
                         Repo.dao.deleteChaptersOf(p.id)
                         Repo.dao.deleteCardsOf(p.id)
                         Repo.dao.deleteProject(p)

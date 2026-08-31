@@ -1416,4 +1416,18 @@ object AutoWriteManager {
             jobs.remove(p)
         }
     }
+
+    /**
+     * v6.9.40：删除书等场景——停掉与该书相关的全部任务：自动写作、聊天生成（仅当正在生成的是这本书时）、
+     * 页面长任务（灵感分析/补大纲/设定体检）。注意：聊天里对本书执行删除指令时不要用本函数
+     * （ChatEngine 正 busy 在本书上，停掉会把删除指令自己掐断），那种场景用 stop(pid)+AppTasks.cancelProject(pid)。
+     */
+    fun stopProjectTasks(pid: Long) {
+        stop(pid)
+        runCatching {
+            val cs = com.lele.novelmaster.engine.ChatEngine.state.value
+            if (cs.busy && cs.pid == pid) com.lele.novelmaster.engine.ChatEngine.stop()
+        }
+        runCatching { com.lele.novelmaster.engine.AppTasks.cancelProject(pid) }
+    }
 }
