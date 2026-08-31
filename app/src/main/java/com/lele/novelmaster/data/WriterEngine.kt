@@ -6,8 +6,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withPermit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import java.io.File
@@ -33,6 +36,53 @@ object WriterEngine {
     }
 
     private fun safeName(s: String) = s.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
+
+    /** v6.9.41：注入偏好读取（无全局上下文时用默认值：摘要0章、窗口前2章） */
+    private fun sumCount() = Repo.app?.let { InjectPrefs.summaryCount(it) } ?: 0
+    private fun winPrev() = Repo.app?.let { InjectPrefs.windowPrev(it) } ?: 2
+
+    /** v6.9.41：把一张设定卡写回项目文件 files/设定卡/{分类}/{名}.md——改卡必须同步落盘（用户踩坑：体检修复只进了库，项目文件夹里还是旧内容） */
+    fun exportCardFile(projectId: Long, card: SettingCard, context: Context?) {
+        if (context == null) return
+        try {
+            val d = dir(context, projectId, "设定卡/${card.category}") ?: return
+            File(d, safeName(card.name) + ".md").writeText("# ${card.category} · ${card.name}\n\n${card.content}\n", Charsets.UTF_8)
+        } catch (_: Exception) { }
+    }
+
+    /** v6.9.41：全部设定卡同步到项目文件——只写「文件不存在或文件不比卡新且内容不一致」的，绝不覆盖作者改了还没导入的新文件 */
+    suspend fun syncAllCardsToFiles(projectId: Long, context: Context?): Int {
+        if (context == null) return 0
+        var n = 0
+        for (c in Repo.dao.cards(projectId)) {
+            try {
+                val d = dir(context, projectId, "设定卡/${c.category}") ?: continue
+                val f = File(d, safeName(c.name) + ".md")
+                val body = "# ${c.category} · ${c.name}\n\n${c.content}\n"
+                val stale = !f.exists() || (f.lastModified() <= c.updatedAt &&
+                    (runCatching { f.readText(Charsets.UTF_8) != body }.getOrDefault(true)))
+                if (stale) { f.writeText(body, Charsets.UTF_8); n++ }
+            } catch (_: Exception) { }
+        }
+        return n
+    }
+
+    /** v6.9.41：归一化名去重——「慕昭（魔尊/反派）」和「慕昭（魔尊_反派）」这类只差符号的重复卡合并成最早一张
+     *  （灵感生成写文件用了 safeName 把 / 转成 _，随后文件同步按精确名匹配建出重复卡；历史遗留全在这里清） */
+    suspend fun dedupeNormalized(projectId: Long): Int {
+        val dao = Repo.dao
+        var merged = 0
+        for (cat in CardCategories.all) {
+            val groups = dao.cards(projectId).filter { it.category == cat }
+                .groupBy { Prompts.normCardName(it.name).ifBlank { it.name } }
+            for ((_, g) in groups) {
+                if (g.size <= 1) continue
+                val keep = g.minByOrNull { it.id } ?: continue
+                g.filter { it.id != keep.id }.forEach { dao.deleteCard(it); merged++ }
+            }
+        }
+        return merged
+    }
 
     /** v5.5：把 AI 返回中的标题行、代码围栏、meta 说明等非正文内容去掉，只保留正文。 */
     private fun cleanBody(text: String, chapterIndex: Int, title: String): String {
@@ -89,27 +139,37 @@ object WriterEngine {
         val missing = chapters.filter { it.outline.isBlank() && it.chapterIndex in from..to }
 
         if (missing.isNotEmpty()) {
-            val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中添加并启用一个模型"
-            // v6.9：批次 15→10 并每批播报进度——批次小、单次调用快，配合看门狗活动感知，
-            // 大批量大纲生成不再触发「超时」；进度在聊天里可见
+            // v6.9.41：大纲任务可用「大纲专用模型」（后台AI模型设置里分块配置），未绑定则回落本书/全局模型
+            val cfg = TaskModels.apiFor(context ?: Repo.app, projectId, TaskModels.OUTLINE)
+                ?: return "请先在【AI模型】中添加并启用一个模型"
+            // v6.9.41：批次并行（3路并发）——之前 300 章要串行跑 30 批，每批都要等上一批，太慢；
+            // 现在同时跑 3 批，速度约 3 倍。进度实时上报（设定卡页可见），聊天里仍按批播报
             val batches = missing.chunked(10)
-            var done = 0
-            for (batch in batches) {
-                val f = batch.first().chapterIndex
-                val t = batch.last().chapterIndex
-                val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size)
-                val reply = AiClient.chat(
-                    cfg,
-                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
-                    temperature = 0.7,
-                    maxTokens = 6000
-                )
-                applyOutlines(dao, chapters, reply)
-                done += batch.size
-                dao.insertMessage(
-                    Message(projectId = projectId, role = "tool", kind = "tool",
-                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
-                )
+            val sem = Semaphore(3)
+            val doneCount = java.util.concurrent.atomic.AtomicInteger(0)
+            coroutineScope {
+                for (batch in batches) {
+                    launch {
+                        sem.withPermit {
+                            val f = batch.first().chapterIndex
+                            val t = batch.last().chapterIndex
+                            val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size)
+                            val reply = AiClient.chat(
+                                cfg,
+                                listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
+                                temperature = 0.7,
+                                maxTokens = 6000
+                            )
+                            applyOutlines(dao, chapters, reply)
+                            val done = doneCount.addAndGet(batch.size)
+                            com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
+                            dao.insertMessage(
+                                Message(projectId = projectId, role = "tool", kind = "tool",
+                                    content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
+                            )
+                        }
+                    }
+                }
             }
 
             // v6.9.5：漏网验证——AI 偶尔少写几行导致部分章仍无大纲（用户多次踩坑"漏掉分章大纲"）。
@@ -140,6 +200,33 @@ object WriterEngine {
                         else "⚠️ 仍有 $left 章大纲缺失，开写前系统会再次尝试自动补齐"
                 )
                 )
+            }
+
+            // v6.9.41：标题修复——AI 输出漏了《标题》：段时该章大纲写进去了但标题空着（用户踩坑「生成了又没标题」）。
+            // 一次小调用统一补齐：只起标题，便宜且快
+            val needTitle = dao.chapters(projectId).filter {
+                it.chapterIndex in from..to && it.outline.isNotBlank() && it.title.isBlank()
+            }
+            if (needTitle.isNotEmpty()) {
+                val ask = buildString {
+                    appendLine("为以下各章各起一个2~8字的章节标题（网文风格、有钩子感）。")
+                    appendLine("严格每章一行输出「第N章《标题》」，不要任何解释、不要遗漏：")
+                    needTitle.forEach { appendLine("第${it.chapterIndex}章：${it.outline.take(60)}") }
+                }
+                val reply = AiClient.chat(
+                    cfg,
+                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", ask)),
+                    temperature = 0.5,
+                    maxTokens = 2000
+                )
+                val tre = Regex("^第\\s*(\\d+)\\s*章\\s*[《\\[]([^》\\]]+)[》\\]]")
+                for (line in reply.lines()) {
+                    val m = tre.find(line.trim()) ?: continue
+                    val idx = m.groupValues[1].toIntOrNull() ?: continue
+                    val t = m.groupValues[2].trim()
+                    val ch = needTitle.firstOrNull { it.chapterIndex == idx } ?: continue
+                    if (t.isNotBlank()) dao.updateChapter(ch.copy(title = t))
+                }
             }
         }
 
@@ -186,6 +273,8 @@ object WriterEngine {
                 merged++
             }
         }
+        // v6.9.41：全分类归一化名去重（人物设定等非单卡分类的符号差异重名卡）
+        merged += dedupeNormalized(projectId)
         return merged
     }
 
@@ -217,7 +306,9 @@ object WriterEngine {
                         .dropWhile { it.startsWith("# ") || it.isBlank() }
                         .joinToString("\n").trim()
                     if (body.isBlank()) return@forEach
-                    val exist = cards.firstOrNull { it.category == cat && it.name == name }
+                    // v6.9.41：匹配加 safeName 口径——AI 存卡时文件名经过 safeName 转义（/ → _），
+                    // 之前精确匹配会为同一个人物建出第二张卡（用户踩坑：人物设定里慕昭/温书衡各出现两次）
+                    val exist = cards.firstOrNull { it.category == cat && (it.name == name || safeName(it.name) == name) }
                     if (exist == null) {
                         dao.insertCard(
                             SettingCard(
@@ -653,6 +744,8 @@ object WriterEngine {
         val prio = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1
         val status = if (cat == "伏笔钩子") "埋设中" else ""
         val sameName = dao.findCard(projectId, cat, name)
+            // v6.9.41：归一化名兜底——AI 这次输出「慕昭（魔尊_反派）」、上次存的是「慕昭（魔尊/反派）」也认得是同一张
+            ?: dao.cards(projectId).firstOrNull { it.category == cat && Prompts.normCardName(it.name) == Prompts.normCardName(name) }
         // v6.9：全书大纲类的回退匹配要排除 分章大纲 系统卡，防止 AI 存主卡时覆盖掉它们
         val dupCard = sameName ?: if (cat in singleCats)
             dao.cards(projectId).firstOrNull { it.category == cat && it.name !in OUTLINE_CARD_NAMES } else null
@@ -728,7 +821,7 @@ object WriterEngine {
     private suspend fun writeOneInner(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter, context: Context? = null) {
         val cards = dao.cards(project.id)
         val chapters = dao.chapters(project.id)
-        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0)
+        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0, sumCount(), winPrev())
 
         // 播报本次注入内容（每章都提示；插入失败=记录不可靠，抛错让自动写作立即停止）
         val inject = buildString {
@@ -1165,7 +1258,7 @@ object WriterEngine {
         val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(ch.projectId)
         val chapters = dao.chapters(ch.projectId)
-        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch).toMutableList()
+        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch, sumCount(), winPrev()).toMutableList()
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
         val content = cleanBody(AiClient.chat(cfg, messages).trim(), ch.chapterIndex, ch.title)
         if (content.isBlank()) return "AI返回空内容"
@@ -1206,31 +1299,35 @@ object WriterEngine {
         projectId: Long,
         chapterIndex: Int,
         instruction: String,
-        replace: Boolean
+        replace: Boolean,
+        task: String = "" // v6.9.41：非空时走「任务专用模型」（如 TaskModels.POLISH 发布打磨）
     ): Pair<String?, String> { // (err, output)
         // v6.9.39：同章正文任务闸门——聊天润色/扩写/补写/发布打磨等与编辑器AI重写、自动写作写章互斥
         val gate = chapterGate(projectId, chapterIndex)
         if (!gate.compareAndSet(false, true)) return "第 $chapterIndex 章正在AI处理中，请等当前任务完成" to ""
-        return try { chapterTaskInner(projectId, chapterIndex, instruction, replace) } finally { gate.set(false) }
+        return try { chapterTaskInner(projectId, chapterIndex, instruction, replace, task) } finally { gate.set(false) }
     }
 
     private suspend fun chapterTaskInner(
         projectId: Long,
         chapterIndex: Int,
         instruction: String,
-        replace: Boolean
+        replace: Boolean,
+        task: String = ""
     ): Pair<String?, String> { // (err, output)
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在" to ""
-        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
-        val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中启用一个模型" to ""
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用；v6.9.41：打磨类任务可用「打磨专用模型」
+        val cfg = (if (task.isNotBlank()) com.lele.novelmaster.data.TaskModels.apiFor(Repo.app, projectId, task) else null)
+            ?: Repo.apiFor(projectId)
+            ?: return "请先在【AI模型】中启用一个模型" to ""
         val chapters = dao.chapters(projectId)
         val ch0 = chapters.firstOrNull { it.chapterIndex == chapterIndex }
             ?: return "第 $chapterIndex 章不存在" to ""
         // v6.9.30：大纲空白先补一条再动手（AI 不脱轨）；重取 chapters 保证窗口里是补好的大纲
         val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(projectId)
-        val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch).toMutableList()
+        val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch, sumCount(), winPrev()).toMutableList()
         messages.add(ChatMsg("user", instruction))
         val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
@@ -1271,11 +1368,13 @@ object WriterEngine {
     }
 
     /** 非章节类自由任务（起名/简介/体检等）：带核心设定上下文问 AI */
-    suspend fun freeTask(projectId: Long, instruction: String): Pair<String?, String> {
+    suspend fun freeTask(projectId: Long, instruction: String, task: String = ""): Pair<String?, String> {
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在" to ""
-        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
-        val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中启用一个模型" to ""
+        // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用；v6.9.41：体检/瘦身类可用「体检专用模型」
+        val cfg = (if (task.isNotBlank()) TaskModels.apiFor(Repo.app, projectId, task) else null)
+            ?: Repo.apiFor(projectId)
+            ?: return "请先在【AI模型】中启用一个模型" to ""
         val cards = dao.cards(projectId)
         val sys = buildString {
             appendLine("你是资深网文主编。基于以下设定完成任务，只输出要求的内容。")

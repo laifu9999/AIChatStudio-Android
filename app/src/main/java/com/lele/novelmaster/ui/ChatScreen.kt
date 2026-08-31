@@ -42,6 +42,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -660,9 +661,90 @@ private fun MessageBubble(m: Message, th: ChatThemeColors, font: FontFamily, siz
     val bubbleMax = screenW - 20.dp
     when (m.role) {
         "user" -> UserBubble(m, bubbleMax, th, font, size)
-        "tool" -> ToolBubble(m, bubbleMax, th, font, size)
+        "tool" -> if (m.kind == "report") ReportBubble(m, bubbleMax, th, font, size) else ToolBubble(m, bubbleMax, th, font, size)
         "system" -> SystemBubble(m, bubbleMax, font, size)
         else -> AiBubble(m, bubbleMax, th, font, size)
+    }
+}
+
+/* ---------------- v6.9.41 完整报告：折叠卡片 + 点击开独立窗口看全文 ---------------- */
+
+@Composable
+private fun ReportBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: ChatThemeColors, font: FontFamily, size: Int) {
+    var showFull by remember { mutableStateOf(false) }
+    val lines = m.content.split("\n")
+    val title = lines.firstOrNull()?.take(60) ?: "任务报告"
+    // 预览只取正文前几行，正文默认折叠
+    val preview = lines.drop(1).filter { it.isNotBlank() }.take(3).joinToString("\n")
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = th.aiBubble),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.widthIn(max = bubbleMax)
+        ) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text("📄 $title", color = th.aiText, fontWeight = FontWeight.Bold,
+                    fontSize = (size - 1).sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                if (preview.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(preview + "\n…", color = th.aiText.copy(alpha = 0.7f),
+                        fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.5).sp,
+                        maxLines = 4, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text("👆 点击查看完整报告（已更新保存）", color = MaterialTheme.colorScheme.primary,
+                    fontSize = (size - 2).sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable { showFull = true }
+                        .fillMaxWidth(), textAlign = TextAlign.Center)
+            }
+        }
+    }
+    if (showFull) ReportDialog(m, th, font, size) { showFull = false }
+}
+
+@Composable
+private fun ReportDialog(m: Message, th: ChatThemeColors, font: FontFamily, size: Int, onDismiss: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            color = th.pageBgTop,
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(0.dp)
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // 顶栏：标题 + 关闭
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("完整报告", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = th.aiText,
+                        modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                    Text("关闭", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp,
+                        modifier = Modifier.clickable { onDismiss() }.padding(8.dp))
+                }
+                HorizontalDivider(color = th.aiText.copy(alpha = 0.12f), thickness = 0.5.dp)
+                // 全文可滚动查看；点击正文区域可在「折叠/展开全部」间切换（默认展开）
+                var expanded by remember { mutableStateOf(true) }
+                val text = m.content
+                val shown = if (expanded) text else text.take(800) + "\n\n…（已折叠，点击展开全文）"
+                Text(
+                    shown,
+                    color = th.aiText,
+                    fontFamily = font,
+                    fontSize = (size - 1).sp,
+                    lineHeight = ((size - 1) * 1.7).sp,
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp)
+                        .clickable { expanded = !expanded }
+                )
+                HorizontalDivider(color = th.aiText.copy(alpha = 0.12f), thickness = 0.5.dp)
+                Text("提示：点击正文可折叠/展开 · 内容已完整保存到项目文件夹",
+                    fontSize = 11.sp, color = th.aiText.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center)
+            }
+        }
     }
 }
 

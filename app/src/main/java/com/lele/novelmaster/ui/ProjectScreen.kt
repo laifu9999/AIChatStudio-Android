@@ -95,9 +95,9 @@ fun ProjectScreen(nav: NavController, id: Long) {
             val activeApi = apis.firstOrNull { it.isActive }
             val bound = apis.firstOrNull { it.id == p.apiConfigId }
             MenuButton(
-                "本书AI模型",
+                "本书AI模型（点这里给本书单独配 AI）",
                 if (p.apiConfigId == 0L)
-                    "跟随全局启用（${activeApi?.let { "${it.name} · ${it.model.ifBlank { "未选模型" }}" } ?: "尚未启用任何接口"}）"
+                    "跟随全局启用（${activeApi?.let { "${it.name} · ${it.model.ifBlank { "未选模型" }}" } ?: "尚未启用任何接口"}）——点进可为本书绑定专用模型"
                 else
                     (bound?.let { "已绑定：${it.name} · ${it.model.ifBlank { "未选模型" }}" } ?: "绑定已失效，跟随全局启用")
             ) { showModelPick = true }
@@ -108,7 +108,7 @@ fun ProjectScreen(nav: NavController, id: Long) {
 
             Spacer(Modifier.height(20.dp))
             Text(
-                "💡 保证300章不跑题的机制：每章开写前，AI只会收到「每章必发的设定 + 未回收伏笔 + 前5章剧情摘要 + 上一章结尾 + 相邻章节大纲」。设定请维护好优先级（重要设定设为必发），伏笔写完后会被自动标记回收。",
+                "💡 保证300章不跑题的机制：每章开写前，AI只会收到「每章必发的设定 + 未回收伏笔 + 上一章结尾 + 相邻章节大纲窗口」。设定请维护好优先级（重要设定设为必发），每张卡可单独开关注入，伏笔写完后会被自动标记回收。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

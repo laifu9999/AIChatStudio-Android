@@ -58,6 +58,8 @@ data class SettingCard(
     val content: String,
     val priority: Int = 1,
     val status: String = "",
+    // v6.9.41：是否参与写章注入——设定卡页可按卡开关（关掉的卡只存档不注入，省 token）
+    val inject: Boolean = true,
     val updatedAt: Long = System.currentTimeMillis()
 )
 
@@ -202,7 +204,7 @@ interface NovelDao {
 
 @Database(
     entities = [Project::class, Chapter::class, SettingCard::class, ApiConfig::class, Message::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDb : RoomDatabase() {
@@ -213,6 +215,13 @@ abstract class AppDb : RoomDatabase() {
 private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
     override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
         db.execSQL("ALTER TABLE projects ADD COLUMN apiConfigId INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
+/** v6.9.41：setting_cards 新增 inject 列（是否参与写章注入），非破坏迁移 */
+private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE setting_cards ADD COLUMN inject INTEGER NOT NULL DEFAULT 1")
     }
 }
 
@@ -228,7 +237,7 @@ object Repo {
         app = context.applicationContext
         if (!::dao.isInitialized) {
             dao = Room.databaseBuilder(context, AppDb::class.java, "novel_master.db")
-                .addMigrations(MIGRATION_2_3)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                 .fallbackToDestructiveMigration()
                 .build()
                 .dao()

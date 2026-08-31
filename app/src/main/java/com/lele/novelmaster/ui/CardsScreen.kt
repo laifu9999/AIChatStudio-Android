@@ -128,6 +128,22 @@ fun CardsScreen(nav: NavController, pid: Long) {
                     ) { Text("🔄 从章节重建", maxLines = 1) }
                 }
             }
+            // v6.9.41：任务实时进度行（体检/补大纲/瘦身/灵感分析进行中时显示；必须任务在跑，防聊天路径残留）
+            val taskMsg = when {
+                "cardsCheck:$pid" in appTasks.running -> appTasks.progress["cardsCheck:$pid"]
+                "outline:$pid" in appTasks.running -> appTasks.progress["outline:$pid"]
+                "cardsSlim:$pid" in appTasks.running -> appTasks.progress["cardsSlim:$pid"]
+                "inspire:$pid" in appTasks.running -> appTasks.progress["inspire:$pid"]
+                else -> null
+            }
+            if (taskMsg != null) {
+                Text(
+                    taskMsg,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
             if (list.isEmpty()) {
                 Text(
                     if (tab == "分章大纲")
@@ -172,6 +188,22 @@ fun CardsScreen(nav: NavController, pid: Long) {
                                             "  必发",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    // v6.9.41：注入开关——点击切换该卡是否参与写章注入（省 token；只存档不注入）
+                                    if (card.name != "分章大纲") {
+                                        Text(
+                                            if (card.inject) "  注入✓" else "  注入✗",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (card.inject) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.clickable {
+                                                scope.launch(Dispatchers.IO) {
+                                                    val nc = card.copy(inject = !card.inject)
+                                                    Repo.dao.updateCard(nc)
+                                                    WriterEngine.exportCardFile(pid, nc, Repo.app)
+                                                }
+                                            }
                                         )
                                     }
                                 }

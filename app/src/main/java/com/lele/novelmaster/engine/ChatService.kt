@@ -698,11 +698,16 @@ object ChatService {
     }
 
     private suspend fun appendToolResult(pid: Long, r: ToolResult) {
-        // v5.4：完整回显保存的内容（上限 8000 字），让用户"看得见"而不是只看到一句"已保存"
-        val d = if (r.detail.length > 8000) r.detail.take(8000) + "\n…（内容过长已折叠，全文已完整保存）" else r.detail
-        val text = if (d.isBlank()) r.summary else r.summary + "\n\n" + d
+        val text = if (r.detail.isBlank()) r.summary else r.summary + "\n\n" + r.detail
         // v5.8：空内容不落库，避免出现没有文字的空白气泡
         if (text.isBlank()) return
+        // v6.9.41：体检/打磨等长报告完整落库为 kind="report"（不再截 8000 字），
+        // 聊天里渲染成折叠卡片——点击「查看完整报告」打开独立窗口看全文（用户要求：显示不了完整就开窗看）
+        if (r.ok && r.detail.length > 600) {
+            val full = (r.summary + "\n\n" + r.detail).take(30000)
+            Repo.dao.insertMessage(Message(projectId = pid, role = "tool", content = full, kind = "report"))
+            return
+        }
         Repo.dao.insertMessage(Message(projectId = pid, role = "tool", content = text, kind = if (r.ok) "tool" else "error"))
     }
 }

@@ -30,11 +30,16 @@ object Prompts {
     /** 硬约束分类：无论优先级强制必发（人物/世界观/圣经是写作的一致性底线） */
     val HARD_CATS = setOf("人物设定", "世界观", "设定圣经")
 
+    /** v6.9.41：卡名归一化——去掉文件名转义符与常见装饰符号，用于识别「慕昭（魔尊/反派）」和「慕昭（魔尊_反派）」是同一张卡 */
+    fun normCardName(s: String): String =
+        s.replace(Regex("[\\\\/:*?\"<>|（）()·．.\\s_－—~～]"), "")
+
     /** 按优先级与关键词相关度挑选要注入的设定卡 */
     fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
         // v6.9.23：分章大纲系统卡不参与整卡注入——写章走「大纲窗口」（前两章+本章+后一章）独立注入，
         // 整卡必发在长篇里只会被预算截成开头几章（无用内容），还挤占其他卡的预算
-        val pool = all.filter { it.name != "分章大纲" }
+        // v6.9.41：inject=false 的卡不参与注入（用户按卡开关）；人物等重名卡按归一化名去重（保留最早的）
+        val pool = all.filter { it.name != "分章大纲" && it.inject }
         // v6.8.2/v6.8.3：硬约束分类强制必发——手动建卡默认优先级是「常规」，用户忘选必发时
         // 人物卡/世界观/圣经可能落选导致体质灵根、力量体系等硬设定丢失
         val always = pool.filter { it.priority == 2 || it.category in HARD_CATS }
@@ -55,7 +60,15 @@ object Prompts {
         }
 
         val ranked = normal.sortedByDescending { score(it) }.take(14)
-        return (always + foreshadow + ranked).distinctBy { it.id }
+        val merged = (always + foreshadow + ranked).distinctBy { it.id }
+        // v6.9.41：归一化名去重——同一分类下「名字只差 / 与 _ 等符号」的重复卡只注入最早那张
+        val minIdByKey = mutableMapOf<String, Long>()
+        for (c in merged) {
+            val key = c.category + "|" + normCardName(c.name)
+            val cur = minIdByKey[key]
+            if (cur == null || c.id < cur) minIdByKey[key] = c.id
+        }
+        return merged.filter { minIdByKey[it.category + "|" + normCardName(it.name)] == it.id }
     }
 
     fun writerSystem(selected: List<SettingCard>): String = buildString {
@@ -121,23 +134,25 @@ object Prompts {
         append(budgetCardBlock(restTrimmed, budget = 900, perCard = 300))
     }
 
-    /** 组装写章所需的完整消息 */
+    /** 组装写章所需的完整消息；v6.9.41 summaryCount/windowPrev 可配（默认不注入前情摘要、窗口前2章） */
     fun buildChapterMessages(
         project: Project,
         cards: List<SettingCard>,
         chapters: List<Chapter>,
-        chapter: Chapter
+        chapter: Chapter,
+        summaryCount: Int = 0,
+        windowPrev: Int = 2
     ): List<ChatMsg> {
         val selected = selectCards(cards, chapter.outline + chapter.title)
         val recent = chapters
             .filter { it.chapterIndex < chapter.chapterIndex && it.summary.isNotBlank() }
-            .takeLast(5)
+            .takeLast(summaryCount.coerceAtLeast(0))
         val prev = chapters.firstOrNull { it.chapterIndex == chapter.chapterIndex - 1 }
 
-        // v6.6：大纲窗口注入——只注入分章大纲的「前两章 + 当前章 + 后一章」，
+        // v6.6：大纲窗口注入——只注入分章大纲的「前N章 + 当前章 + 后一章」，
         // 不再注入整卷/整卡（之前 20 章本卷全景太浪费 token，弱模型也跟不上）
         val window = chapters
-            .filter { it.chapterIndex in (chapter.chapterIndex - 2)..(chapter.chapterIndex + 1) }
+            .filter { it.chapterIndex in (chapter.chapterIndex - windowPrev)..(chapter.chapterIndex + 1) }
             .sortedBy { it.chapterIndex }
             .joinToString("\n") { ch ->
                 val t = ch.title.ifBlank { "未命名" }
@@ -166,7 +181,7 @@ object Prompts {
             }
             if (window.isNotBlank()) {
                 appendLine()
-                appendLine("【分章大纲窗口（前两章+本章+后一章，章节标题以此为准）】")
+                appendLine("【分章大纲窗口（前${windowPrev}章+本章+后一章，章节标题以此为准）】")
                 appendLine(window)
             }
             appendLine()
@@ -211,7 +226,9 @@ object Prompts {
             lastOutlines.forEach { appendLine("第${it.chapterIndex}章《${it.title}》:${it.outline}") }
         }
         appendLine()
-        append("请为第${from}章到第${to}章编写分章大纲，共${count}行。每章严格一行，格式：第N章《标题》：剧情要点（包含出场人物、关键事件、本章钩子，重要处注明埋设/回收的伏笔）。\n" +
+        append("请为第${from}章到第${to}章编写分章大纲，共${count}行。\n" +
+            "硬性格式要求：①必须覆盖第${from}章到第${to}章的每一章，严禁跳章、漏章、合并章；②每章严格一行，每行必须以「第N章《标题》：」开头，标题2~8字必填，没有标题按不合格处理；③除此之外不输出任何其他文字。\n" +
+            "每行格式示例：第${from}章《夜闯断魂崖》：出场人物…关键事件…【钩子】=具体事件。\n" +
             "质量要求：每章都要有冲突升级或新信息，禁止日常流水账章；每3~5章安排一个小高潮；每章末尾写明【钩子】=具体事件（危机/反转/来客/秘密），不要空泛悬念。")
     }
 

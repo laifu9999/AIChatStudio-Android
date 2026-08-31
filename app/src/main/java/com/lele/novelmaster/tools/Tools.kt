@@ -340,26 +340,32 @@ object Tools {
             ?: return ToolResult(false, "全部章节已写完，无下一章可预览")
 
         val selected = com.lele.novelmaster.data.Prompts.selectCards(cards, next.outline + next.title)
-        val recent = chapters.filter { it.chapterIndex < next.chapterIndex && it.summary.isNotBlank() }.takeLast(5)
+        // v6.9.41：与实际注入同源——摘要章数可配（默认0=不注入），相邻窗口前N章可配
+        val appCtx = Repo.app
+        val sumN = if (appCtx != null) com.lele.novelmaster.data.InjectPrefs.summaryCount(appCtx) else 0
+        val winPrev = if (appCtx != null) com.lele.novelmaster.data.InjectPrefs.windowPrev(appCtx) else 2
+        val recent = chapters.filter { it.chapterIndex < next.chapterIndex && it.summary.isNotBlank() }.takeLast(sumN)
         val prev = chapters.firstOrNull { it.chapterIndex == next.chapterIndex - 1 }
         val neighbors = chapters
-            .filter { it.chapterIndex in (next.chapterIndex - 1)..(next.chapterIndex + 1) && it.outline.isNotBlank() }
+            .filter { it.chapterIndex in (next.chapterIndex - winPrev)..(next.chapterIndex + 1) && it.outline.isNotBlank() }
             .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》:${it.outline.take(60)}" }
 
-        val chars = com.lele.novelmaster.data.Prompts.buildChapterMessages(project, cards, chapters, next)
+        val chars = com.lele.novelmaster.data.Prompts.buildChapterMessages(project, cards, chapters, next, sumN, winPrev)
             .sumOf { it.content.length }
         val detail = buildString {
             appendLine("▶ 目标：第 ${next.chapterIndex} 章《${next.title.ifBlank { "未命名" }}》")
             appendLine()
             appendLine("【必发设定卡 + 未回收伏笔 + 相关卡】${selected.size} 张")
             selected.forEach { appendLine("  • ${it.category}/${it.name}（${it.content.length}字）") }
-            appendLine()
-            appendLine("【前5章剧情摘要】${recent.size} 条")
-            recent.forEach { appendLine("  • 第${it.chapterIndex}章：${it.summary.take(50)}…") }
+            if (recent.isNotEmpty()) {
+                appendLine()
+                appendLine("【前情摘要】${recent.size} 条")
+                recent.forEach { appendLine("  • 第${it.chapterIndex}章：${it.summary.take(50)}…") }
+            }
             appendLine()
             appendLine("【上一章结尾】${if (prev != null && prev.content.isNotBlank()) "${prev.content.takeLast(300).length} 字" else "无"}")
             appendLine()
-            appendLine("【相邻章节大纲】")
+            appendLine("【相邻章节大纲（前${winPrev}章+本章+后一章）】")
             appendLine(if (neighbors.isBlank()) "  无" else neighbors)
             appendLine()
             append("本次注入合计约 $chars 字（≈${chars * 4 / 10}0 tokens），正文不随历史章节数膨胀。")
@@ -447,7 +453,8 @@ object Tools {
                 "5) 章末钩子必须是具体事件（危机/反转/来客/秘密/决定），删掉空泛的情绪渲染式结尾；\n" +
                 "6) 铁律：剧情走向、人物性格、设定事实、伏笔一律不变，字数与原章相近。\n" +
                 "只输出打磨后的完整正文。",
-            replace = true
+            replace = true,
+            task = com.lele.novelmaster.data.TaskModels.POLISH // v6.9.41：打磨可走专用模型
         )
         return if (err == null)
             ToolResult(true, "🚀 第${n}章发布打磨完成", "去AI味/开头/节奏/钩子已按发布标准处理，剧情未变。原文已自动备份，可直接导出发布。")
@@ -628,7 +635,6 @@ object Tools {
 
     private suspend fun cardsCheckInner(pid: Long): ToolResult {
         val dao = Repo.dao
-        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val cards = dao.cards(pid)
         if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。可到设定卡页点右上角「灵感分析」自动生成。")
         // 控 token：普通卡每张截 160 字，分章大纲卡截 900 字
@@ -650,13 +656,15 @@ object Tools {
                 "【建议】每条一行：卡名｜一句话扩写方向（可选）\n" +
                 "【修复】只对能直接改文字解决的真实矛盾（最多5张，严禁修复「剧情进度」和「分章大纲」卡——它们由系统自动维护），每条一行：卡名｜修正后的完整卡片内容\n" +
                 "【精简】只对明显重复/啰嗦的卡去重压缩（最多8张，严禁精简「剧情进度」「分章大纲」「写作禁忌」卡），每条一行：卡名｜去重后的完整卡片内容（抓重点：每卡60~200字，只留对写作有用的干货，不新增不改设定事实）\n" +
-                "整体没有问题就只输出【通过】。"
+                "整体没有问题就只输出【通过】。",
+            task = com.lele.novelmaster.data.TaskModels.CHECK // v6.9.41：体检可走专用模型
         )
         if (err != null) return ToolResult(false, err)
         // 解析【修复】/【精简】行并应用：同名/包含匹配到卡，改前先备份原卡内容（v6.9.35 支持去重精简）
         val fixed = mutableListOf<String>()
         val slimmed = mutableListOf<String>()
         var savedChars = 0
+        var applied = 0
         val seen = mutableSetOf<String>()
         for (line in out.lines()) {
             val t = line.trim()
@@ -686,8 +694,13 @@ object Tools {
             } catch (_: Exception) { }
             savedChars += (card.content.length - newContent.length).coerceAtLeast(0)
             dao.updateCard(card.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+            // v6.9.41：改卡必须同步写回项目文件夹（用户踩坑：只进了库，files/设定卡/*.md 还是旧内容）
+            com.lele.novelmaster.engine.AppTasks.setProgress("cardsCheck:$pid", "🧾 正在保存修复：已更新 ${fixed.size + slimmed.size + 1} 张卡…")
+            WriterEngine.exportCardFile(pid, card.copy(content = newContent), Repo.app)
             if (isFix) fixed.add(card.name) else slimmed.add(card.name)
         }
+        // v6.9.41：全卡兜底同步——确保项目文件夹与库完全一致
+        try { WriterEngine.syncAllCardsToFiles(pid, Repo.app) } catch (_: Exception) { }
         val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
         val fixNote = if (fixed.isEmpty() && slimmed.isEmpty())
             "\n\n未修改任何卡。若上面的问题需要改大纲或剧情进度，请直接说明，系统会走对应工具。"
@@ -724,7 +737,6 @@ object Tools {
     /** v6.9.35 设定瘦身：全部设定卡一次性查重去冗——重复内容只留在最相关的卡里，其余卡压缩成干货（主线/冲突/大纲互抄的克星） */
     suspend fun cardsSlim(pid: Long): ToolResult {
         val dao = Repo.dao
-        val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val cards = dao.cards(pid).filter { it.name != "分章大纲" && it.name != "剧情进度" && it.name != "写作禁忌" }
         if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡，无需瘦身。")
         // 瘦身需要看到较完整内容：每卡截 500 字（比体检的 160 宽），控总量
@@ -741,7 +753,8 @@ object Tools {
                 "3) 内容超过200字的卡必须压缩；空话套话、抒情排比、与剧情无关的背景介绍全部删除；\n" +
                 "4) 严禁改动数值、名词、人物关系等设定事实本身。\n" +
                 "输出格式严格（不要任何解释）：\n" +
-                "【精简】卡名｜精简后的完整卡片内容（一行一张卡；只输出需要修改的卡，没有就只输出【通过】）"
+                "【精简】卡名｜精简后的完整卡片内容（一行一张卡；只输出需要修改的卡，没有就只输出【通过】）",
+            task = com.lele.novelmaster.data.TaskModels.CHECK // v6.9.41：瘦身与体检共用专用模型
         )
         if (err != null) return ToolResult(false, err)
         if (out.contains("【通过】")) return ToolResult(true, "✂️ 设定瘦身完成：各卡已经很精炼，无需修改", out)
@@ -772,9 +785,14 @@ object Tools {
             } catch (_: Exception) { }
             savedChars += (card.content.length - newContent.length).coerceAtLeast(0)
             dao.updateCard(card.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+            // v6.9.41：改卡必须同步写回项目文件夹
+            com.lele.novelmaster.engine.AppTasks.setProgress("cardsSlim:$pid", "✂️ 正在保存：已精简 ${applied + 1} 张卡…")
+            WriterEngine.exportCardFile(pid, card.copy(content = newContent), Repo.app)
             names.add(card.name)
             applied++
         }
+        // v6.9.41：全卡兜底同步——确保项目文件夹与库完全一致
+        try { WriterEngine.syncAllCardsToFiles(pid, Repo.app) } catch (_: Exception) { }
         val head = if (applied > 0) "✂️ 设定瘦身完成：精简 $applied 张卡，共减 $savedChars 字" else "✂️ 设定瘦身完成：没有需要精简的卡"
         val note = if (applied > 0)
             "\n\n已修改：${names.joinToString("、")}（原内容备份在 设定卡/备份/设定瘦身备份.md）\n注入 AI 的内容随之变少：响应更快、更省 token。"

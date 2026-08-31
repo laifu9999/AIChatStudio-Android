@@ -5,9 +5,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.size
@@ -20,6 +23,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -101,11 +105,69 @@ fun AiScreen(nav: NavController) {
                     }
                 }
             }
+            // v6.9.41：任务专用模型——大纲/体检/打磨可各自绑定不同 AI，未绑定走默认
+            item {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "🎯 任务专用模型（可选，全局默认）\n给不同任务分配不同 AI：省钱的大纲/体检用便宜模型，打磨用高质量模型。未指定的任务走「本书绑定模型」或全局启用模型。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(6.dp))
+                ElevatedCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
+                        TaskModelRow("🧭 分章大纲生成", com.lele.novelmaster.data.TaskModels.OUTLINE, configs)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)
+                        TaskModelRow("🧾 设定体检 / 瘦身", com.lele.novelmaster.data.TaskModels.CHECK, configs)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)
+                        TaskModelRow("🚀 发布打磨", com.lele.novelmaster.data.TaskModels.POLISH, configs)
+                    }
+                }
+            }
         }
     }
 
     if (showAdd) ApiEditDialog(null) { showAdd = false }
     editCfg?.let { ApiEditDialog(it) { editCfg = null } }
+}
+
+/** v6.9.41：单行任务模型绑定——点击弹出下拉，选「跟随默认」或任一接口 */
+@Composable
+private fun TaskModelRow(label: String, task: String, configs: List<ApiConfig>) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var menu by remember { mutableStateOf(false) }
+    val boundId = remember(task) { com.lele.novelmaster.data.TaskModels.boundId(ctx, task) }
+    val boundName = configs.firstOrNull { it.id == boundId }?.name
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { menu = true }.padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Text(
+            boundName ?: "跟随默认 ▾",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (boundName != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text("跟随默认（本书绑定/全局启用）") },
+                onClick = {
+                    menu = false
+                    com.lele.novelmaster.data.TaskModels.set(ctx, task, 0L)
+                }
+            )
+            configs.forEach { c ->
+                DropdownMenuItem(
+                    text = { Text("${c.name} · ${c.model.ifBlank { "未选模型" }}") },
+                    onClick = {
+                        menu = false
+                        com.lele.novelmaster.data.TaskModels.set(ctx, task, c.id)
+                    }
+                )
+            }
+        }
+    }
 }
 
 @Composable

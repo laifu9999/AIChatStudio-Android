@@ -16,7 +16,11 @@ import kotlinx.coroutines.launch
  */
 object AppTasks {
 
-    data class St(val running: Set<String> = emptySet())
+    data class St(
+        val running: Set<String> = emptySet(),
+        // v6.9.41：任务实时进度文案（key → 进度描述），界面随任务展示「正在生成 x/y…」
+        val progress: Map<String, String> = emptyMap()
+    )
 
     val state = MutableStateFlow(St())
 
@@ -26,6 +30,11 @@ object AppTasks {
 
     fun isRunning(key: String): Boolean = key in state.value.running
 
+    /** v6.9.41：任务内实时上报进度（如「已生成 30/300 章」「正在体检 第3/23张卡」） */
+    fun setProgress(key: String, msg: String) {
+        state.update { it.copy(progress = it.progress + (key to msg)) }
+    }
+
     /**
      * 启动一个长任务；同名任务已在跑则返回 null（由界面提示，不重复启动）。
      * 任务完成/失败都会自动从 running 移除。
@@ -34,14 +43,14 @@ object AppTasks {
         while (true) {
             val cur = state.value
             if (key in cur.running) return null
-            if (state.compareAndSet(cur, cur.copy(running = cur.running + key))) break
+            if (state.compareAndSet(cur, cur.copy(running = cur.running + key, progress = cur.progress - key))) break
         }
         val job = scope.launch {
             try {
                 block()
             } finally {
                 jobs.remove(key)
-                state.update { it.copy(running = it.running - key) }
+                state.update { it.copy(running = it.running - key, progress = it.progress - key) }
             }
         }
         jobs[key] = job

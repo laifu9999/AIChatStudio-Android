@@ -12,6 +12,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -19,6 +20,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -41,8 +43,12 @@ fun ContextPreviewScreen(nav: NavController, pid: Long) {
     val project by produceState<Project?>(null, pid) { value = Repo.dao.project(pid) }
     var result by remember { mutableStateOf<ToolResult?>(null) }
     var loading by remember { mutableStateOf(true) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    // v6.9.41：注入偏好——前情摘要章数（默认0=不注入）、相邻大纲窗口前N章（默认2），改动即时重算预览
+    var sumN by remember { mutableStateOf(com.lele.novelmaster.data.InjectPrefs.summaryCount(ctx)) }
+    var winPrev by remember { mutableStateOf(com.lele.novelmaster.data.InjectPrefs.windowPrev(ctx)) }
 
-    LaunchedEffect(pid, project?.id) {
+    LaunchedEffect(pid, project?.id, sumN, winPrev) {
         // 当前会话优先；没有会话时自动取第一本（不让用户再选）
         val target = if (pid > 0L) pid else Repo.dao.projectsFlow().firstOrNull()?.firstOrNull()?.id ?: 0L
         if (target > 0L) {
@@ -63,11 +69,25 @@ fun ContextPreviewScreen(nav: NavController, pid: Long) {
                 .fillMaxSize()
         ) {
             Text(
-                "写每一章前，App 只把这些内容发给 AI —— 用摘要代替全文，token 消耗恒定，300/600 章也不会膨胀。",
+                "写每一章前，App 只把这些内容发给 AI —— 用相邻大纲+上一章结尾衔接剧情，token 消耗恒定，300/600 章也不会膨胀。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
+            // v6.9.41：注入偏好设置行
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("前情摘要章数", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = { sumN = (sumN - 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setSummaryCount(ctx, sumN) }) { Text("－") }
+                Text("$sumN", fontSize = 15.sp, modifier = Modifier.padding(horizontal = 6.dp))
+                TextButton(onClick = { sumN = (sumN + 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setSummaryCount(ctx, sumN) }) { Text("＋") }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("大纲窗口：往前几章", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = { winPrev = (winPrev - 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setWindowPrev(ctx, winPrev) }) { Text("－") }
+                Text("$winPrev", fontSize = 15.sp, modifier = Modifier.padding(horizontal = 6.dp))
+                TextButton(onClick = { winPrev = (winPrev + 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setWindowPrev(ctx, winPrev) }) { Text("＋") }
+            }
+            Spacer(Modifier.height(4.dp))
 
             when {
                 pid <= 0L -> Text("请先选择一本小说（回聊天页切换会话）。")
