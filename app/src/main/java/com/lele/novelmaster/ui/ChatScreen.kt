@@ -697,10 +697,41 @@ private fun ReportBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th:
                     modifier = Modifier
                         .clickable { showFull = true }
                         .fillMaxWidth(), textAlign = TextAlign.Center)
+                // v6.9.42：体检没改卡时——一键「确认修复」，按报告推理改卡并自动保存到项目文件夹
+                ReportRepairButton(m, th, size)
             }
         }
     }
     if (showFull) ReportDialog(m, th, font, size) { showFull = false }
+}
+
+/** v6.9.42：体检报告「确认修复」按钮——只在没有修改任何卡时出现。
+ *  点击后读最近一份体检报告，AI 按报告逐张给出修复内容，自动改库+写回项目文件 */
+@Composable
+private fun ReportRepairButton(m: Message, th: ChatThemeColors, size: Int, onDone: () -> Unit = {}) {
+    if (!m.content.contains("未修改任何卡")) return
+    val scope = rememberCoroutineScope()
+    var running by remember { mutableStateOf(false) }
+    Text(
+        if (running) "⏳ 正在按体检报告修复设定卡，请稍候…" else "🔧 确认根据体检推理修改设定卡（自动修复并保存）",
+        color = if (running) th.aiText.copy(alpha = 0.5f) else MaterialTheme.colorScheme.primary,
+        fontSize = (size - 1).sp, fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !running) {
+                running = true
+                scope.launch {
+                    val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        com.lele.novelmaster.tools.Tools.cardsApplyRepair(m.projectId)
+                    }
+                    ChatService.appendToolResult(m.projectId, r)
+                    running = false
+                    onDone()
+                }
+            }
+            .padding(vertical = 6.dp),
+        textAlign = TextAlign.Center
+    )
 }
 
 @Composable
@@ -740,6 +771,8 @@ private fun ReportDialog(m: Message, th: ChatThemeColors, font: FontFamily, size
                         .clickable { expanded = !expanded }
                 )
                 HorizontalDivider(color = th.aiText.copy(alpha = 0.12f), thickness = 0.5.dp)
+                // v6.9.42：体检没改卡时——完整报告窗口底部同样给「确认修复」按钮，点完自动关窗
+                ReportRepairButton(m, th, size + 1) { onDismiss() }
                 Text("提示：点击正文可折叠/展开 · 内容已完整保存到项目文件夹",
                     fontSize = 11.sp, color = th.aiText.copy(alpha = 0.5f),
                     modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center)

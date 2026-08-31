@@ -646,11 +646,12 @@ object Tools {
         val stat = "（已建${chs.size}章，其中${chs.count { it.outline.isNotBlank() }}章有大纲）"
         val (err, out) = WriterEngine.freeTask(
             pid,
-            "任务：设定体检——检查所有设定卡与分章大纲是否自洽、合理、精炼。\n" +
+                "任务：设定体检——检查所有设定卡与分章大纲是否自洽、合理、精炼。\n" +
                 "【设定卡清单】\n$cardBlock\n\n【分章大纲】$stat\n\n" +
                 "检查：1) 卡与卡矛盾（人物/世界观/主线/冲突/圣经互相冲突）；2) 设定与分章大纲矛盾（大纲走向违背设定或主线）；3) 事实性错误（同一设定前后说法不一）；" +
                 "4) 冗余重复（多张卡写了同一件事——如主线剧情/核心冲突/全书大纲互相复述；或单卡啰嗦超长、塞满空话）。\n" +
                 "重要：卡片「内容不够详细/单薄」不算问题——这类放进【建议】行即可，严禁为它们输出【修复】（注入截断导致你只看到卡片前160字，不代表卡片内容真的单薄）。\n" +
+                "重要：全程只用简体中文输出，严禁英文，严禁输出思考过程/内心独白，直接按格式给结果。\n" +
                 "输出格式严格（不要任何其他解释）：\n" +
                 "【问题】每条一行：涉及卡名｜问题一句话（只列真实矛盾/错误/明显重复，没有就不输出此行）\n" +
                 "【建议】每条一行：卡名｜一句话扩写方向（可选）\n" +
@@ -660,11 +661,40 @@ object Tools {
             task = com.lele.novelmaster.data.TaskModels.CHECK // v6.9.41：体检可走专用模型
         )
         if (err != null) return ToolResult(false, err)
-        // 解析【修复】/【精简】行并应用：同名/包含匹配到卡，改前先备份原卡内容（v6.9.35 支持去重精简）
+        // v6.9.42：解析【修复】/【精简】行并应用——抽成共用函数，「设定体检」与「按报告一键修复」走同一条保存链路
+        val ar = applyCheckLines(pid, cards, out)
+        val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
+        val fixNote = if (ar.fixedNames.isEmpty() && ar.slimmedNames.isEmpty())
+            "\n\n未修改任何卡。若上面的【问题】确实需要改卡，点报告下方「确认修复」按钮，系统会按报告逐张改好并自动保存到项目文件夹。"
+        else
+            "\n\n✅ 已自动修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、去重精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
+        // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查）
+        try {
+            val appCtx = Repo.app
+            if (appCtx != null) {
+                val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+                d.mkdirs()
+                val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
+                File(d, "设定体检报告-$ts.md").writeText("# 设定体检报告 $ts\n\n$out$fixNote\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+        return ToolResult(true, head, out + fixNote + "\n\n📄 报告已存档到 设定卡/备份/")
+    }
+
+    /** v6.9.42：体检修复行应用结果 */
+    private data class CheckApplyResult(
+        val fixedNames: List<String>,
+        val slimmedNames: List<String>,
+        val savedChars: Int
+    )
+
+    /** v6.9.42：解析【修复】/【精简】行并应用到卡——备份原卡 → 改库 → 写回项目文件夹 → 全卡兜底同步。
+     *  「设定体检」与「按报告一键修复」共用，保证两条入口的保存行为完全一致 */
+    private suspend fun applyCheckLines(pid: Long, cards: List<SettingCard>, out: String): CheckApplyResult {
+        val dao = Repo.dao
         val fixed = mutableListOf<String>()
         val slimmed = mutableListOf<String>()
         var savedChars = 0
-        var applied = 0
         val seen = mutableSetOf<String>()
         for (line in out.lines()) {
             val t = line.trim()
@@ -701,22 +731,53 @@ object Tools {
         }
         // v6.9.41：全卡兜底同步——确保项目文件夹与库完全一致
         try { WriterEngine.syncAllCardsToFiles(pid, Repo.app) } catch (_: Exception) { }
-        val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
-        val fixNote = if (fixed.isEmpty() && slimmed.isEmpty())
-            "\n\n未修改任何卡。若上面的问题需要改大纲或剧情进度，请直接说明，系统会走对应工具。"
+        return CheckApplyResult(fixed, slimmed, savedChars)
+    }
+
+    /** v6.9.42 体检一键修复：体检报告只推理出问题、没改卡时，作者在报告里点「确认修复」→
+     *  读最近一份体检报告，让 AI 按报告逐张给出修复内容，走 applyCheckLines 自动改卡并保存到项目文件 */
+    suspend fun cardsApplyRepair(pid: Long): ToolResult {
+        val appCtx = Repo.app ?: return ToolResult(false, "无法访问存储")
+        val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+        val f = d.listFiles { x -> x.name.startsWith("设定体检报告-") && x.name.endsWith(".md") }
+            ?.maxByOrNull { it.name }
+            ?: return ToolResult(false, "还没有体检报告。先说「设定体检」跑一次，再点修复。")
+        val report = f.readText(Charsets.UTF_8)
+        if (report.contains("【通过】")) return ToolResult(false, "最近一次体检结论是【通过】，没有需要修复的问题。")
+        val dao = Repo.dao
+        val cards = dao.cards(pid)
+        if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。")
+        com.lele.novelmaster.engine.AppTasks.setProgress("cardsRepair:$pid", "🔧 正在按体检报告修复设定卡…")
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：设定体检修复执行——下面是上一轮体检报告，把报告里指出的问题逐个修复成修正后的完整卡片内容。\n" +
+                "【体检报告】\n$report\n\n" +
+                "要求：\n" +
+                "1) 全程只用简体中文，严禁英文，严禁输出思考过程/内心分析，直接给结果；\n" +
+                "2) 只处理报告里指出的、能用改文字解决的真实矛盾；严禁动「剧情进度」「分章大纲」「写作禁忌」卡；\n" +
+                "3) 只输出格式行，不要任何其他解释。\n" +
+                "输出格式严格：\n" +
+                "【修复】每条一行：卡名｜修正后的完整卡片内容（最多8条）\n" +
+                "【精简】每条一行：卡名｜去重后的完整卡片内容（最多8条，每卡60~200字，只留干货）\n" +
+                "报告里的问题没有能改文字解决的，就只输出【无修复项】。",
+            task = com.lele.novelmaster.data.TaskModels.CHECK
+        )
+        if (err != null) return ToolResult(false, err)
+        if (out.contains("【无修复项】") || (!out.contains("【修复】") && !out.contains("【精简】"))) {
+            return ToolResult(false, "AI 判断报告里的问题无法直接改卡解决（可能要改大纲/剧情进度）。可以在聊天里直接说「修改××卡的××」，或重新体检一次。")
+        }
+        val ar = applyCheckLines(pid, cards, out)
+        val head = "🔧 按体检报告修复完成（共 ${cards.size} 张卡）"
+        val note = if (ar.fixedNames.isEmpty() && ar.slimmedNames.isEmpty())
+            "\n\n未能匹配到可修改的卡（AI 给的卡名和现有卡对不上）。建议在聊天里直接说「修改××卡的××」手动指定。"
         else
-            "\n\n✅ 已自动修复 ${fixed.size} 张卡${if (slimmed.isNotEmpty()) "、去重精简 ${slimmed.size} 张卡（约省 $savedChars 字）" else ""}：${(fixed + slimmed).joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
-        // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查）
+            "\n\n✅ 已修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。"
+        // 结果同样存档，方便回查
         try {
-            val appCtx = Repo.app
-            if (appCtx != null) {
-                val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
-                d.mkdirs()
-                val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
-                File(d, "设定体检报告-$ts.md").writeText("# 设定体检报告 $ts\n\n$out$fixNote\n", Charsets.UTF_8)
-            }
+            val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
+            File(d, "设定体检修复-$ts.md").writeText("# 按报告修复 $ts\n\n$out$note\n", Charsets.UTF_8)
         } catch (_: Exception) { }
-        return ToolResult(true, head, out + fixNote + "\n\n📄 报告已存档到 设定卡/备份/")
+        return ToolResult(true, head, out + note)
     }
 
     /** v6.9.29 查看体检报告：读 设定卡/备份/ 下最近的「设定体检报告-*.md」，只读不跑AI */

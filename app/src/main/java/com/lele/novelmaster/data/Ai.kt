@@ -90,6 +90,16 @@ object AiClient {
 
     private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 
+    /**
+     * v6.9.42：剥掉混进正文的 <think>…</think> 思考段。
+     * 用户踩坑：有的模型把英文思考过程直接写进 content（或只输出思考段），
+     * 体检报告里出现一大段英文——正文里严禁出现 <think> 块。
+     */
+    fun stripThink(s: String): String = s
+        .replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("<(?:think|thinking|thought)>[\\s\\S]*?$", RegexOption.IGNORE_CASE), "")
+        .trim()
+
     /** v5.7：把每个 AI 的允许输出长度开到最大（默认 16384），被平台拒绝时自动降级重试 */
     const val MAX_TOKENS_HUGE = 16384
     private val TOKEN_LADDER = listOf(16384, 8192, 4096, 2048, 1024)
@@ -174,7 +184,8 @@ object AiClient {
             if (plain.isNotBlank()) return@withContext plain
             throw e
         }
-        val t = r.text.trim()
+        // v6.9.42：统一剥 <think> 思考段
+        val t = stripThink(r.text.trim())
         if (t.isNotBlank()) t else throw RuntimeException("AI返回为空")
     }
 
@@ -331,7 +342,8 @@ object AiClient {
                 throw io
             }
             // 个别推理模型只输出思考段：作为兜底内容返回（界面侧还会再剥一层 <think>）
-            AiResult(if (sb.isBlank()) think.toString() else sb.toString(), finish)
+            // v6.9.42：返回前先剥 <think> 块，防止英文思考过程混进报告/正文
+            AiResult(stripThink(if (sb.isBlank()) think.toString() else sb.toString()), finish)
         }
     }
 
@@ -354,7 +366,8 @@ object AiClient {
                 .optJSONArray("choices")?.optJSONObject(0)
                 ?.optJSONObject("message")
             // content 为空时回退 reasoning_content（DeepSeek-R1 等推理模型把正文放这里）
-            var content = jstr(msg, "content")
+            // v6.9.42：剥 <think> 块，防止思考过程混进正文
+            var content = stripThink(jstr(msg, "content"))
             if (content.isBlank()) content = jstr(msg, "reasoning_content")
             if (content.isBlank()) content = jstr(msg, "reasoning")
             if (content.isBlank()) throw RuntimeException("AI返回为空: ${body.take(300)}")
@@ -468,7 +481,8 @@ object AiClient {
                     sb.append(jstr(parts.optJSONObject(i), "text"))
                 }
             }
-            val content = sb.toString()
+            // v6.9.42：剥 <think> 思考段
+            val content = stripThink(sb.toString())
             if (content.isBlank()) throw RuntimeException("Gemini返回为空: ${body.take(300)}")
             content
         }

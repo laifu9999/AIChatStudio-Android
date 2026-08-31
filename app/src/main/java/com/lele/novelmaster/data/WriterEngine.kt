@@ -1378,6 +1378,8 @@ object WriterEngine {
         val cards = dao.cards(projectId)
         val sys = buildString {
             appendLine("你是资深网文主编。基于以下设定完成任务，只输出要求的内容。")
+            // v6.9.42：体检报告出现大段英文思考——所有自由任务强制全程简体中文、禁止输出思考过程
+            appendLine("全程只用简体中文输出，严禁英文，严禁输出思考过程/内心分析，直接给结果。")
             appendLine("《${project.title}》类型：${project.genre}")
             // v6.9.23：分章大纲卡不整卡注入（600章大纲可达数万字，写作走大纲窗口）；核心卡改预算截断，注入总量有界
             val core = cards.filter {

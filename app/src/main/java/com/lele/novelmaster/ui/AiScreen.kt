@@ -109,14 +109,15 @@ fun AiScreen(nav: NavController) {
             item {
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "🎯 任务专用模型（可选，全局默认）\n给不同任务分配不同 AI：省钱的大纲/体检用便宜模型，打磨用高质量模型。未指定的任务走「本书绑定模型」或全局启用模型。",
+                    "🎯 任务专用模型（可选，全局默认）\n给不同任务分配不同 AI：省钱的设定卡/体检用便宜模型，打磨用高质量模型。未指定的任务走「本书绑定模型」或全局启用模型。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(6.dp))
                 ElevatedCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
-                        TaskModelRow("🧭 分章大纲生成", com.lele.novelmaster.data.TaskModels.OUTLINE, configs)
+                        // v6.9.42：用户要求——不单独叫「分章大纲」，归入「设定卡」（设定卡生成含分章大纲）
+                        TaskModelRow("🗂 设定卡（含分章大纲）", com.lele.novelmaster.data.TaskModels.OUTLINE, configs)
                         HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)
                         TaskModelRow("🧾 设定体检 / 瘦身", com.lele.novelmaster.data.TaskModels.CHECK, configs)
                         HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), thickness = 0.5.dp)

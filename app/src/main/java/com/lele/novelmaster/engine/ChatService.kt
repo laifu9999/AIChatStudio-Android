@@ -283,6 +283,29 @@ object ChatService {
                 )
             )
 
+            // v6.9.42：「继续」时系统先点名缺什么——不给 AI 含糊空间。
+            // 用户踩坑：设定卡没生成完，AI 空回一句文字+小结；再叫「继续」还是什么都不做。
+            if (isContinue(input) && !resumeMidSentence && pid > 0L) {
+                runCatching {
+                    val cs = Repo.dao.cards(pid)
+                    val have = cs.map { it.category }.toSet()
+                    val needCats = listOf("世界观", "人物设定", "主线剧情", "核心冲突", "支线任务", "伏笔钩子", "设定圣经", "全书大纲")
+                    val missingCats = needCats.filter { it !in have }
+                    val chs = Repo.dao.chapters(pid)
+                    val miss = missingCats + if (chs.isNotEmpty() && chs.any { it.outline.isBlank() })
+                        listOf("分章大纲（仅 ${chs.count { it.outline.isNotBlank() }}/${chs.size} 章有大纲）") else emptyList()
+                    if (miss.isNotEmpty()) {
+                        msgs.add(
+                            ChatMsg(
+                                "user",
+                                "系统检查：这本书还有没建全的设定——${miss.joinToString("、")}。" +
+                                    "本轮回复必须直接输出补齐它们的工具块（addCard/generateOutlines），不要任何开场白、确认语或小结，做完才许汇报。"
+                            )
+                        )
+                    }
+                }
+            }
+
             var round = 0
             var stopReason = "stop"
 
@@ -468,6 +491,7 @@ object ChatService {
                 "· 需要保存的内容：想好一条就用一个工具块保存一条。系统是**边接收边执行保存**的，保存不会打断你的输出，输出与保存同时进行。\n" +
                 "· 一个工具块输出完，紧接着继续输出下一个工具块，中间不要停、不要问、不要等确认。\n" +
                 "· 收到「继续」时：只补还没生成的部分，**严禁重复生成已保存过的设定卡**（已保存清单见下方），直接从缺失的分类接着做。\n" +
+                "· 设定卡没建全之前，每一轮回复都**必须包含工具块**；严禁只回「好的」「马上继续」「继续为你生成」这类文字敷衍——没做完就立刻接着用工具做，全部做完才允许纯文字收尾。\n" +
                 "· 严禁「（略）」「（以下省略）」「未完待续」「由于篇幅限制」这类偷懒输出，也不要解释自己省略了什么。\n" +
                 "· 每个工具块的 JSON 必须完整闭合，content 里换行用 \\n、引号用 \\\" 转义，不要用中文引号。\n"
         )
@@ -476,7 +500,7 @@ object ChatService {
             if (resumeMid) {
                 appendLine("【本次是「继续」指令·半截续写】你上一条在半截被打断，严格接着最后一句话往下输出完，不要重复、不要重新开头。")
             } else {
-                appendLine("【本次是「继续」指令·下一步】对照下方「已保存的设定卡清单」：设定/分章大纲没建全 → 接着建全；已建全 → 调用 writeNextChapter 写下一章完整正文（不是梗概）。已完成的部分严禁重做，严禁一口气连写多章。")
+                appendLine("【本次是「继续」指令·下一步】对照下方「已保存的设定卡清单」：设定/分章大纲没建全 → 本轮**必须立即输出工具块**（addCard/generateOutlines）接着补齐缺失项，严禁只回文字计划、确认语或小结而不调工具；已建全 → 调用 writeNextChapter 写下一章完整正文（不是梗概）。已完成的部分严禁重做，严禁一口气连写多章。")
             }
         }
         appendLine()
@@ -697,7 +721,8 @@ object ChatService {
         return t.last() in "。！？…」』”\"!?~）)】"
     }
 
-    private suspend fun appendToolResult(pid: Long, r: ToolResult) {
+    // v6.9.42：改为公开——体检报告里的「确认修复」按钮（ChatScreen）直接调工具后，用同一条落库链路出报告气泡
+    suspend fun appendToolResult(pid: Long, r: ToolResult) {
         val text = if (r.detail.isBlank()) r.summary else r.summary + "\n\n" + r.detail
         // v5.8：空内容不落库，避免出现没有文字的空白气泡
         if (text.isBlank()) return
