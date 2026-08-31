@@ -207,6 +207,8 @@ object IntentRouter {
             return Tools.startAutoWrite(pid, from, to, context)
         }
         if (Regex("^(停止|暂停|中止|停).*(写|自动)|停止写作|别写了|暂停写作").containsMatchIn(raw)) {
+            // pid 为空时 stopAutoWrite 会按「有任务在跑则停全部」处理
+            val pid = needPid()
             return Tools.stopAutoWrite(pid)
         }
 
