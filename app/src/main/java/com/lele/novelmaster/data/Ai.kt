@@ -508,9 +508,12 @@ object AiClient {
                 if (currentCoroutineContext()[Job]?.isActive == false) throw CancellationException("用户停止")
                 throw io
             }
-            // 个别推理模型只输出思考段：作为兜底内容返回（界面侧还会再剥一层 <think>）
+            // v6.9.48：思考内容绝不回退当正文——开了思考强度的模型思考耗尽输出额度时 content 为空，
+            // 旧逻辑把整段 reasoning_content 当正文返回，导致「好的，用户要求写…」整段思考被存进章节/显示在聊天。
+            if (sb.isBlank() && think.isNotBlank())
+                throw RuntimeException("AI 只输出了思考内容，没有产出正文（思考可能耗尽了输出额度）——请重试一次，或在AI后台把思考强度调低/改为无思考")
             // v6.9.42：返回前先剥 <think> 块，防止英文思考过程混进报告/正文
-            AiResult(stripThink(if (sb.isBlank()) think.toString() else sb.toString()), finish)
+            AiResult(stripThink(sb.toString()), finish)
         }
     }
 
@@ -528,12 +531,10 @@ object AiClient {
             val msg = JSONObject(body)
                 .optJSONArray("choices")?.optJSONObject(0)
                 ?.optJSONObject("message")
-            // content 为空时回退 reasoning_content（DeepSeek-R1 等推理模型把正文放这里）
-            // v6.9.42：剥 <think> 块，防止思考过程混进正文
-            var content = stripThink(jstr(msg, "content"))
-            if (content.isBlank()) content = jstr(msg, "reasoning_content")
-            if (content.isBlank()) content = jstr(msg, "reasoning")
-            if (content.isBlank()) throw RuntimeException("AI返回为空: ${body.take(300)}")
+            // v6.9.48：不再回退 reasoning_content——那是思考链，回退会把整段思考当正文存进章节。
+            // DeepSeek-R1 官方 API 的正文也在 content 里；content 为空说明只有思考没有正文，宁可报错也不污染正文。
+            val content = stripThink(jstr(msg, "content"))
+            if (content.isBlank()) throw RuntimeException("AI返回为空（思考内容已过滤，不会混入正文）: ${body.take(300)}")
             content
         }
     }
@@ -633,7 +634,10 @@ object AiClient {
                         val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
                         if (parts != null) {
                             for (i in 0 until parts.length()) {
-                                val piece = jstr(parts.optJSONObject(i), "text")
+                                val p = parts.optJSONObject(i) ?: continue
+                                // v6.9.48：思考强度模式下思考段带 thought:true——绝不进正文、不回调显示
+                                if (p.optBoolean("thought")) continue
+                                val piece = jstr(p, "text")
                                 if (piece.isNotEmpty()) {
                                     sb.append(piece)
                                     onDelta(piece)
@@ -666,7 +670,10 @@ object AiClient {
             val sb = StringBuilder()
             if (parts != null) {
                 for (i in 0 until parts.length()) {
-                    sb.append(jstr(parts.optJSONObject(i), "text"))
+                    val p = parts.optJSONObject(i) ?: continue
+                    // v6.9.48：跳过思考段（thought:true），思考内容不进正文
+                    if (p.optBoolean("thought")) continue
+                    sb.append(jstr(p, "text"))
                 }
             }
             // v6.9.42：剥 <think> 思考段
