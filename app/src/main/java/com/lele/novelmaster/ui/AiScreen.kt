@@ -86,9 +86,9 @@ fun AiScreen(nav: NavController) {
                                 Text(
                                     "${cfg.model.ifBlank { "未选模型" }}" +
                                         when (cfg.thinkMode) {
-                                            "none" -> " · 🚫无思考"
-                                            "low" -> " · 🌙低强度"
-                                            "high" -> " · 🧠高强度"
+                                            "none" -> " · 无思考"
+                                            "low" -> " · 低思考"
+                                            "high" -> " · 高思考"
                                             else -> ""
                                         } +
                                         " · ${cfg.baseUrl}",
@@ -242,6 +242,26 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
         thinkMode = thinkMode
     )
 
+    // v6.9.49：思考档位选中后自动连接 AI 验证是否生效
+    var thinkTesting by remember { mutableStateOf(false) }
+    var thinkResult by remember { mutableStateOf<String?>(null) }
+    fun runThinkTest() {
+        if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) {
+            thinkResult = "⚠️ 请先填好 API地址 / 密钥 / 模型，再验证思考模式"
+            return
+        }
+        thinkTesting = true
+        thinkResult = null
+        scope.launch(Dispatchers.IO) {
+            try {
+                val msg = AiClient.testThinking(tempCfg())
+                launch(Dispatchers.Main) { thinkTesting = false; thinkResult = msg }
+            } catch (e: Exception) {
+                launch(Dispatchers.Main) { thinkTesting = false; thinkResult = "❌ ${e.message?.take(200)}" }
+            }
+        }
+    }
+
     AlertDialog(
         onDismissRequest = { if (busy == null) onDismiss() },
         title = { Text(if (initial == null) "添加AI配置" else "编辑AI配置") },
@@ -339,53 +359,65 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("测试连接") }
-                // v6.9.47：思考强度——三档单选，适配所有模型（不认识的参数自动回退模型默认）
+                // v6.9.47：思考强度单选，适配所有模型；v6.9.49：短字档位 + 选中即自动验证
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        "🧠 思考强度（适配所有模型）\n深度求索/智谱/通义/Gemini 等按各家参数自动适配；模型不认思考参数时自动按模型默认运行，不影响使用。",
+                        "🧠 思考强度：各家模型自动适配，不认识思考参数的自动按默认运行。选中即自动验证是否生效。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         val modes = listOf(
-                            "" to "默认", "none" to "🚫无思考",
-                            "low" to "🌙低强度", "high" to "🧠高强度"
+                            "" to "默认", "none" to "无", "low" to "低", "high" to "高"
                         )
                         modes.forEach { (v, label) ->
                             val sel = thinkMode == v
-                            TextButton(
-                                onClick = { thinkMode = v },
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = if (sel) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
-                            ) {
-                                Text(
-                                    label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal
-                                )
+                            if (sel) {
+                                Button(
+                                    onClick = {
+                                        thinkMode = v
+                                        thinkResult = null
+                                        if (v.isNotBlank()) runThinkTest()
+                                    },
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp)
+                                ) { Text(label, style = MaterialTheme.typography.labelLarge) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = {
+                                        thinkMode = v
+                                        thinkResult = null
+                                        if (v.isNotBlank()) runThinkTest()
+                                    },
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp)
+                                ) {
+                                    Text(
+                                        label,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
-                    if (thinkMode.isNotBlank()) {
-                        OutlinedButton(
-                            enabled = busy == null && baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank(),
-                            onClick = {
-                                busy = "思考测试中…"
-                                result = null
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        val msg = AiClient.testThinking(tempCfg())
-                                        launch(Dispatchers.Main) { busy = null; result = msg }
-                                    } catch (e: Exception) {
-                                        launch(Dispatchers.Main) { busy = null; result = "❌ ${e.message?.take(250)}" }
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("🧪 测试是否已进入该思考状态") }
+                    if (thinkTesting) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Text("正在连接 AI 验证思考模式…", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    thinkResult?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (it.startsWith("✅")) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error
+                        )
+                    }
+                    if (thinkMode.isNotBlank() && !thinkTesting) {
+                        TextButton(
+                            enabled = busy == null,
+                            onClick = { runThinkTest() },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
+                        ) { Text("🔄 重新验证", style = MaterialTheme.typography.labelMedium) }
                     }
                 }
                 if (busy != null) {
