@@ -614,7 +614,15 @@ object Tools {
     }
 
     /** 8.0e 设定体检：检查全部设定卡与分章大纲是否自洽合理，能改文字解决的矛盾自动修复卡片（v6.9.22） */
+    // v6.9.39：设定体检并发闸门——聊天指令与设定卡页「设定体检」双入口互斥，防双跑烧 token、报告互相覆盖
+    private val cardsCheckGate = java.util.concurrent.atomic.AtomicBoolean(false)
+
     suspend fun cardsCheck(pid: Long): ToolResult {
+        if (!cardsCheckGate.compareAndSet(false, true)) return ToolResult(false, "设定体检正在进行中，请等当前体检完成")
+        return try { cardsCheckInner(pid) } finally { cardsCheckGate.set(false) }
+    }
+
+    private suspend fun cardsCheckInner(pid: Long): ToolResult {
         val dao = Repo.dao
         val cfg = Repo.apiFor(pid) ?: return ToolResult(false, "请先在【AI模型】中启用一个模型")
         val cards = dao.cards(pid)

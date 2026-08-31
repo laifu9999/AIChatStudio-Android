@@ -67,6 +67,15 @@ object WriterEngine {
     // v6.9.38：补大纲并发闸门——聊天指令/设定卡页/章节页/灵感落地四个入口共用，同时只允许一个在跑，防并发重复烧 token
     private val outlineGate = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // v6.9.39：多入口 AI 任务引擎级并发闸门
+    // inspireGate：灵感设定（聊天灵感/设定卡页灵感分析/写章自动补全设定 三入口互斥）
+    private val inspireGate = java.util.concurrent.atomic.AtomicBoolean(false)
+    // chapterGates：同章正文任务（编辑器AI重写/聊天重写/润色/扩写/补写/发布打磨/自动写作写章 按 书id:章号 互斥）
+    private val chapterGates = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
+
+    private fun chapterGate(pid: Long, idx: Int) =
+        chapterGates.computeIfAbsent("$pid:$idx") { java.util.concurrent.atomic.AtomicBoolean(false) }
+
     suspend fun ensureOutlines(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         if (!outlineGate.compareAndSet(false, true)) return "分章大纲正在补齐中，请等当前补齐完成"
         return try { ensureOutlinesInner(projectId, from, to, context) } finally { outlineGate.set(false) }
@@ -503,6 +512,12 @@ object WriterEngine {
      *      边输出边保存边显示，不再"卡很久然后突然全部显示"。
      */
     suspend fun generateCardsFromInspire(projectId: Long, inspiration: String, context: Context? = null): String? {
+        // v6.9.39：灵感设定并发闸门——聊天灵感/设定卡页灵感分析/写章自动补全设定 三入口互斥，防重复生成互相覆盖
+        if (!inspireGate.compareAndSet(false, true)) return "设定灵感分析正在进行中，请等当前分析完成"
+        return try { generateCardsFromInspireInner(projectId, inspiration, context) } finally { inspireGate.set(false) }
+    }
+
+    private suspend fun generateCardsFromInspireInner(projectId: Long, inspiration: String, context: Context? = null): String? {
         val dao = Repo.dao
         val cfg = Repo.apiFor(projectId) ?: return "请先在【AI模型】中添加并启用一个模型"
         val project = dao.project(projectId) ?: return "项目不存在"
@@ -699,6 +714,18 @@ object WriterEngine {
      *  3) 摘要 / 剧情进度 / 伏笔回收
      */
     suspend fun writeOne(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter, context: Context? = null) {
+        // v6.9.39：同章正文任务闸门——自动写作写到某章时，若该章正被编辑器AI重写/聊天润色等占用，
+        // 抛错让本书自动写作立即中止（避免两路同时写同一章互相覆盖）；等该任务完成后可重启自动写作
+        val gate = chapterGate(project.id, ch0.chapterIndex)
+        if (!gate.compareAndSet(false, true)) throw IllegalStateException(
+            "第${ch0.chapterIndex}章正在被其他AI任务处理（编辑器AI重写/聊天润色等），自动写作已中止；请等该任务完成后再启动自动写作"
+        )
+        try {
+            writeOneInner(project, cfg, dao, ch0, context)
+        } finally { gate.set(false) }
+    }
+
+    private suspend fun writeOneInner(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter, context: Context? = null) {
         val cards = dao.cards(project.id)
         val chapters = dao.chapters(project.id)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0)
@@ -1120,6 +1147,17 @@ object WriterEngine {
     suspend fun rewriteChapter(chapterId: Long): String? {
         val dao = Repo.dao
         val ch0 = dao.chapter(chapterId) ?: return "章节不存在"
+        // v6.9.39：同章正文任务闸门——编辑器AI重写/聊天重写与润色扩写等、自动写作写章互斥
+        val gate = chapterGate(ch0.projectId, ch0.chapterIndex)
+        if (!gate.compareAndSet(false, true)) return "第 ${ch0.chapterIndex} 章正在AI处理中，请等当前任务完成"
+        try {
+            return rewriteChapterInner(chapterId)
+        } finally { gate.set(false) }
+    }
+
+    private suspend fun rewriteChapterInner(chapterId: Long): String? {
+        val dao = Repo.dao
+        val ch0 = dao.chapter(chapterId) ?: return "章节不存在"
         val project = dao.project(ch0.projectId) ?: return "项目不存在"
         // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用
         val cfg = Repo.apiFor(ch0.projectId) ?: return "请先在【AI模型】中启用一个模型"
@@ -1165,6 +1203,18 @@ object WriterEngine {
      * 返回 null=成功（结果已应用/展示），否则返回错误信息。
      */
     suspend fun chapterTask(
+        projectId: Long,
+        chapterIndex: Int,
+        instruction: String,
+        replace: Boolean
+    ): Pair<String?, String> { // (err, output)
+        // v6.9.39：同章正文任务闸门——聊天润色/扩写/补写/发布打磨等与编辑器AI重写、自动写作写章互斥
+        val gate = chapterGate(projectId, chapterIndex)
+        if (!gate.compareAndSet(false, true)) return "第 $chapterIndex 章正在AI处理中，请等当前任务完成" to ""
+        return try { chapterTaskInner(projectId, chapterIndex, instruction, replace) } finally { gate.set(false) }
+    }
+
+    private suspend fun chapterTaskInner(
         projectId: Long,
         chapterIndex: Int,
         instruction: String,
