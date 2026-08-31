@@ -384,8 +384,9 @@ object ChatService {
 
                 // ---------- 戳穿伪造/口头保存（v6.9.45 移入循环内：此前在循环外是死代码，且永不该漏过） ----------
                 // v6.9.45：伪造执行记录——弱模型学舌注入格式「[系统执行记录·已成功，勿重复] 已保存XX：无」，
-                // 实际没调任何工具；不论 executed 是否>0 都要纠偏（去重命中也不再虚增 executed）
-                val forged = FORGED_MARK_RE.containsMatchIn(shown.toString())
+                // 实际没调任何工具；不论 executed 是否>0 都要纠偏（去重命中也不再虚增 executed）。
+                // 注意必须检测 raw（原始输出）：shown 里的伪造行已被 visibleOf 剔除，检测 shown 永远不命中
+                val forged = FORGED_MARK_RE.containsMatchIn(stripThinking(raw.toString()))
                 val claimSaved = forged || (executed == 0 && CLAIM_SAVED_RE.containsMatchIn(shown.toString()))
 
                 // ---------- 判断是否要自动续跑 ----------
