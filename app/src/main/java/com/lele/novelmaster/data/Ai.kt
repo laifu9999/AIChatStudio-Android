@@ -256,6 +256,60 @@ object AiClient {
         return reply.trim().take(50)
     }
 
+    /**
+     * v6.9.47：思考模式测试——发一个需要想一想的小问题，观察模型是否真的进入/退出思考状态。
+     * 返回给用户看的状态文案（不抛异常，失败也在文案里说明）。
+     */
+    suspend fun testThinking(cfg: ApiConfig): String = withContext(Dispatchers.IO) {
+        val mode = cfg.thinkMode
+        val probe = listOf(ChatMsg("user", "9.11 和 9.8 哪个更大？只回答结论。"))
+        try {
+            if (cfg.provider == "gemini") {
+                // Gemini：思考内容默认不回传，能接受配置不报错即视为生效
+                geminiCall(cfg, probe, 0.1, 2048, stream = false).use { resp ->
+                    val b = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        val lb = b.lowercase()
+                        if (lb.contains("thinking")) {
+                            thinkingUnsupported[cfg.model] = true
+                            "⚠️ 该 Gemini 模型不支持思考配置，已按模型默认运行"
+                        } else "❌ 测试失败：HTTP ${resp.code}: ${b.take(200)}"
+                    } else "✅ Gemini 已接受${when (mode) { "none" -> "关闭思考"; "low" -> "低强度思考"; else -> "高强度思考" }}配置"
+                }
+            } else {
+                openaiCall(cfg, probe, 0.1, 2048, stream = false).use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        if (isThinkingParamError("HTTP ${resp.code}: $body")) {
+                            thinkingUnsupported[cfg.model] = true
+                            "⚠️ 该模型/服务商不认识思考参数，已自动忽略（按模型默认运行，不影响使用）"
+                        } else "❌ 测试失败：HTTP ${resp.code}: ${body.take(200)}"
+                    } else {
+                        val msg = JSONObject(body)
+                            .optJSONArray("choices")?.optJSONObject(0)
+                            ?.optJSONObject("message")
+                        val hasThink = jstr(msg, "reasoning_content").isNotBlank() ||
+                            jstr(msg, "reasoning").isNotBlank() ||
+                            jstr(msg, "content").contains("<think")
+                        when (mode) {
+                            "none" -> if (hasThink)
+                                "⚠️ 模型仍在输出思考过程——该服务商可能不支持关闭思考（或此模型是纯推理模型）"
+                            else
+                                "✅ 无思考模式生效：本次回复没有思考过程"
+                            else -> if (hasThink)
+                                "✅ ${if (mode == "low") "低强度" else "高强度"}思考模式已生效：模型返回了思考过程"
+                            else
+                                "⚠️ 未检测到思考过程——该模型可能不支持思考强度参数，已按模型默认运行（普通对话不受影响）"
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            "❌ 测试失败：${e.message?.take(200)}"
+        }
+    }
+
     /** 自动获取该服务下所有可用模型 */
     suspend fun listModels(cfg: ApiConfig): List<String> = withContext(Dispatchers.IO) {
         if (cfg.provider == "gemini") {
@@ -296,6 +350,95 @@ object AiClient {
         }
     }
 
+    // ---------- 思考强度（v6.9.47） ----------
+
+    /**
+     * v6.9.47：记住实测不认思考参数的模型——400 报错指向思考参数后置位，
+     * 之后所有请求直接跳过注入（走模型默认），不再反复撞墙浪费时间。
+     */
+    private val thinkingUnsupported = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * v6.9.47：把思考强度注入 OpenAI 兼容请求体。
+     * 各家参数不一样，按 地址/模型名 启发式适配（deepseek-v4 官方支持 thinking.type 开关 + reasoning_effort 强度）：
+     *  - DeepSeek：{"thinking":{"type":"enabled/disabled"}} + reasoning_effort low/high
+     *  - 智谱 GLM：{"thinking":{"type":"enabled/disabled"}}（无强度档，开关即用）
+     *  - 通义 Qwen：enable_thinking true/false
+     *  - 其他：同时给 thinking.type 与 enable_thinking / reasoning_effort——
+     *    若服务商报 400 不认识参数，由 openaiCall 自动去参重试兜底，保证任何模型都能用。
+     */
+    private fun applyThinkingOpenai(o: JSONObject, cfg: ApiConfig) {
+        val mode = cfg.thinkMode
+        if (mode.isBlank()) return
+        if (thinkingUnsupported[cfg.model] == true) return
+        val host = cfg.baseUrl.lowercase()
+        val model = cfg.model.lowercase()
+        val deepseek = host.contains("deepseek") || model.contains("deepseek")
+        val zhipu = host.contains("bigmodel.cn") || model.startsWith("glm")
+        val qwen = host.contains("dashscope") || model.contains("qwen")
+        when {
+            deepseek -> when (mode) {
+                "none" -> o.put("thinking", JSONObject().put("type", "disabled"))
+                else -> {
+                    o.put("thinking", JSONObject().put("type", "enabled"))
+                    o.put("reasoning_effort", mode)
+                }
+            }
+            zhipu -> o.put("thinking", JSONObject().put("type", if (mode == "none") "disabled" else "enabled"))
+            qwen -> o.put("enable_thinking", mode != "none")
+            else -> when (mode) {
+                "none" -> {
+                    o.put("thinking", JSONObject().put("type", "disabled"))
+                    o.put("enable_thinking", false)
+                }
+                else -> o.put("reasoning_effort", mode)
+            }
+        }
+    }
+
+    /** v6.9.47：400 报错文本指向思考参数 → 判定该模型不认识，去参重试并缓存 */
+    private fun isThinkingParamError(msg: String?): Boolean {
+        val m = msg?.lowercase().orEmpty()
+        if (!m.contains("http 400") && !m.contains("http 422")) return false
+        val kw = m.contains("thinking") || m.contains("reasoning")
+        val err = m.contains("unrecognized") || m.contains("unknown") || m.contains("invalid") ||
+            m.contains("not support") || m.contains("unexpected") || m.contains("extra") ||
+            m.contains("unsupported") || m.contains("不支持") || m.contains("未知") || m.contains("无效")
+        return kw && err
+    }
+
+    /**
+     * v6.9.47：OpenAI 兼容请求统一入口——先带思考参数发送；
+     * 若服务商报 400 且报错指向思考参数，自动去参重试（保证「适配所有 AI」：
+     * 不认识的模型永远回退到模型默认行为，绝不因新参数把请求打死）。
+     */
+    private suspend fun openaiCall(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int,
+        stream: Boolean
+    ): Response {
+        val useThink = cfg.thinkMode.isNotBlank() && thinkingUnsupported[cfg.model] != true
+        val url = cfg.baseUrl.trimEnd('/') + "/chat/completions"
+        fun build(withThink: Boolean): Request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${cfg.apiKey}")
+            .let { if (stream) it.header("Accept", "text/event-stream") else it }
+            .post(openaiBody(cfg, messages, temperature, maxTokens, stream, withThink).toRequestBody(JSON_TYPE))
+            .build()
+        var resp = executeCall(build(useThink), stream)
+        if (!resp.isSuccessful && useThink) {
+            val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
+            if (isThinkingParamError("HTTP ${resp.code}: $b")) {
+                thinkingUnsupported[cfg.model] = true
+                resp.close()
+                resp = executeCall(build(false), stream)
+            }
+        }
+        return resp
+    }
+
     // ---------- OpenAI 兼容 ----------
 
     private fun openaiBody(
@@ -303,7 +446,8 @@ object AiClient {
         messages: List<ChatMsg>,
         temperature: Double,
         maxTokens: Int,
-        stream: Boolean = false
+        stream: Boolean = false,
+        withThinking: Boolean = true
     ): String {
         val arr = JSONArray()
         messages.forEach { arr.put(JSONObject().put("role", it.role).put("content", it.content)) }
@@ -313,6 +457,8 @@ object AiClient {
             .put("temperature", temperature)
             .put("max_tokens", maxTokens)
         if (stream) o.put("stream", true)
+        // v6.9.47：思考强度注入（选「模型默认」或不认识参数的模型不注入）
+        if (withThinking) applyThinkingOpenai(o, cfg)
         return o.toString()
     }
 
@@ -324,14 +470,8 @@ object AiClient {
         onDelta: suspend (String) -> Unit
     ): AiResult = withContext(Dispatchers.IO) {
         if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
-        val req = Request.Builder()
-            .url(cfg.baseUrl.trimEnd('/') + "/chat/completions")
-            .header("Authorization", "Bearer ${cfg.apiKey}")
-            .header("Accept", "text/event-stream")
-            .post(openaiBody(cfg, messages, temperature, maxTokens, true).toRequestBody(JSON_TYPE))
-            .build()
-
-        executeCall(req, useStreaming = true).use { resp ->
+        // v6.9.47：统一走 openaiCall（思考参数注入 + 400 自动去参重试）
+        openaiCall(cfg, messages, temperature, maxTokens, stream = true).use { resp ->
             if (!resp.isSuccessful) {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
                 throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
@@ -381,12 +521,8 @@ object AiClient {
         maxTokens: Int
     ): String = withContext(Dispatchers.IO) {
         if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
-        val req = Request.Builder()
-            .url(cfg.baseUrl.trimEnd('/') + "/chat/completions")
-            .header("Authorization", "Bearer ${cfg.apiKey}")
-            .post(openaiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
-            .build()
-        executeCall(req).use { resp ->
+        // v6.9.47：统一走 openaiCall（思考参数注入 + 400 自动去参重试）
+        openaiCall(cfg, messages, temperature, maxTokens, stream = false).use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
             val msg = JSONObject(body)
@@ -408,7 +544,8 @@ object AiClient {
         cfg: ApiConfig,
         messages: List<ChatMsg>,
         temperature: Double,
-        maxTokens: Int
+        maxTokens: Int,
+        withThinking: Boolean = true
     ): String {
         val sys = messages.firstOrNull { it.role == "system" }?.content
         val contents = JSONArray()
@@ -423,11 +560,46 @@ object AiClient {
         if (!sys.isNullOrBlank()) {
             json.put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
         }
-        json.put(
-            "generationConfig",
-            JSONObject().put("temperature", temperature).put("maxOutputTokens", maxTokens)
-        )
+        // v6.9.47：Gemini 思考强度——thinkingBudget 0=关 / 2048=低 / -1=动态（高）；老模型不认时由 geminiCall 去参重试
+        val gen = JSONObject().put("temperature", temperature).put("maxOutputTokens", maxTokens)
+        if (withThinking && cfg.thinkMode.isNotBlank()) {
+            val budget = when (cfg.thinkMode) { "none" -> 0; "low" -> 2048; else -> -1 }
+            gen.put("thinkingConfig", JSONObject().put("thinkingBudget", budget))
+        }
+        json.put("generationConfig", gen)
         return json.toString()
+    }
+
+    /**
+     * v6.9.47：Gemini 请求统一入口——先带思考配置发送；
+     * 若报错指向 thinkingConfig/thinkingBudget（老模型不支持），自动去参重试。
+     */
+    private suspend fun geminiCall(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int,
+        stream: Boolean
+    ): Response {
+        val path = if (stream) "streamGenerateContent?alt=sse&key=${cfg.apiKey}"
+        else "generateContent?key=${cfg.apiKey}"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:$path"
+        val useThink = cfg.thinkMode.isNotBlank()
+        fun build(withThink: Boolean): Request = Request.Builder()
+            .url(url)
+            .let { if (stream) it.header("Accept", "text/event-stream") else it }
+            .post(geminiBody(cfg, messages, temperature, maxTokens, withThink).toRequestBody(JSON_TYPE))
+            .build()
+        var resp = executeCall(build(useThink), stream)
+        if (!resp.isSuccessful && useThink) {
+            val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
+            val lb = b.lowercase()
+            if (lb.contains("thinking")) {
+                resp.close()
+                resp = executeCall(build(false), stream)
+            }
+        }
+        return resp
     }
 
     private suspend fun streamGemini(
@@ -438,14 +610,8 @@ object AiClient {
         onDelta: suspend (String) -> Unit
     ): AiResult = withContext(Dispatchers.IO) {
         if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
-        val url =
-            "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:streamGenerateContent?alt=sse&key=${cfg.apiKey}"
-        val req = Request.Builder()
-            .url(url)
-            .header("Accept", "text/event-stream")
-            .post(geminiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
-            .build()
-        executeCall(req, useStreaming = true).use { resp ->
+        // v6.9.47：统一走 geminiCall（思考配置 + 报错自动去参重试）
+        geminiCall(cfg, messages, temperature, maxTokens, stream = true).use { resp ->
             if (!resp.isSuccessful) {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
                 throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
@@ -491,13 +657,8 @@ object AiClient {
         maxTokens: Int
     ): String = withContext(Dispatchers.IO) {
         if (cfg.model.isBlank()) throw RuntimeException("未选择模型，请先在模型列表中选择")
-        val url =
-            "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:generateContent?key=${cfg.apiKey}"
-        val req = Request.Builder()
-            .url(url)
-            .post(geminiBody(cfg, messages, temperature, maxTokens).toRequestBody(JSON_TYPE))
-            .build()
-        executeCall(req).use { resp ->
+        // v6.9.47：统一走 geminiCall（思考配置 + 报错自动去参重试）
+        geminiCall(cfg, messages, temperature, maxTokens, stream = false).use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
             val cand = JSONObject(body).optJSONArray("candidates")?.optJSONObject(0)

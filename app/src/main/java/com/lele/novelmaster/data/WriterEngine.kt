@@ -952,7 +952,14 @@ object WriterEngine {
         ch = regenerateSummary(cfg, dao, project, ch)
 
         // v6.9：写后轻量自检——用「全书体检」的对照原理只查本章（详见 selfCheckChapter）
-        try { selfCheckChapter(cfg, dao, project, ch, context) } catch (_: Exception) { }
+        // v6.9.47：受后台「每章自动体检」开关控制（手动单章自检不受影响）
+        if (autoCheckOn(context)) try { selfCheckChapter(cfg, dao, project, ch, context) } catch (_: Exception) { }
+    }
+
+    /** v6.9.47：每章自动体检是否开启（AI后台功能开关；ctx 为空时兜底用全局 Context，无 Context 视为开启） */
+    private fun autoCheckOn(ctx: Context?): Boolean {
+        val c = ctx ?: Repo.app ?: return true
+        return InjectPrefs.autoCheck(c)
     }
 
     /**
@@ -1313,7 +1320,8 @@ object WriterEngine {
         // v6.8.1：重新生成摘要 + 伏笔回收 + 剧情进度卡（之前 summary 置空不再生成，前情摘要断链）
         regenerateSummary(cfg, dao, project, newCh)
         // v6.9.1：重写后同样过一遍写后自检——用户用「重写本章」修复写错设定时也享受矛盾自动修正
-        try {
+        // v6.9.47：受后台「每章自动体检」开关控制
+        if (autoCheckOn(null)) try {
             val ctx = Repo.app
             if (ctx != null) selfCheckChapter(cfg, dao, project, newCh, ctx)
         } catch (_: Exception) { }
@@ -1389,7 +1397,8 @@ object WriterEngine {
             } catch (_: Exception) { }
             regenerateSummary(cfg, dao, project, newCh)
             // v6.9.1：润色/扩写/改文风等替换正文后同样过写后自检
-            try {
+            // v6.9.47：受后台「每章自动体检」开关控制
+            if (autoCheckOn(null)) try {
                 val ctx2 = Repo.app
                 if (ctx2 != null) selfCheckChapter(cfg, dao, project, newCh, ctx2)
             } catch (_: Exception) { }

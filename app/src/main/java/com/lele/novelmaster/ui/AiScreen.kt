@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -29,6 +30,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,11 +42,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.lele.novelmaster.data.ApiConfig
 import com.lele.novelmaster.data.AiClient
 import com.lele.novelmaster.data.AiProviders
+import com.lele.novelmaster.data.InjectPrefs
 import com.lele.novelmaster.data.Repo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -80,7 +84,14 @@ fun AiScreen(nav: NavController) {
                                     color = if (cfg.isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    "${cfg.model.ifBlank { "未选模型" }} · ${cfg.baseUrl}",
+                                    "${cfg.model.ifBlank { "未选模型" }}" +
+                                        when (cfg.thinkMode) {
+                                            "none" -> " · 🚫无思考"
+                                            "low" -> " · 🌙低强度"
+                                            "high" -> " · 🧠高强度"
+                                            else -> ""
+                                        } +
+                                        " · ${cfg.baseUrl}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -140,6 +151,32 @@ fun AiScreen(nav: NavController) {
                     }
                 }
             }
+            // v6.9.47：后台功能开关——每章自动体检（点击开启/关闭，即时生效）
+            item {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                var autoChk by remember { mutableStateOf(InjectPrefs.autoCheck(ctx)) }
+                Spacer(Modifier.height(10.dp))
+                ElevatedCard(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.padding(14.dp).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("🩺 每章自动体检", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "写完/重写/润色每章后自动对照设定查矛盾并修正。关闭后写作更快更省；手动「单章自检/全书体检」不受影响。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = autoChk, onCheckedChange = { on ->
+                            autoChk = on
+                            InjectPrefs.setAutoCheck(ctx, on)
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -191,6 +228,8 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
     var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "") }
     var apiKey by remember { mutableStateOf(initial?.apiKey ?: "") }
     var model by remember { mutableStateOf(initial?.model ?: "") }
+    // v6.9.47：思考强度——""=模型默认 "none"=无思考 "low"=低强度 "high"=高强度
+    var thinkMode by remember { mutableStateOf(initial?.thinkMode ?: "") }
     var models by remember { mutableStateOf<List<String>>(emptyList()) }
     var presetMenu by remember { mutableStateOf(false) }
     var modelMenu by remember { mutableStateOf(false) }
@@ -199,7 +238,8 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
 
     fun tempCfg() = ApiConfig(
         name = name.ifBlank { "测试" }, provider = provider,
-        baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), model = model.trim()
+        baseUrl = baseUrl.trim(), apiKey = apiKey.trim(), model = model.trim(),
+        thinkMode = thinkMode
     )
 
     AlertDialog(
@@ -299,6 +339,55 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("测试连接") }
+                // v6.9.47：思考强度——三档单选，适配所有模型（不认识的参数自动回退模型默认）
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "🧠 思考强度（适配所有模型）\n深度求索/智谱/通义/Gemini 等按各家参数自动适配；模型不认思考参数时自动按模型默认运行，不影响使用。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val modes = listOf(
+                            "" to "默认", "none" to "🚫无思考",
+                            "low" to "🌙低强度", "high" to "🧠高强度"
+                        )
+                        modes.forEach { (v, label) ->
+                            val sel = thinkMode == v
+                            TextButton(
+                                onClick = { thinkMode = v },
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = if (sel) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
+                            ) {
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+                    if (thinkMode.isNotBlank()) {
+                        OutlinedButton(
+                            enabled = busy == null && baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank(),
+                            onClick = {
+                                busy = "思考测试中…"
+                                result = null
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val msg = AiClient.testThinking(tempCfg())
+                                        launch(Dispatchers.Main) { busy = null; result = msg }
+                                    } catch (e: Exception) {
+                                        launch(Dispatchers.Main) { busy = null; result = "❌ ${e.message?.take(250)}" }
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("🧪 测试是否已进入该思考状态") }
+                    }
+                }
                 if (busy != null) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -320,7 +409,8 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
                     id = initial?.id ?: 0, name = name.ifBlank { "未命名" },
                     provider = provider, baseUrl = baseUrl.trim(),
                     apiKey = apiKey.trim(), model = model.trim(),
-                    isActive = initial?.isActive ?: false
+                    isActive = initial?.isActive ?: false,
+                    thinkMode = thinkMode
                 )
                 scope.launch(Dispatchers.IO) {
                     if (initial == null) Repo.dao.insertApi(cfg0) else Repo.dao.updateApi(cfg0)

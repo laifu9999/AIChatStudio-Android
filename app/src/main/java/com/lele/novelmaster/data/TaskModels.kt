@@ -73,4 +73,8 @@ object InjectPrefs {
 
     fun setWindowPrev(ctx: Context, n: Int) = sp(ctx).edit().putInt("windowPrev", n.coerceIn(0, 10)).apply()
     fun windowPrev(ctx: Context): Int = sp(ctx).getInt("windowPrev", 2)
+
+    // v6.9.47：每章自动体检开关——写完/重写/润色替换正文后是否自动跑一致性自检（默认开）
+    fun setAutoCheck(ctx: Context, on: Boolean) = sp(ctx).edit().putBoolean("autoCheck", on).apply()
+    fun autoCheck(ctx: Context): Boolean = sp(ctx).getBoolean("autoCheck", true)
 }

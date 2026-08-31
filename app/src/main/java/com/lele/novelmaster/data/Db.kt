@@ -72,7 +72,9 @@ data class ApiConfig(
     val baseUrl: String,
     val apiKey: String,
     val model: String = "",
-    val isActive: Boolean = false
+    val isActive: Boolean = false,
+    // v6.9.47：思考强度——""=模型默认（不发参数） "none"=无思考 "low"=低强度 "high"=高强度
+    val thinkMode: String = ""
 )
 
 /**
@@ -208,7 +210,7 @@ interface NovelDao {
 
 @Database(
     entities = [Project::class, Chapter::class, SettingCard::class, ApiConfig::class, Message::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDb : RoomDatabase() {
@@ -229,6 +231,13 @@ private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
     }
 }
 
+/** v6.9.47：api_configs 新增 thinkMode 列（思考强度：默认空/无思考/低/高），非破坏迁移 */
+private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE api_configs ADD COLUMN thinkMode TEXT NOT NULL DEFAULT ''")
+    }
+}
+
 object Repo {
     lateinit var dao: NovelDao
         private set
@@ -241,7 +250,7 @@ object Repo {
         app = context.applicationContext
         if (!::dao.isInitialized) {
             dao = Room.databaseBuilder(context, AppDb::class.java, "novel_master.db")
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .fallbackToDestructiveMigration()
                 .build()
                 .dao()
