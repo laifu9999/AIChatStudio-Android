@@ -29,6 +29,9 @@ import kotlinx.coroutines.flow.onEach
 class GenerationService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var cachedPid: Long = 0
+
+    @Volatile private var cachedTitle: String = "小说"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -37,6 +40,14 @@ class GenerationService : Service() {
         createChannels()
         AutoWriteManager.state
             .onEach { st ->
+                // 书名按项目懒加载（dao.project 是 suspend，切线程取后缓存）
+                if (st.running && st.projectId != cachedPid) {
+                    cachedPid = st.projectId
+                    val pid = st.projectId
+                    kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        cachedTitle = try { Repo.dao.project(pid)?.title ?: "小说" } catch (_: Exception) { "小说" }
+                    }
+                }
                 val nm = getSystemService(NotificationManager::class.java)
                 if (st.running) {
                     val title = "✍️ 正在写作《${bookTitle(st.projectId)}》"
@@ -60,8 +71,7 @@ class GenerationService : Service() {
             .launchIn(scope)
     }
 
-    private fun bookTitle(pid: Long): String =
-        try { Repo.dao.project(pid)?.title ?: "小说" } catch (_: Exception) { "小说" }
+    private fun bookTitle(pid: Long): String = cachedTitle
 
     private fun buildNoti(channel: String, title: String, text: String, ongoing: Boolean): Notification {
         val open = PendingIntent.getActivity(
