@@ -161,6 +161,10 @@ fun MenuDrawer(
                     // v6.9.40：删除前停掉该书全部关联任务（自动写作/聊天生成/页面长任务），防白烧 token
                     com.lele.novelmaster.data.AutoWriteManager.stopProjectTasks(pid)
                     scope.launch(Dispatchers.IO) { Tools.deleteProject(pid) }
+                    // v6.9.50：删除的正是当前会话时复位记忆——否则恢复进来是幽灵 pid（「项目不存在」根源）
+                    if (com.lele.novelmaster.ui.ChatSessionMemory.lastPid == pid) {
+                        com.lele.novelmaster.ui.ChatSessionMemory.lastPid = 0L
+                    }
                     deleteTarget = null
                 }) { Text("删除", color = Color(0xFFB91C1C)) }
             },

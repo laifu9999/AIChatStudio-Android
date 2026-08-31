@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -165,6 +166,12 @@ fun ChatScreen(nav: NavHostController) {
     val msgSize = style.size.coerceIn(12, 30)
 
     LaunchedEffect(projects) {
+        // v6.9.50：幽灵会话守卫——currentPid 指向已删除的项目时立刻回正
+        // （此前删除会话后 lastPid 未复位，恢复进来整段对话跑在幽灵 pid 上：标题栏显示兜底的
+        //  「新会话」，写章报「项目不存在/不在骨架中」，卡片则变成看不见的孤儿数据）
+        if (currentPid != 0L && projects.none { it.id == currentPid }) {
+            currentPid = projects.firstOrNull()?.id ?: 0L
+        }
         if (currentPid == 0L && ChatSessionMemory.lastPid == 0L && projects.isNotEmpty()) {
             currentPid = projects.first().id
         }
@@ -826,8 +833,11 @@ private fun UserBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: C
                 modifier = Modifier
                     .background(th.userBubble, RoundedCornerShape(18.dp).copy(bottomEnd = RoundedCornerShape(4.dp).bottomEnd))
             ) {
-                Text(m.content, color = th.userText, fontFamily = font, fontSize = size.sp, lineHeight = (size * 1.7).sp,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                // v6.9.50：长按可选中/复制聊天文字
+                SelectionContainer {
+                    Text(m.content, color = th.userText, fontFamily = font, fontSize = size.sp, lineHeight = (size * 1.7).sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                }
             }
             Text(timeFmt(m.createdAt), color = TextSub, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp, end = 4.dp))
         }
@@ -842,9 +852,12 @@ private fun AiBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: Cha
                 modifier = Modifier
                     .background(th.aiBubble, RoundedCornerShape(18.dp).copy(bottomStart = RoundedCornerShape(4.dp).bottomStart))
             ) {
-                Text(m.content, color = th.aiText, fontFamily = font, fontSize = size.sp,
-                    lineHeight = (size * 1.7).sp, textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                // v6.9.50：长按可选中/复制聊天文字
+                SelectionContainer {
+                    Text(m.content, color = th.aiText, fontFamily = font, fontSize = size.sp,
+                        lineHeight = (size * 1.7).sp, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+                }
             }
             Text(timeFmt(m.createdAt), color = TextSub, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp))
         }
@@ -862,13 +875,18 @@ private fun ToolBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th: C
             modifier = Modifier.widthIn(max = bubbleMax)
         ) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                Text(lines.firstOrNull() ?: "", color = th.aiText, fontWeight = FontWeight.Bold,
-                    fontSize = (size - 1).sp, textAlign = TextAlign.Center)
-                if (lines.size > 1) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(lines.drop(1).joinToString("\n"), color = th.aiText.copy(alpha = 0.85f),
-                        fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
-                        textAlign = TextAlign.Center)
+                // v6.9.50：长按可选中/复制
+                SelectionContainer {
+                    Column {
+                        Text(lines.firstOrNull() ?: "", color = th.aiText, fontWeight = FontWeight.Bold,
+                            fontSize = (size - 1).sp, textAlign = TextAlign.Center)
+                        if (lines.size > 1) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(lines.drop(1).joinToString("\n"), color = th.aiText.copy(alpha = 0.85f),
+                                fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
+                                textAlign = TextAlign.Center)
+                        }
+                    }
                 }
             }
         }
@@ -933,9 +951,12 @@ private fun SystemBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, fon
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier.widthIn(max = bubbleMax)
         ) {
-            Text(m.content, color = if (isErr) Color(0xFFB91C1C) else Color(0xFF8A6E2F),
-                fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+            // v6.9.50：长按可选中/复制
+            SelectionContainer {
+                Text(m.content, color = if (isErr) Color(0xFFB91C1C) else Color(0xFF8A6E2F),
+                    fontFamily = font, fontSize = (size - 2).sp, lineHeight = ((size - 2) * 1.6).sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
+            }
         }
     }
 }

@@ -27,8 +27,9 @@ object IntentRouter {
         if (raw.isBlank()) return null
 
         // 项目上下文必须是 long 才允许触发依赖项目的工具
+        // v6.9.50：还要校验项目真实存在——幽灵 pid（已删除）直接回退到第一个真实会话
         suspend fun needPid(): Long? {
-            if (currentPid != null && currentPid > 0L) return currentPid
+            if (currentPid != null && currentPid > 0L && Repo.dao.project(currentPid) != null) return currentPid
             val ps = Repo.dao.projectsFlow().first()
             if (ps.isEmpty()) return null
             return ps.first().id

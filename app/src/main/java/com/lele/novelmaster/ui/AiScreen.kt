@@ -378,6 +378,7 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
                                         thinkMode = v
                                         thinkResult = null
                                         if (v.isNotBlank()) runThinkTest()
+                                        else thinkResult = "↩️ 已切回「默认」：不发送思考参数，跟随模型自带行为。点右下「保存」生效。"
                                     },
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp)
                                 ) { Text(label, style = MaterialTheme.typography.labelLarge) }
@@ -387,6 +388,7 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
                                         thinkMode = v
                                         thinkResult = null
                                         if (v.isNotBlank()) runThinkTest()
+                                        else thinkResult = "↩️ 已切回「默认」：不发送思考参数，跟随模型自带行为。点右下「保存」生效。"
                                     },
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp)
                                 ) {
@@ -409,7 +411,11 @@ private fun ApiEditDialog(initial: ApiConfig?, onDismiss: () -> Unit) {
                         Text(
                             it,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (it.startsWith("✅")) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error
+                            color = when {
+                                it.startsWith("✅") -> MaterialTheme.colorScheme.secondary
+                                it.startsWith("↩️") -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.error
+                            }
                         )
                     }
                     if (thinkMode.isNotBlank() && !thinkTesting) {

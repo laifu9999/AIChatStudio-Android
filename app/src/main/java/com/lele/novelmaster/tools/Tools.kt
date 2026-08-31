@@ -163,6 +163,9 @@ object Tools {
         // v6.9.6：「写作禁忌」由写后自检系统维护，AI 不得创建/覆盖
         if (name == "写作禁忌") return ToolResult(false, "「写作禁忌」由系统自检自动维护，无需手动创建")
         if (name == "分章大纲" && category == "全书大纲") return ToolResult(false, "「分章大纲」卡由系统自动同步维护，无需手动创建")
+        // v6.9.50：项目必须真实存在——此前幽灵会话里 addCard 照样"成功"，卡片全变成看不见的孤儿数据
+        if (withContext(Dispatchers.IO) { Repo.dao.project(pid) } == null)
+            return ToolResult(false, "项目不存在", "当前会话已失效，请退出重新进入或新建会话后再操作")
         val prio = priority ?: when (category) {
             "设定圣经", "世界观", "主线剧情", "核心冲突", "剧情进度" -> 2
             "伏笔钩子" -> 1

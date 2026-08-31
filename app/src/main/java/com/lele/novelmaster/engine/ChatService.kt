@@ -77,11 +77,18 @@ object ChatService {
     /** 对外入口：返回最后插入的 assistant 消息 id（供界面跳过重复的打字机动画） */
     suspend fun handle(
         context: Context,
-        currentPid: Long,
+        pid0: Long,
         input: String,
         onProjectChange: (Long) -> Unit,
         onStream: suspend (String) -> Unit = {}
     ): Long? {
+        // v6.9.50：幽灵会话守卫——pid 指向已删除的项目时，先回正到真实会话（此前会话整体跑在
+        // 不存在的 pid 上：addCard/listFiles 照样"成功"但数据成孤儿，写章则报「项目不存在」）
+        val currentPid = if (pid0 > 0L && Repo.dao.project(pid0) == null) {
+            val np = Repo.dao.projectsFlow().first().firstOrNull()?.id ?: 0L
+            if (np > 0L) onProjectChange(np)
+            np
+        } else pid0
         Repo.dao.insertMessage(Message(projectId = currentPid, role = "user", content = input))
 
         // v6.5：作者在本地文件里改过的内容先同步回库（磁盘→库），并合并重复的单卡分类——
