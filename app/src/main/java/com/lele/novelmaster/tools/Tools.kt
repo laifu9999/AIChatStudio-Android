@@ -736,8 +736,16 @@ object Tools {
     }
 
     /** v6.9.42 体检一键修复：体检报告只推理出问题、没改卡时，作者在报告里点「确认修复」→
-     *  读最近一份体检报告，让 AI 按报告逐张给出修复内容，走 applyCheckLines 自动改卡并保存到项目文件 */
+     *  读最近一份体检报告，让 AI 按报告逐张给出修复内容，走 applyCheckLines 自动改卡并保存到项目文件
+     *  v6.9.44：与「设定体检」共用同一把闸门——修复也是一次大 AI 调用（同一模型），若允许并行，
+     *  两个请求会被同一 API Key 串行排队，后发的那个 5 分钟收不到首字节被看门狗误杀（用户实测踩坑） */
     suspend fun cardsApplyRepair(pid: Long): ToolResult {
+        if (!cardsCheckGate.compareAndSet(false, true))
+            return ToolResult(false, "设定体检/修复正在进行中，请等它完成再试（一般几分钟）。")
+        return try { cardsApplyRepairInner(pid) } finally { cardsCheckGate.set(false) }
+    }
+
+    private suspend fun cardsApplyRepairInner(pid: Long): ToolResult {
         val appCtx = Repo.app ?: return ToolResult(false, "无法访问存储")
         val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
         val f = d.listFiles { x -> x.name.startsWith("设定体检报告-") && x.name.endsWith(".md") }
@@ -756,7 +764,8 @@ object Tools {
                 "要求：\n" +
                 "1) 全程只用简体中文，严禁英文，严禁输出思考过程/内心分析，直接给结果；\n" +
                 "2) 只处理报告里指出的、能用改文字解决的真实矛盾；严禁动「剧情进度」「分章大纲」「写作禁忌」卡；\n" +
-                "3) 只输出格式行，不要任何其他解释。\n" +
+                "3) 跨卡统一：同一事实（能力代价、关键事件的经过、专有名词与数字）在多张卡里必须统一成同一个版本，需要改几张就分几条【修复】输出，严禁改一张留一张互相矛盾；\n" +
+                "4) 只输出格式行，不要任何其他解释。\n" +
                 "输出格式严格：\n" +
                 "【修复】每条一行：卡名｜修正后的完整卡片内容（最多8条）\n" +
                 "【精简】每条一行：卡名｜去重后的完整卡片内容（最多8条，每卡60~200字，只留干货）\n" +

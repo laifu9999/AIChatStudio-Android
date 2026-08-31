@@ -166,7 +166,7 @@ object WriterEngine {
                 com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
                 dao.insertMessage(
                     Message(projectId = projectId, role = "tool", kind = "tool",
-                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
+                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章…")
                 )
                 seed = dao.chapters(projectId)
                     .filter { it.chapterIndex in f..t && it.outline.isNotBlank() }
@@ -188,9 +188,11 @@ object WriterEngine {
                             applyOutlines(dao, chapters, reply)
                             val done = doneCount.addAndGet(batch.size)
                             com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
+                            // v6.9.44：并行批次完成顺序随机，不再显示「第f~t章」区间（区间乱序让作者误以为大纲生成乱序；
+                            // 内容始终按章号写入，与完成顺序无关），只报累计进度，数字天然递增
                             dao.insertMessage(
                                 Message(projectId = projectId, role = "tool", kind = "tool",
-                                    content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
+                                    content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章…")
                             )
                         }
                     }
@@ -1552,10 +1554,7 @@ object AutoWriteManager {
      */
     fun stopProjectTasks(pid: Long) {
         stop(pid)
-        runCatching {
-            val cs = com.lele.novelmaster.engine.ChatEngine.state.value
-            if (cs.busy && cs.pid == pid) com.lele.novelmaster.engine.ChatEngine.stop()
-        }
+        runCatching { com.lele.novelmaster.engine.ChatEngine.stop(pid) }
         runCatching { com.lele.novelmaster.engine.AppTasks.cancelProject(pid) }
     }
 }

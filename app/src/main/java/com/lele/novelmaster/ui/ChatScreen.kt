@@ -149,7 +149,8 @@ fun ChatScreen(nav: NavHostController) {
     // v6.9.35：忙闲/流式文本/计时全部来自 ChatEngine 单例——生成流不再挂在界面组合上，
     // 点功能按钮、跳转页面、切会话都不会中断生成，回来还能看到实时进度。
     // busy 只在「本次生成所属的会话」里显示，其他会话照常可操作。
-    val cs by com.lele.novelmaster.engine.ChatEngine.state.collectAsState()
+    val cs = com.lele.novelmaster.engine.ChatEngine.state.collectAsState().value[currentPid]
+        ?: com.lele.novelmaster.engine.ChatEngine.Ui(pid = currentPid)
     val busy = cs.busy && cs.pid == currentPid
     val streamingText = if (cs.pid == currentPid) cs.streamingText else null
     val elapsedSec = cs.elapsedSec
@@ -216,8 +217,9 @@ fun ChatScreen(nav: NavHostController) {
     fun send(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
-        // v6.9.35：busy 时不再静默忽略，也不打断正在进行的生成——提示用户
-        if (com.lele.novelmaster.engine.ChatEngine.busy()) {
+        // v6.9.35：本书 busy 时不再静默忽略，也不打断正在进行的生成——提示用户
+        // v6.9.44：只看本书；其他书在生成不影响本会话发送（多本书可同时各聊各的）
+        if (com.lele.novelmaster.engine.ChatEngine.busy(currentPid)) {
             android.widget.Toast.makeText(ctx, "正在生成中，请等当前回复完成，或点发送键停止", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
@@ -228,8 +230,9 @@ fun ChatScreen(nav: NavHostController) {
 
     fun onSendClick() {
         // v6.3：发送键=主动停止（唯一会中断生成的方式）
-        if (com.lele.novelmaster.engine.ChatEngine.busy()) {
-            com.lele.novelmaster.engine.ChatEngine.stop()
+        // v6.9.44：只停本书的生成——其他书在生成时本会话照常发送，严禁误停别人的
+        if (com.lele.novelmaster.engine.ChatEngine.busy(currentPid)) {
+            com.lele.novelmaster.engine.ChatEngine.stop(currentPid)
             // v6.9.34：只停当前这本书的自动写作（其他并行书不受影响）
             if (AutoWriteManager.isRunning(currentPid)) AutoWriteManager.stop(currentPid)
             return
