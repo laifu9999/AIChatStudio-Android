@@ -62,9 +62,11 @@ fun CardsScreen(nav: NavController, pid: Long) {
     var showAdd by remember { mutableStateOf(false) }
     var editCard by remember { mutableStateOf<SettingCard?>(null) }
     var showInspire by remember { mutableStateOf(false) }
-    var outlineBusy by remember { mutableStateOf(false) }
+    // v6.9.36：体检/补大纲迁到 AppTasks 进程级宿主——离开页面任务照常完成，忙闲从全局取
+    val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
+    val outlineBusy = "outline:$pid" in appTasks.running
     // v6.9.27：页内设定体检（summary to detail；ok=false 时 title=体检未执行、detail=原因）
-    var checkBusy by remember { mutableStateOf(false) }
+    val checkBusy = "cardsCheck:$pid" in appTasks.running
     var checkResult by remember { mutableStateOf<Pair<String, String>?>(null) }
     // v6.9.28：分章大纲系统卡点按查看全文
     var viewCard by remember { mutableStateOf<SettingCard?>(null) }
@@ -85,12 +87,11 @@ fun CardsScreen(nav: NavController, pid: Long) {
             TextButton(
                 enabled = !checkBusy,
                 onClick = {
-                    checkBusy = true
-                    scope.launch(Dispatchers.IO) {
+                    // v6.9.36：跑在 AppTasks 单例——中途离开本页，体检照常完成并落库
+                    com.lele.novelmaster.engine.AppTasks.launch("cardsCheck:$pid") {
                         val r = Tools.cardsCheck(pid)
                         withContext(Dispatchers.Main) {
                             checkResult = if (r.ok) r.summary to r.detail else "体检未执行" to r.summary
-                            checkBusy = false
                         }
                     }
                 }
@@ -114,10 +115,9 @@ fun CardsScreen(nav: NavController, pid: Long) {
                     Button(
                         enabled = !outlineBusy,
                         onClick = {
-                            outlineBusy = true
-                            scope.launch(Dispatchers.IO) {
+                            // v6.9.36：跑在 AppTasks 单例——离开页面补大纲照常完成
+                            com.lele.novelmaster.engine.AppTasks.launch("outline:$pid") {
                                 Tools.generateOutlines(pid)
-                                withContext(Dispatchers.Main) { outlineBusy = false }
                             }
                         },
                         modifier = Modifier.weight(1f)
