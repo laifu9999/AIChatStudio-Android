@@ -210,12 +210,14 @@ object Prompts {
         existing: List<Chapter>,
         from: Int,
         to: Int,
-        count: Int
+        count: Int,
+        seed: List<Chapter> = emptyList()
     ): String = buildString {
         appendLine("【书名】${project.title}　【类型】${project.genre}")
         if (project.description.isNotBlank()) appendLine("【简介】${project.description}")
         // v6.9.25：分章大纲卡不注入（旧大纲已由下方 takeLast(20) 窗口覆盖；600章整卡数万字）；核心卡预算截断
-        val core = cards.filter { it.name != "分章大纲" && (it.priority == 2 || it.category in CardCategories.KEY_CATS) }
+        // v6.9.43：人物设定必须注入（此前不在 KEY_CATS，priority!=2 时大纲生成完全看不到人物——大纲与人物脱节、后面的章忘记前面人物的根因）
+        val core = cards.filter { it.name != "分章大纲" && (it.priority == 2 || it.category in CardCategories.KEY_CATS || it.category == "人物设定") }
         if (core.isNotEmpty()) {
             appendLine("【核心设定】")
             appendLine(budgetCardBlock(core, budget = 3200, perCard = 600))
@@ -225,11 +227,17 @@ object Prompts {
             appendLine("【已有大纲（保持连贯，不要重复已写内容）】")
             lastOutlines.forEach { appendLine("第${it.chapterIndex}章《${it.title}》:${it.outline}") }
         }
+        // v6.9.43：开篇基调大纲——并行批次据此保持前后一致（后面的章必须承接前面的章，严禁各写各的）
+        if (seed.isNotEmpty()) {
+            appendLine("【开篇大纲（全书基调与人物出场基准，本批章节必须自然承接以下剧情与人物线，严禁推翻或另起炉灶）】")
+            seed.forEach { appendLine("第${it.chapterIndex}章《${it.title}》:${it.outline}") }
+        }
         appendLine()
         append("请为第${from}章到第${to}章编写分章大纲，共${count}行。\n" +
             "硬性格式要求：①必须覆盖第${from}章到第${to}章的每一章，严禁跳章、漏章、合并章；②每章严格一行，每行必须以「第N章《标题》：」开头，标题2~8字必填，没有标题按不合格处理；③除此之外不输出任何其他文字。\n" +
             "每行格式示例：第${from}章《夜闯断魂崖》：出场人物…关键事件…【钩子】=具体事件。\n" +
-            "质量要求：每章都要有冲突升级或新信息，禁止日常流水账章；每3~5章安排一个小高潮；每章末尾写明【钩子】=具体事件（危机/反转/来客/秘密），不要空泛悬念。")
+            "质量要求：每章都要有冲突升级或新信息，禁止日常流水账章；每3~5章安排一个小高潮；每章末尾写明【钩子】=具体事件（危机/反转/来客/秘密），不要空泛悬念。\n" +
+            "连贯性硬要求：①每章大纲里出场的人物必须来自【核心设定】的人物卡，言行符合其性格与目标，严禁凭空冒出新角色顶替主要人物；②剧情必须贴着【核心设定】的世界观规则与设定圣经展开，能力/资源不得违反体系；③本批章节要落在【核心设定】全书大纲的对应阶段上，推进阶段目标，不得偏离主线自说自话。")
     }
 
     /** v5.7：灵感分析 → 生成设定卡（按"还缺哪些分类"精准下单，一次只补一批，内容能写足）；v6.9.35 各类卡分工明确、严禁互抄 */

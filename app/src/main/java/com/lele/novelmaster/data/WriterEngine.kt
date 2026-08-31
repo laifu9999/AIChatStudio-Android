@@ -144,16 +144,41 @@ object WriterEngine {
                 ?: return "请先在【AI模型】中添加并启用一个模型"
             // v6.9.41：批次并行（3路并发）——之前 300 章要串行跑 30 批，每批都要等上一批，太慢；
             // 现在同时跑 3 批，速度约 3 倍。进度实时上报（设定卡页可见），聊天里仍按批播报
-            val batches = missing.chunked(10)
+            // v6.9.43：第一批先跑定基调——其余批次全部注入开篇大纲作为承接基准
+            //（此前并行批各拿同一份旧快照互相失忆，是「后面的章忘记前面的章」的根因之一）
+            val batches = missing.sortedBy { it.chapterIndex }.chunked(10)
             val sem = Semaphore(3)
             val doneCount = java.util.concurrent.atomic.AtomicInteger(0)
+            var seed: List<Chapter> = emptyList()
+            if (batches.isNotEmpty()) {
+                val first = batches.first()
+                val f = first.first().chapterIndex
+                val t = first.last().chapterIndex
+                val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, first.size)
+                val reply = AiClient.chat(
+                    cfg,
+                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
+                    temperature = 0.7,
+                    maxTokens = 6000
+                )
+                applyOutlines(dao, chapters, reply)
+                val done = doneCount.addAndGet(first.size)
+                com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
+                dao.insertMessage(
+                    Message(projectId = projectId, role = "tool", kind = "tool",
+                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章（第${f}~${t}章）")
+                )
+                seed = dao.chapters(projectId)
+                    .filter { it.chapterIndex in f..t && it.outline.isNotBlank() }
+                    .sortedBy { it.chapterIndex }.takeLast(3)
+            }
             coroutineScope {
-                for (batch in batches) {
+                for (batch in batches.drop(1)) {
                     launch {
                         sem.withPermit {
                             val f = batch.first().chapterIndex
                             val t = batch.last().chapterIndex
-                            val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size)
+                            val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size, seed)
                             val reply = AiClient.chat(
                                 cfg,
                                 listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
@@ -184,7 +209,9 @@ object WriterEngine {
                 for (batch in stillMissing.chunked(5)) {
                     val f = batch.first().chapterIndex
                     val t = batch.last().chapterIndex
-                    val user = Prompts.buildOutlineUser(project, cards, chaptersNow, f, t, batch.size)
+                    // v6.9.43：逐批取最新快照——前一小批刚补的大纲立刻成为下一批的上下文
+                    val snap = dao.chapters(projectId)
+                    val user = Prompts.buildOutlineUser(project, cards, snap, f, t, batch.size)
                     val reply = AiClient.chat(
                         cfg,
                         listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),

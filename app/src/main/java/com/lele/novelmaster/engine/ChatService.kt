@@ -49,6 +49,11 @@ object ChatService {
 
     private val BLOCK_RE = Regex("<tool>\\s*(.*?)\\s*</tool>", RegexOption.DOT_MATCHES_ALL)
 
+    /** v6.9.43：裸 JSON 工具块（名字在花括号内），如 {"name":"updateProject","args":{…}} */
+    private val RAW_JSON_RE: Regex by lazy {
+        Regex("\\{\\s*\"name\"\\s*:\\s*\"(" + KNOWN_TOOLS.sortedByDescending { it.length }.joinToString("|") + ")\"")
+    }
+
     private val CONTINUE_RE = Regex(
         "^(继续|接着|往下|然后呢|还有呢|没写完|写下去|continue|go\\s*on)",
         RegexOption.IGNORE_CASE
@@ -218,6 +223,8 @@ object ChatService {
         fun visibleOf(seg: String): String {
             var v = stripThinking(seg)
             v = BLOCK_RE.replace(v, "")
+            // v6.9.43：裸 JSON 工具块不展示（流式中正在输出/未闭合时，从起点截断到末尾）
+            RAW_JSON_RE.find(v)?.let { v = v.substring(0, it.range.first) }
             var i = v.indexOf("<tool")
             if (i >= 0) v = v.substring(0, i)
             i = v.indexOf("```")
@@ -493,7 +500,8 @@ object ChatService {
                 "· 收到「继续」时：只补还没生成的部分，**严禁重复生成已保存过的设定卡**（已保存清单见下方），直接从缺失的分类接着做。\n" +
                 "· 设定卡没建全之前，每一轮回复都**必须包含工具块**；严禁只回「好的」「马上继续」「继续为你生成」这类文字敷衍——没做完就立刻接着用工具做，全部做完才允许纯文字收尾。\n" +
                 "· 严禁「（略）」「（以下省略）」「未完待续」「由于篇幅限制」这类偷懒输出，也不要解释自己省略了什么。\n" +
-                "· 每个工具块的 JSON 必须完整闭合，content 里换行用 \\n、引号用 \\\" 转义，不要用中文引号。\n"
+                "· 每个工具块的 JSON 必须完整闭合，content 里换行用 \\n、引号用 \\\" 转义，不要用中文引号。\n" +
+                "· 建设定卡（addCard）前先把整本书当成一个完整故事想清楚，再动笔：所有卡必须围绕同一主线互相勾连——人物有明确的动机/目标/关系网，世界观规则直接影响主线冲突，伏笔钩子都能在全书大纲里找到回收点；严禁各写各的、前后矛盾。内容要具体（有名字、地点、规则、代价），不要空话套话。\n"
         )
         if (continuing) {
             appendLine()
@@ -608,6 +616,25 @@ object ChatService {
                 val parsed = parseToolLenient(leftover.groupValues[1] + closed)
                 if (parsed != null && exec(parsed.first, parsed.second)) {
                     work = work.substring(0, leftover.range.first)
+                }
+            }
+        }
+
+        // ⑥ v6.9.43：裸 JSON 块 {"name":"工具名","args":{…}}（名字在花括号内，④⑤的"工具名{"格式抓不到）
+        for (m in RAW_JSON_RE.findAll(work).toList().reversed()) {
+            val braceIdx = m.range.first
+            val json = extractBalancedJson(work, braceIdx)
+            if (json != null) {
+                val parsed = parseToolLenient(json)
+                if (parsed != null && exec(parsed.first, parsed.second)) {
+                    work = work.removeRange(braceIdx, braceIdx + json.length)
+                }
+            } else {
+                // 截断的裸 JSON（结尾无闭合 }）：自动补全后仍然执行，整段从正文剔除
+                val closed = autocloseJson(work.substring(braceIdx))
+                val parsed = parseToolLenient(closed)
+                if (parsed != null && exec(parsed.first, parsed.second)) {
+                    work = work.substring(0, braceIdx)
                 }
             }
         }
