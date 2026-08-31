@@ -35,6 +35,20 @@ object IntentRouter {
             return ps.first().id
         }
 
+        // v6.9.51：创作请求/长文本守卫——必须放在一切本地路由之前。
+        // 之前长灵感/长要求里出现「第一章」「大纲」「伏笔」「体检」等词，会被 substring 正则误命中，
+        // 截胡成「写第N章/读第N章」→ 回「没有可处理的章节」，AI 根本没看到完整内容。
+        // 现在长文本一律交给 AI 完整理解：内容是写小说的就按用户的详细要求写。
+        val creativeReq = Regex("帮写|帮我写|写一[本个部]|来一[本个部]|创作|写个|开一[本个部]").containsMatchIn(raw)
+        if (raw.length >= 60 || (creativeReq && raw.length >= 30)) {
+            val inspHead = Regex("^(灵感|我的灵感|我想写|帮我构思|根据以下灵感)\\s*[:：]?").find(raw)
+            if (inspHead == null) return null   // 交给 AI 按完整内容处理
+            // 明确的灵感前缀长文本仍走专用灵感管线（去掉前缀取正文）
+            val text = raw.substring(inspHead.value.length).trim()
+            val pid = needPid() ?: return ToolResult(false, "请先创建一本书或告诉我写哪一本")
+            return Tools.inspireFromText(pid, text, context)
+        }
+
         val t = raw.lowercase()
         val noAi = t.replace(Regex("\\s"), "")
 
@@ -73,7 +87,7 @@ object IntentRouter {
         // v5.5：本地快速改名 / 改目标章数（不用等 AI）
         // v6.0：创作请求（帮写…共36章）绝不能被这里的"改章数/改名"小路由截胡——
         //       之前「帮写一个家庭幸福的小说，共36章」只改了个章数就返回，AI 根本没开始写书
-        val creativeReq = Regex("帮写|帮我写|写一[本个部]|来一[本个部]|创作|写个|开一[本个部]").containsMatchIn(raw)
+        // v6.9.51：creativeReq 已上移到顶部守卫处声明
         if (!creativeReq) {
             Regex("(?:会话名|书名|小说名|改名叫)\\s*(?:改为|改成|为|叫)?\\s*[:：]?\\s*[《]?([^《》\\n]{1,20})[》]?").find(raw)?.let { m ->
                 val pid = needPid() ?: return@let
