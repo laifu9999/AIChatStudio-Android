@@ -706,28 +706,32 @@ private fun ReportBubble(m: Message, bubbleMax: androidx.compose.ui.unit.Dp, th:
 }
 
 /** v6.9.42：体检报告「确认修复」按钮——只在没有修改任何卡时出现。
- *  点击后读最近一份体检报告，AI 按报告逐张给出修复内容，自动改库+写回项目文件 */
+ *  点击后读最近一份体检报告，AI 按报告逐张给出修复内容，自动改库+写回项目文件。
+ *  v6.9.42b：迁移到 AppTasks 进程级宿主——铁律「AI 长任务不放 Composable scope」，
+ *  此前跑在 rememberCoroutineScope 里，点完切走页面修复会被静默取消。 */
 @Composable
 private fun ReportRepairButton(m: Message, th: ChatThemeColors, size: Int, onDone: () -> Unit = {}) {
     if (!m.content.contains("未修改任何卡")) return
-    val scope = rememberCoroutineScope()
-    var running by remember { mutableStateOf(false) }
+    val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
+    val key = "cardsRepair:${m.projectId}"
+    val running = key in appTasks.running
+    val label = when {
+        running -> appTasks.progress[key] ?: "⏳ 正在按体检报告修复设定卡，请稍候…（可离开页面，修复照常进行）"
+        else -> "🔧 确认根据体检推理修改设定卡（自动修复并保存）"
+    }
     Text(
-        if (running) "⏳ 正在按体检报告修复设定卡，请稍候…" else "🔧 确认根据体检推理修改设定卡（自动修复并保存）",
-        color = if (running) th.aiText.copy(alpha = 0.5f) else MaterialTheme.colorScheme.primary,
+        label,
+        color = if (running) th.aiText.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primary,
         fontSize = (size - 1).sp, fontWeight = FontWeight.Bold,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = !running) {
-                running = true
-                scope.launch {
-                    val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        com.lele.novelmaster.tools.Tools.cardsApplyRepair(m.projectId)
-                    }
+                // AppTasks.launch 同名任务已在跑会返回 null（防重复点击）；scope=进程级 IO，切页面不取消
+                com.lele.novelmaster.engine.AppTasks.launch(key) {
+                    val r = com.lele.novelmaster.tools.Tools.cardsApplyRepair(m.projectId)
                     ChatService.appendToolResult(m.projectId, r)
-                    running = false
-                    onDone()
                 }
+                onDone()
             }
             .padding(vertical = 6.dp),
         textAlign = TextAlign.Center
