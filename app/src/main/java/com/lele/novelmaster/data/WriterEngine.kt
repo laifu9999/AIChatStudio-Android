@@ -20,12 +20,13 @@ import java.util.Locale
  */
 object WriterEngine {
 
-    /** 会话项目子文件夹（正文/大纲/设定卡…），context 为空时返回 null（仅跳过落盘，不影响写作） */
-    private fun dir(context: Context?, pid: Long, sub: String): File? {
+    /** 会话项目子文件夹（正文/大纲/设定卡…），context 为空时返回 null（仅跳过落盘，不影响写作）。
+     *  v6.9.32：create=false 用于清理/读取旧路径——只定位不 mkdirs，避免清出空文件夹（用户踩坑：多出「大纲」文件夹） */
+    private fun dir(context: Context?, pid: Long, sub: String, create: Boolean = true): File? {
         if (context == null) return null
         return try {
             val base = File(context.filesDir, "novels/$pid/files/$sub")
-            base.mkdirs()
+            if (create) base.mkdirs()
             base
         } catch (e: Exception) { null }
     }
@@ -357,8 +358,8 @@ object WriterEngine {
         val dao = Repo.dao
         dao.cards(projectId).filter { it.name == "分卷大纲" }.forEach { dao.deleteCard(it) }
         try {
-            dir(context, projectId, "设定卡/全书大纲")?.let { d -> File(d, "分卷大纲.md").delete() }
-            dir(context, projectId, "设定卡/辅助设定")?.let { d -> File(d, "分卷大纲.md").delete() }
+            dir(context, projectId, "设定卡/全书大纲", create = false)?.let { d -> File(d, "分卷大纲.md").delete() }
+            dir(context, projectId, "设定卡/辅助设定", create = false)?.let { d -> File(d, "分卷大纲.md").delete() }
         } catch (_: Exception) { }
     }
 
@@ -393,25 +394,44 @@ object WriterEngine {
             dir(context, projectId, "设定卡/分章大纲")?.let { d ->
                 File(d, "分章大纲.md").writeText("# 全书大纲 · 分章大纲（章节标题以此为准）\n\n$text\n", Charsets.UTF_8)
             }
-            // v6.7：清理旧位置的重复文件（辅助设定/ 与顶级 大纲/ 下的旧分章大纲）
-            dir(context, projectId, "设定卡/辅助设定")?.let { d -> File(d, "分章大纲.md").delete() }
-            dir(context, projectId, "大纲")?.let { d -> File(d, "分章大纲.md").delete() }
+            // v6.7：清理旧位置的重复文件（辅助设定/ 与顶级 大纲/ 下的旧分章大纲）——只定位不创建（v6.9.32）
+            dir(context, projectId, "设定卡/辅助设定", create = false)?.let { d -> File(d, "分章大纲.md").delete() }
+            dir(context, projectId, "大纲", create = false)?.let { d -> File(d, "分章大纲.md").delete() }
         } catch (_: Exception) { }
     }
 
     /** 解析AI返回的大纲行并写回章节 */
     private suspend fun applyOutlines(dao: NovelDao, chapters: List<Chapter>, reply: String) {
-        val regex = Regex("第\\s*(\\d+)\\s*章")
+        // v6.9.32 加固：1) 只认行首「第N章」——AI 说明文字里出现「第N章」不再被当成大纲写进章节；
+        // 2) 章号后含「缺失/说明/如下」等 meta 词的行直接跳过（用户踩坑：说明文字被写进大纲）；
+        // 3) 项目符号续行并入上一章（支持多行大纲）；4) 结束时统一写回
+        val regex = Regex("^第\\s*(\\d+)\\s*章")
+        val meta = Regex("缺失|暂缺|待补|已补|补齐|补全|说明|如下|示例|格式|汇总|整理")
+        class Acc(val ch: Chapter, var title: String, var outline: String)
+        val acc = LinkedHashMap<Int, Acc>()
+        var last: Acc? = null
         for (raw in reply.lines()) {
             val line = raw.trim()
             if (line.isEmpty()) continue
-            val m = regex.find(line) ?: continue
+            val m = regex.find(line)
+            if (m == null) {
+                val a = last ?: continue
+                if (line.length in 4..150 && !meta.containsMatchIn(line) &&
+                    (line.startsWith("·") || line.startsWith("•") || line.startsWith("-") ||
+                        line.startsWith("*") || line.startsWith("——") || Regex("^\\d+[.、)]").containsMatchIn(line))
+                ) {
+                    a.outline = (a.outline + "；" + line.trimStart('·', '•', '-', '*', ' ', '—')).take(400)
+                }
+                continue
+            }
             val idx = m.groupValues[1].toIntOrNull() ?: continue
             val ch = chapters.firstOrNull { it.chapterIndex == idx } ?: continue
             var rest = line.substring(m.range.last + 1).trim()
+            val sep = rest.indexOfFirst { it == '：' || it == ':' }
+            val headPart = if (sep >= 0) rest.substring(0, sep) else rest.take(16)
+            if (meta.containsMatchIn(headPart)) continue
             var title = ch.title
             var outline = ch.outline
-            val sep = rest.indexOfFirst { it == '：' || it == ':' }
             if (sep >= 0) {
                 val t = rest.substring(0, sep).trim().removeSurrounding("《", "》")
                 if (t.isNotBlank()) title = t
@@ -420,7 +440,13 @@ object WriterEngine {
                 outline = rest.removeSurrounding("《", "》").trim()
             }
             if (outline.isNotBlank() || title != ch.title) {
-                dao.updateChapter(ch.copy(title = title, outline = outline))
+                last = Acc(ch, title, outline)
+                acc[idx] = last
+            }
+        }
+        for (a in acc.values) {
+            if (a.outline.isNotBlank() || a.title != a.ch.title) {
+                dao.updateChapter(a.ch.copy(title = a.title, outline = a.outline))
             }
         }
     }
@@ -894,7 +920,7 @@ object WriterEngine {
     /** v6.9.13：读取自检记录，返回每章最新状态 Map<章号, pass|fixed|suspect>（后写覆盖先写=最新） */
     fun readSelfCheckRecord(pid: Long, context: Context?): Map<Int, String> {
         return try {
-            val f = dir(context, pid, "自检记录")?.let { File(it, "记录.txt") } ?: return emptyMap()
+            val f = dir(context, pid, "自检记录", create = false)?.let { File(it, "记录.txt") } ?: return emptyMap()
             if (!f.exists()) return emptyMap()
             f.readLines(Charsets.UTF_8).mapNotNull { l ->
                 val p = l.split("|")
