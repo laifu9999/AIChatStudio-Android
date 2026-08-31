@@ -18,6 +18,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -68,8 +69,8 @@ fun EditorScreen(nav: NavController, chapterId: Long) {
         editing = c.content.isBlank()
     }
 
-    // v6.9.37：落库逻辑抽成可在任意线程调用的 persist，save() 与 AI续写共用
-    fun persist(content: String, t: String) {
+    // v6.9.37：落库逻辑抽成可在任意协程调用的 persist，save() 与 AI续写共用
+    suspend fun persist(content: String, t: String) {
         val latest = Repo.dao.chapter(chapterId) ?: return
         Repo.dao.updateChapter(
             latest.copy(
