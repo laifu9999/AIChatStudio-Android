@@ -54,6 +54,13 @@ object ChatService {
         Regex("\\{\\s*\"name\"\\s*:\\s*\"(" + KNOWN_TOOLS.sortedByDescending { it.length }.joinToString("|") + ")\"")
     }
 
+    /** v6.9.45：伪造执行记录——弱模型（glm-4-flash）学舌注入格式，输出「[系统执行记录·已成功，勿重复] 已保存XX：无」，
+     *  实际没有调用任何工具、什么都没保存，却让模型自己以为保存过了，后续再也不输出工具块 → 设定卡生成不了 */
+    private val FORGED_MARK_RE = Regex("\\[系统执行记录|已保存[^\\n]{0,30}：\\s*无")
+
+    /** v6.3：口头保存检测（本轮没执行工具却声称已保存） */
+    private val CLAIM_SAVED_RE = Regex("已保存|已存好|保存好了|已经保存|已写入|已建立|已生成设定卡|已创建设定|已经写好|已存到")
+
     private val CONTINUE_RE = Regex(
         "^(继续|接着|往下|然后呢|还有呢|没写完|写下去|continue|go\\s*on)",
         RegexOption.IGNORE_CASE
@@ -157,13 +164,21 @@ object ChatService {
             return out
         }
 
+        // v6.9.45：去重命中标记——去重路径 return true 但并没真的执行工具，
+        // 不能让调用点把它计入 executed（否则「口头保存」检测永远失效）
+        var lastDedup = false
+
         suspend fun runTool(rawName: String, rawArgs: JSONObject): Boolean {
             val name = rawName.trim()
             val args = cleanArgs(rawArgs)
+            lastDedup = false
             if (name !in KNOWN_TOOLS) return false
             val key = name + "|" + args.toString()
             // 只对"带参数"的调用去重（无参工具如 writeNextChapter 允许连发多次）
-            if (args.length() > 0 && !executedKeys.add(key)) return true
+            if (args.length() > 0 && !executedKeys.add(key)) {
+                lastDedup = true
+                return true
+            }
 
             // v5.6：已有会话时，AI 再怎么误调 createProject 也一律转成"改当前会话"——代码级兜底，绝不跳会话
             if (name == "createProject" && pid > 0L) {
@@ -208,7 +223,7 @@ object ChatService {
             if (ms.size > drained) {
                 for (k in drained until ms.size) {
                     val p = parseToolLenient(ms[k].groupValues[1])
-                    if (p != null && runTool(p.first, p.second)) executed++
+                    if (p != null && runTool(p.first, p.second) && !lastDedup) executed++
                 }
                 drained = ms.size
             }
@@ -229,6 +244,9 @@ object ChatService {
             if (i >= 0) v = v.substring(0, i)
             i = v.indexOf("```")
             if (i >= 0) v = v.substring(0, i)
+            // v6.9.45：剔除 AI 学舌伪造的「[系统执行记录…]」「已保存××：无」行——
+            // 这些不是真的系统回执，是模型模仿注入格式输出的假记录，绝不能显示/落库
+            v = v.lines().filterNot { FORGED_MARK_RE.containsMatchIn(it) }.joinToString("\n")
             return v.replace(Regex("\\n{3,}"), "\n\n").trimEnd()
         }
 
@@ -267,8 +285,11 @@ object ChatService {
             val msgs = mutableListOf<ChatMsg>(ChatMsg("system", sysText))
             recent.forEach { m ->
                 when {
-                    m.kind == "text" ->
-                        msgs.add(ChatMsg(if (m.role == "user") "user" else "assistant", m.content.take(8000)))
+                    m.kind == "text" -> {
+                        // v6.9.45：历史里可能已有学舌伪造的「[系统执行记录…]」行（旧版本落库的），注入前剔除防继续污染
+                        val c = m.content.lines().filterNot { FORGED_MARK_RE.containsMatchIn(it) }.joinToString("\n").trim()
+                        if (c.isNotBlank()) msgs.add(ChatMsg(if (m.role == "user") "user" else "assistant", c.take(8000)))
+                    }
                     // v5.9：把已执行的工具记录也喂给 AI —— 否则「继续」时它不知道已经存过什么，
                     // 会从世界观/人物设定重新开始生成，永远走不出来
                     m.kind == "tool" && m.role == "tool" ->
@@ -343,7 +364,7 @@ object ChatService {
                 drainBlocks()
                 var work = scanLooseTools(raw.toString()) { n, a ->
                     val ok = runTool(n, a)
-                    if (ok) executed++
+                    if (ok && !lastDedup) executed++
                     ok
                 }
                 val text = visibleOf(work).trim()
@@ -361,39 +382,52 @@ object ChatService {
 
                 if (canceled || dup) break
 
+                // ---------- 戳穿伪造/口头保存（v6.9.45 移入循环内：此前在循环外是死代码，且永不该漏过） ----------
+                // v6.9.45：伪造执行记录——弱模型学舌注入格式「[系统执行记录·已成功，勿重复] 已保存XX：无」，
+                // 实际没调任何工具；不论 executed 是否>0 都要纠偏（去重命中也不再虚增 executed）
+                val forged = FORGED_MARK_RE.containsMatchIn(shown.toString())
+                val claimSaved = forged || (executed == 0 && CLAIM_SAVED_RE.containsMatchIn(shown.toString()))
+
                 // ---------- 判断是否要自动续跑 ----------
                 val truncatedByLength = stopReason == "length"
                 val unterminated = raw.lastIndexOf("<tool>") > raw.lastIndexOf("</tool>")
                 val unfinished = text.length > 120 && !endsWell(text) && executed == 0
-                val needMore = (truncatedByLength || unterminated || unfinished) && round < MAX_ROUNDS
+                val needMore = (truncatedByLength || unterminated || unfinished || claimSaved) && round < MAX_ROUNDS
 
                 if (!needMore) break
 
                 // 组下一轮：把已经写出来的交给 AI 当上下文，让它接着写
-                msgs.add(ChatMsg("assistant", text.ifBlank { "（本轮已执行保存操作）" }))
-                msgs.add(
-                    ChatMsg(
-                        "user",
-                        "继续。严格接着上一条的最后一句话往下输出，不要重复已输出的内容，不要写「（续）」「接上文」「未完待续」这类话，直接把剩下的部分完整写完。"
+                msgs.add(ChatMsg("assistant", text.ifBlank { if (claimSaved) "（我没有真正保存任何内容）" else "（本轮已执行保存操作）" }))
+                if (claimSaved) {
+                    // v6.9.45：纠偏消息顶掉「继续」指令——伪造/口头保存时必须先真保存，不是接着写
+                    Repo.dao.insertMessage(
+                        Message(projectId = pid, role = "system", kind = "error",
+                            content = if (forged)
+                                "⚠️ 检测到你输出了伪造的「[系统执行记录…]」/「已保存××：无」文字——那只是系统注入的记录格式，你没有真正调用工具，**什么都没有保存**。\n" +
+                                    "现在请逐条输出 addCard 工具块，把该保存的设定真正保存一遍。"
+                            else
+                                "⚠️ 检测到本轮只是**口头说已保存**，实际没有执行任何保存工具——内容并没有真正存下来。\n" +
+                                    "请用 addCard（设定卡）或 writeFile/createFile（文件）的工具块重新保存一遍。")
                     )
-                )
+                    msgs.add(
+                        ChatMsg(
+                            "user",
+                            if (forged)
+                                "你刚才输出的「[系统执行记录…]」「已保存××：无」是伪造的执行记录，系统里根本没有这些卡——你没有调用任何工具，什么都没保存。现在请逐条输出工具块真正保存（设定用 addCard，格式：<tool>{\"name\":\"addCard\",\"args\":{\"category\":\"分类\",\"name\":\"名称\",\"content\":\"内容\"}}</tool>），一个工具块一条，立刻执行，严禁再输出任何「[系统执行记录」或「已保存××：无」字样的文字。"
+                            else
+                                "你刚才只是口头说保存，没有真正调用工具。现在请用工具块把上面的内容全部保存（设定用 addCard，文件用 writeFile），一个工具块一条，立刻执行。"
+                        )
+                    )
+                } else {
+                    msgs.add(
+                        ChatMsg(
+                            "user",
+                            "继续。严格接着上一条的最后一句话往下输出，不要重复已输出的内容，不要写「（续）」「接上文」「未完待续」这类话，直接把剩下的部分完整写完。"
+                        )
+                    )
+                }
                 onStream(shown.toString() + "\n\n…（内容较长，正在自动继续输出）")
                 delay(150)
-            }
-
-            // v6.3：戳穿"口头保存"——本轮没执行任何工具，文字里却说已保存/已写好
-            val claimSaved = executed == 0 && Regex(
-                "已保存|已存好|保存好了|已经保存|已写入|已建立|已生成设定卡|已创建设定|已经写好|已存到"
-            ).containsMatchIn(shown.toString())
-            if (claimSaved) {
-                Repo.dao.insertMessage(
-                    Message(projectId = pid, role = "system", kind = "error",
-                        content = "⚠️ 检测到本轮只是**口头说已保存**，实际没有执行任何保存工具——内容并没有真正存下来。\n" +
-                            "请用 addCard（设定卡）或 writeFile/createFile（文件）的工具块重新保存一遍。")
-                )
-                // 再给 AI 一次机会：明确要求用工具块补存
-                msgs.add(ChatMsg("assistant", shown.toString().take(3000)))
-                msgs.add(ChatMsg("user", "你刚才只是口头说保存，没有真正调用工具。现在请用工具块把上面的内容全部保存（设定用 addCard，文件用 writeFile），一个工具块一条，立刻执行。"))
             }
 
             if (deletedCurrent) {
@@ -502,7 +536,8 @@ object ChatService {
                 "· 严禁「（略）」「（以下省略）」「未完待续」「由于篇幅限制」这类偷懒输出，也不要解释自己省略了什么。\n" +
                 "· 每个工具块的 JSON 必须完整闭合，content 里换行用 \\n、引号用 \\\" 转义，不要用中文引号。\n" +
                 "· 建设定卡（addCard）前先把整本书当成一个完整故事想清楚，再动笔：所有卡必须围绕同一主线互相勾连——人物有明确的动机/目标/关系网，世界观规则直接影响主线冲突，伏笔钩子都能在全书大纲里找到回收点；严禁各写各的、前后矛盾。内容要具体（有名字、地点、规则、代价），不要空话套话。\n" +
-                "· 同一事实全书只能有一个版本：人物能力/禁术的代价（多少修为、什么后果）、关键事件（谁做了什么、怎么做的）、专有名词与数字，在所有卡、大纲里必须完全一致。输出新卡前先对照本次消息里已保存的卡核对，冲突时以已有卡为准；确实要改，就在本次输出里把相关卡一并重新保存成统一版本，严禁同一事实在不同卡里说法不同。\n"
+                "· 同一事实全书只能有一个版本：人物能力/禁术的代价（多少修为、什么后果）、关键事件（谁做了什么、怎么做的）、专有名词与数字，在所有卡、大纲里必须完全一致。输出新卡前先对照本次消息里已保存的卡核对，冲突时以已有卡为准；确实要改，就在本次输出里把相关卡一并重新保存成统一版本，严禁同一事实在不同卡里说法不同。\n" +
+                "· 「[系统执行记录·已成功，勿重复]」这种方括号标记是系统注入给你的历史回执格式，你的回复里**绝对禁止出现**这种标记；更严禁输出「已保存××：无」这类伪造记录——没有输出工具块并看到系统回执，就等于什么都没保存。要保存就输出工具块，一条一行，不要用任何文字假装保存。\n"
         )
         if (continuing) {
             appendLine()

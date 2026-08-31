@@ -224,6 +224,31 @@ fun ChatScreen(nav: NavHostController) {
             return
         }
         input = ""
+        // v6.9.45：欢迎页（pid=0）没有真实会话，此前直接把消息发进 pid=0，
+        // 弱模型在无会话上下文里容易跑偏、回复还会落在一个"不存在于会话列表"的虚拟页里——
+        // 表现为"默认打开应用不能聊天，要新建个会话才能聊"。现在发送前先自动建好会话再发。
+        if (currentPid == 0L) {
+            if (creatingSession) return
+            creatingSession = true
+            scope.launch {
+                val r = runCatching {
+                    com.lele.novelmaster.tools.Tools.createProject(
+                        title = "未命名会话", genre = "", desc = "",
+                        totalCh = 30, chWords = 1800, force = true
+                    )
+                }.getOrNull()
+                val np = r?.newProjectId ?: 0L
+                creatingSession = false
+                if (np > 0L) {
+                    currentPid = np
+                    com.lele.novelmaster.engine.ChatEngine.send(ctx, np, t) { newPid -> currentPid = newPid }
+                } else {
+                    // 建会话失败（极端情况）：走原路径兜底
+                    com.lele.novelmaster.engine.ChatEngine.send(ctx, 0L, t) { newPid -> currentPid = newPid }
+                }
+            }
+            return
+        }
         // 生成在 ChatEngine 单例里跑：任何界面操作/跳转都不会取消它
         com.lele.novelmaster.engine.ChatEngine.send(ctx, currentPid, t) { newPid -> currentPid = newPid }
     }
