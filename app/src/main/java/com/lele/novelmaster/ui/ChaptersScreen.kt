@@ -45,7 +45,9 @@ import kotlinx.coroutines.withContext
 fun ChaptersScreen(nav: NavController, pid: Long) {
     val chapters by Repo.dao.chaptersFlow(pid).collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
-    var generating by remember { mutableStateOf(false) }
+    // v6.9.37：补大纲忙闲从 AppTasks 全局取——离开本页任务照常完成，回来自动显示进度/结果
+    val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
+    val generating = "choutline:$pid" in appTasks.running
     var genMsg by remember { mutableStateOf("") }
     // v6.9.17：自检状态徽标（✅通过/🔧修复过/⚠️疑似/无=未自检），数据来自本地「自检记录」
     val context = LocalContext.current
@@ -65,12 +67,11 @@ fun ChaptersScreen(nav: NavController, pid: Long) {
                 }
             }) { Icon(Icons.Default.Add, contentDescription = "添加章节") }
             TextButton(onClick = {
-                generating = true
                 genMsg = ""
-                scope.launch(Dispatchers.IO) {
+                // v6.9.37：跑在 AppTasks 单例——中途离开本页，补大纲照常完成并落库
+                com.lele.novelmaster.engine.AppTasks.launch("choutline:$pid") {
                     val err = WriterEngine.ensureOutlines(pid)
                     withContext(Dispatchers.Main) {
-                        generating = false
                         if (err != null) genMsg = err
                     }
                 }

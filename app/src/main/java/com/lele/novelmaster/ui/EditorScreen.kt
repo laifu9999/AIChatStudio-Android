@@ -48,8 +48,14 @@ fun EditorScreen(nav: NavController, chapterId: Long) {
     var text by remember { mutableStateOf("") }
     var loaded by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf<String?>(null) }
     var err by remember { mutableStateOf<String?>(null) }
+    // v6.9.37：AI续写/AI重写忙闲从 AppTasks 全局取——离开编辑页任务照常完成并落库，回来自动显示进度/结果
+    val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
+    val busy = when {
+        "continue:$chapterId" in appTasks.running -> "AI续写中…"
+        "rewrite:$chapterId" in appTasks.running -> "AI重写中…"
+        else -> null
+    }
     var savedAt by remember { mutableStateOf<Long?>(null) }
     var confirmRewrite by remember { mutableStateOf(false) }
     val fmt = remember { SimpleDateFormat("HH:mm", Locale.CHINA) }
@@ -62,26 +68,31 @@ fun EditorScreen(nav: NavController, chapterId: Long) {
         editing = c.content.isBlank()
     }
 
+    // v6.9.37：落库逻辑抽成可在任意线程调用的 persist，save() 与 AI续写共用
+    fun persist(content: String, t: String) {
+        val latest = Repo.dao.chapter(chapterId) ?: return
+        Repo.dao.updateChapter(
+            latest.copy(
+                title = t,
+                content = content,
+                wordCount = content.length,
+                status = if (content.isBlank()) 0 else 2,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        // v5.5：同步更新项目文件里的本章 txt，书架阅读看到的是最新内容
+        runCatching {
+            val base = File(ctx.filesDir, "novels/${latest.projectId}/files/正文")
+            base.mkdirs()
+            val safeTitle = t.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
+            File(base, "第${latest.chapterIndex}章-$safeTitle.txt")
+                .writeText(content + "\n", Charsets.UTF_8)
+        }
+    }
+
     fun save() {
         scope.launch(Dispatchers.IO) {
-            val latest = Repo.dao.chapter(chapterId) ?: return@launch
-            Repo.dao.updateChapter(
-                latest.copy(
-                    title = title,
-                    content = text,
-                    wordCount = text.length,
-                    status = if (text.isBlank()) 0 else 2,
-                    updatedAt = System.currentTimeMillis()
-                )
-            )
-            // v5.5：同步更新项目文件里的本章 txt，书架阅读看到的是最新内容
-            runCatching {
-                val base = File(ctx.filesDir, "novels/${latest.projectId}/files/正文")
-                base.mkdirs()
-                val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
-                File(base, "第${latest.chapterIndex}章-$safeTitle.txt")
-                    .writeText(text + "\n", Charsets.UTF_8)
-            }
+            persist(text, title)
             savedAt = System.currentTimeMillis()
         }
     }
@@ -94,16 +105,19 @@ fun EditorScreen(nav: NavController, chapterId: Long) {
             TextButton(
                 enabled = busy == null,
                 onClick = {
-                    busy = "AI续写中…"
                     err = null
-                    scope.launch(Dispatchers.IO) {
+                    val srcText = text
+                    // v6.9.37：跑在 AppTasks 单例——离开编辑页续写照常完成并落库，回来正文自动刷新
+                    com.lele.novelmaster.engine.AppTasks.launch("continue:$chapterId") {
                         try {
-                            val newText = WriterEngine.continueChapter(chapterId, text)
-                            text = newText
-                            save()
-                            withContext(Dispatchers.Main) { busy = null }
+                            val newText = WriterEngine.continueChapter(chapterId, srcText)
+                            persist(newText, title)
+                            withContext(Dispatchers.Main) {
+                                text = newText
+                                savedAt = System.currentTimeMillis()
+                            }
                         } catch (e: Exception) {
-                            withContext(Dispatchers.Main) { busy = null; err = e.message?.take(200) }
+                            withContext(Dispatchers.Main) { err = e.message?.take(200) }
                         }
                     }
                 }
@@ -167,22 +181,22 @@ fun EditorScreen(nav: NavController, chapterId: Long) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmRewrite = false
-                    busy = "AI重写中…"
                     err = null
-                    scope.launch(Dispatchers.IO) {
+                    // v6.9.37：跑在 AppTasks 单例——离开编辑页重写照常完成并落库，回来正文自动刷新
+                    com.lele.novelmaster.engine.AppTasks.launch("rewrite:$chapterId") {
                         try {
                             val error = WriterEngine.rewriteChapter(chapterId)
                             val fresh = Repo.dao.chapter(chapterId)
                             withContext(Dispatchers.Main) {
-                                busy = null
                                 if (fresh != null) {
                                     text = fresh.content
                                     title = fresh.title
                                 }
                                 if (error != null) err = error
+                                savedAt = System.currentTimeMillis()
                             }
                         } catch (e: Exception) {
-                            withContext(Dispatchers.Main) { busy = null; err = e.message?.take(200) }
+                            withContext(Dispatchers.Main) { err = e.message?.take(200) }
                         }
                     }
                 }) { Text("重写") }

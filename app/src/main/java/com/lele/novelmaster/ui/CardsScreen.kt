@@ -330,9 +330,10 @@ private fun CardEditDialog(initial: SettingCard?, pid: Long, onDismiss: () -> Un
 @Composable
 private fun InspireDialog(pid: Long, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
+    // v6.9.37：忙闲从 AppTasks 全局取——即使关掉对话框/离开本页，灵感分析照常完成并落库
+    val appTasks by com.lele.novelmaster.engine.AppTasks.state.collectAsState()
+    val busy = "inspire:$pid" in appTasks.running
     var msg by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
@@ -364,12 +365,11 @@ private fun InspireDialog(pid: Long, onDismiss: () -> Unit) {
             TextButton(
                 enabled = !busy && text.trim().length >= 5,
                 onClick = {
-                    busy = true
                     val inspiration = text.trim()
-                    scope.launch(Dispatchers.IO) {
+                    // v6.9.37：跑在 AppTasks 单例——关掉对话框/离开页面任务照常完成
+                    com.lele.novelmaster.engine.AppTasks.launch("inspire:$pid") {
                         val err = WriterEngine.generateCardsFromInspire(pid, inspiration)
                         withContext(Dispatchers.Main) {
-                            busy = false
                             if (err == null) onDismiss() else msg = err
                         }
                     }
