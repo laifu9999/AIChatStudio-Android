@@ -892,11 +892,12 @@ object Tools {
         return ToolResult(true, head, out + fixNote + "\n\n📄 报告已存档到 设定卡/备份/")
     }
 
-    /** v6.9.42：体检修复行应用结果 */
+    /** v6.9.42：体检修复行应用结果；v6.9.59 加 skipped——未应用的方案行逐条带原因反馈（用户痛点：只能靠再体检验证修没修上） */
     private data class CheckApplyResult(
         val fixedNames: List<String>,
         val slimmedNames: List<String>,
-        val savedChars: Int
+        val savedChars: Int,
+        val skipped: List<String> = emptyList()
     )
 
     /** v6.9.42：解析【修复】/【精简】行并应用到卡——备份原卡 → 改库 → 写回项目文件夹 → 全卡兜底同步。
@@ -905,6 +906,7 @@ object Tools {
         val dao = Repo.dao
         val fixed = mutableListOf<String>()
         val slimmed = mutableListOf<String>()
+        val skipped = mutableListOf<String>() // v6.9.59：逐条记录未应用原因
         var savedChars = 0
         val seen = mutableSetOf<String>()
         for (line in out.lines()) {
@@ -916,8 +918,17 @@ object Tools {
             if (parts.size < 2) continue
             val name = parts[0].trim()
             val newContent = parts[1].trim()
-            if (name.isBlank() || newContent.length < 20 || !seen.add(name)) continue
-            if (name == "分章大纲" || name == "剧情进度" || name == "写作禁忌") continue
+            if (name.isBlank()) continue
+            if (newContent.length < 20) {
+                // v6.9.59：疑似 AI 输出截断——逐条反馈而不是静默丢弃
+                skipped.add("「$name」给出的新内容过短（${newContent.length}字），疑似截断，已跳过")
+                continue
+            }
+            if (!seen.add(name)) continue
+            if (name == "分章大纲" || name == "剧情进度" || name == "写作禁忌") {
+                skipped.add("「$name」是系统自动维护的保护卡，不允许体检修改，已跳过")
+                continue
+            }
             // v6.9.57：修复找不到卡根治——AI 报告里的卡名常带「」《》【】等装饰、全半角差异或类别前缀，
             // 旧匹配（精确→contains）对不上就整条丢弃。现在：去装饰 → normCardName 归一化精确 → 归一化 contains →
             // 归一化前两字兜底（错别字如「君无咎/君无昝」也能对上），逐级放宽
@@ -927,10 +938,24 @@ object Tools {
                 ?: cards.firstOrNull { com.lele.novelmaster.data.Prompts.normCardName(it.name) == target }
                 ?: cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.isNotEmpty() && target.isNotEmpty() && (a.contains(target) || target.contains(a)) }
                 ?: (if (target.length >= 2) cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.length >= 2 && a.startsWith(target.take(2)) } else null)
+                ?: run {
+                    skipped.add("⚠️「$name」在现有设定卡里找不到（名字对不上），这条没有改——可在聊天里说「确认修复：只处理$name」让乐乐单独处理")
+                    null
+                }
                 ?: continue
-            if (card.name == "分章大纲" || card.name == "剧情进度" || card.name == "写作禁忌" || card.content == newContent) continue
+            if (card.name == "分章大纲" || card.name == "剧情进度" || card.name == "写作禁忌") {
+                skipped.add("「${card.name}」是系统自动维护的保护卡，不允许体检修改，已跳过")
+                continue
+            }
+            if (card.content == newContent) {
+                skipped.add("⏭️「${card.name}」内容已一致，无需修改")
+                continue
+            }
             // 精简必须真的变短才应用（防止 AI 复读原文）
-            if (isSlim && newContent.length >= card.content.length) continue
+            if (isSlim && newContent.length >= card.content.length) {
+                skipped.add("「${card.name}」的精简稿没有变短（${newContent.length}≥${card.content.length}字），已跳过")
+                continue
+            }
             val appCtx = Repo.app
             if (appCtx != null) try {
                 val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
@@ -949,7 +974,7 @@ object Tools {
         }
         // v6.9.41：全卡兜底同步——确保项目文件夹与库完全一致
         try { WriterEngine.syncAllCardsToFiles(pid, Repo.app) } catch (_: Exception) { }
-        return CheckApplyResult(fixed, slimmed, savedChars)
+        return CheckApplyResult(fixed, slimmed, savedChars, skipped)
     }
 
     /** 体检一键修复：作者确认报告方案后执行。v6.9.53 重写——
@@ -977,10 +1002,14 @@ object Tools {
         com.lele.novelmaster.engine.AppTasks.setProgress("cardsRepair:$pid", "🔧 正在按体检报告修复设定卡…")
         val ar = applyCheckLines(pid, cards, report)
         val head = "🔧 已按体检报告确认修复（共 ${cards.size} 张卡）"
+        // v6.9.59：未应用的方案逐条列出原因——不再让用户只能靠"再体检一次"盲验
+        val skipBlock = if (ar.skipped.isEmpty()) "" else
+            "\n\n⚠️ 有 ${ar.skipped.size} 条方案没有应用：\n" + ar.skipped.joinToString("\n") { "· $it" } +
+                "\n（没匹配上的卡可说「确认修复：只处理××卡」让乐乐单独处理）"
         val note = if (ar.fixedNames.isEmpty() && ar.slimmedNames.isEmpty())
-            "\n\n未能匹配到可修改的卡（报告里的卡名和现有卡对不上，或内容已一致）。可在聊天里说「修改××卡」用 updateCard 手动指定，或重新体检一次。"
+            "\n\n未能匹配到可修改的卡（报告里的卡名和现有卡对不上，或内容已一致）。可在聊天里说「修改××卡」用 updateCard 手动指定，或重新体检一次。$skipBlock"
         else
-            "\n\n✅ 已修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。建议说「设定体检」再核对一遍。"
+            "\n\n✅ 已修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。$skipBlock"
         // 结果同样存档，方便回查
         try {
             val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
@@ -1052,10 +1081,12 @@ object Tools {
             if (ar.fixedNames.isNotEmpty()) parts.add("修复 ${ar.fixedNames.size} 张：${ar.fixedNames.joinToString("、")}")
             if (ar.slimmedNames.isNotEmpty()) parts.add("精简 ${ar.slimmedNames.size} 张（约省 ${ar.savedChars} 字）")
             if (deleted.isNotEmpty()) parts.add("删除 ${deleted.size} 张：${deleted.joinToString("、")}")
+            // v6.9.59：未应用的方案逐条列出原因
+            if (ar.skipped.isNotEmpty()) parts.add("⚠️ ${ar.skipped.size} 条没应用：\n" + ar.skipped.joinToString("\n") { "· $it" })
             val note = if (parts.isEmpty())
                 "\n\n未能匹配到可修改的卡。可在聊天里说「看XX卡」核对卡名后再试。"
             else
-                "\n\n✅ " + parts.joinToString("；") + "\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。建议说「设定体检」再核对一遍一致性。"
+                "\n\n✅ " + parts.joinToString("；") + "\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。"
             ToolResult(true, head, out.take(2500) + note)
         } finally { cardsCheckGate.set(false) }
     }
