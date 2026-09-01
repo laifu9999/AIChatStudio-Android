@@ -132,12 +132,29 @@ object AiClient {
     /**
      * 流式对话：拿到第一个字就回调，界面立刻能看到内容在增长。
      * 流式不被支持时自动回退到普通对话。
+     * v6.9.52：思考耗尽输出额度（只出思考没出正文）→ 自动关思考重试一次，任务不中断。
      */
     suspend fun chatStream(
         cfg: ApiConfig,
         messages: List<ChatMsg>,
         temperature: Double = 0.85,
         maxTokens: Int = MAX_TOKENS_HUGE,
+        onDelta: suspend (String) -> Unit
+    ): AiResult {
+        return try {
+            chatStreamLadder(cfg, messages, temperature, maxTokens, onDelta)
+        } catch (e: Exception) {
+            if (e is CancellationException || cfg.thinkMode == "none" || !isThinkExhaustedError(e.message)) throw e
+            lastActivityMs = System.currentTimeMillis()
+            chatStreamLadder(cfg.copy(thinkMode = "none"), messages, temperature, maxTokens, onDelta)
+        }
+    }
+
+    private suspend fun chatStreamLadder(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int,
         onDelta: suspend (String) -> Unit
     ): AiResult {
         // v6.9.46：任务开始即重置活动时间戳——上一轮 AI 活动可能是几分钟前，
@@ -180,12 +197,27 @@ object AiClient {
      * v6.2：对话补全统一走流式管道（可取消、无 60s 超时问题）。
      * 写章/大纲/摘要/专家功能等所有旧调用点因此全部变成流式，无需逐个改造。
      * 底层 chatPlain 仅在流式完全不可用时兜底。
+     * v6.9.52：思考耗尽输出额度 → 自动关思考重试一次（流式和非流式兜底都失败时在这里兜）。
      */
     suspend fun chat(
         cfg: ApiConfig,
         messages: List<ChatMsg>,
         temperature: Double = 0.85,
         maxTokens: Int = MAX_TOKENS_HUGE
+    ): String = withContext(Dispatchers.IO) {
+        try {
+            chatOnce(cfg, messages, temperature, maxTokens)
+        } catch (e: Exception) {
+            if (e is CancellationException || cfg.thinkMode == "none" || !isThinkExhaustedError(e.message)) throw e
+            chatOnce(cfg.copy(thinkMode = "none"), messages, temperature, maxTokens)
+        }
+    }
+
+    private suspend fun chatOnce(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
     ): String = withContext(Dispatchers.IO) {
         val r = try {
             chatStream(cfg, messages, temperature, maxTokens) { }
@@ -405,6 +437,16 @@ object AiClient {
             m.contains("not support") || m.contains("unexpected") || m.contains("extra") ||
             m.contains("unsupported") || m.contains("不支持") || m.contains("未知") || m.contains("无效")
         return kw && err
+    }
+
+    /**
+     * v6.9.52：思考耗尽输出额度——开了思考档位的模型把 max_tokens 全花在思考上，
+     * content 为空（报错文案含「思考内容已过滤」或「只输出了思考内容」）。
+     * 这种失败重试大概率还会复发，自动关掉思考重打一次才能救回来。
+     */
+    private fun isThinkExhaustedError(msg: String?): Boolean {
+        val m = msg ?: return false
+        return m.contains("思考内容已过滤") || m.contains("只输出了思考内容")
     }
 
     /**
