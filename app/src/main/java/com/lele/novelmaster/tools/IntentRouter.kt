@@ -3,7 +3,9 @@ package com.lele.novelmaster.tools
 import android.content.Context
 import com.lele.novelmaster.data.CardCategories
 import com.lele.novelmaster.data.Repo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 
 /**
  * 聊天意图路由器。
@@ -93,7 +95,15 @@ object IntentRouter {
                 val pid = needPid() ?: return@let
                 val name = m.groupValues[1].trim()
                 if (name.isNotBlank() && name.length < 25) {
-                    return Tools.updateProject(pid, title = name)
+                    // v6.9.53：改书名全书联动——旧书名在设定卡/分章大纲/章节大纲里一并替换，
+                    // 否则主线卡/圣经里还是旧书名（用户实测痛点：改名后信息混乱）
+                    val old = withContext(Dispatchers.IO) { Repo.dao.project(pid) }?.title.orEmpty().trim()
+                    val r = Tools.updateProject(pid, title = name)
+                    if (r.ok && old.isNotBlank() && old != name && old.length >= 2) {
+                        val rr = Tools.renameGlobal(pid, old, name, false)
+                        if (rr.ok) return ToolResult(true, r.summary, r.detail + "\n\n" + rr.summary + "\n" + rr.detail)
+                    }
+                    return r
                 }
             }
             Regex("(?:目标|共|改成|改为)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章").find(raw)?.let { m ->

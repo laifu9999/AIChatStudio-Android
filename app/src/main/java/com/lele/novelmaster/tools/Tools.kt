@@ -219,6 +219,143 @@ object Tools {
         return ToolResult(true, "已删除", "「${c.category} / ${c.name}」已移除")
     }
 
+    /** v6.9.53：修改已有设定卡（整卡覆盖）——此前 AI 只能增/删卡，改卡只能"新建一张新的"，
+     *  旧卡原样留着 → 人物多版本并存混乱（用户实测：改名后三张男主卡并存）。
+     *  识别：名字精确匹配 → 包含匹配。改前备份，改库+写回项目文件夹双写。 */
+    suspend fun updateCard(pid: Long, name: String, content: String): ToolResult {
+        if (name.isBlank() || content.isBlank()) return ToolResult(false, "卡名和内容不能为空")
+        if (name == "写作禁忌" || name == "剧情进度" || name == "分章大纲")
+            return ToolResult(false, "「$name」由系统自动维护，不能直接修改")
+        val dao = Repo.dao
+        val cards = withContext(Dispatchers.IO) { dao.cards(pid) }
+        val card = cards.firstOrNull { it.name == name }
+            ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
+            ?: return ToolResult(false, "找不到设定卡「$name」", "可用 listCards 查看现有卡名后再试")
+        if (card.content == content) return ToolResult(false, "内容没有变化")
+        // 备份
+        try {
+            val appCtx = Repo.app
+            if (appCtx != null) {
+                val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+                d.mkdirs()
+                File(d, "手动修改备份.md").appendText(
+                    "==== ${card.category}/${card.name}（${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())} 修改前） ====\n${card.content}\n\n",
+                    Charsets.UTF_8
+                )
+            }
+        } catch (_: Exception) { }
+        val updated = card.copy(content = content, updatedAt = System.currentTimeMillis())
+        withContext(Dispatchers.IO) { dao.updateCard(updated) }
+        WriterEngine.exportCardFile(pid, updated, Repo.app)
+        return ToolResult(
+            true,
+            "✅ 已修改设定卡：${card.category} / ${card.name}（${content.length} 字）",
+            "已保存到 设定卡/${card.category}/${card.name}.md，写正文时自动注入新版设定。"
+        )
+    }
+
+    /** v6.9.53：全书联动改名/改设定——把「旧名」在所有设定卡（含分章大纲卡）、章节标题、章节大纲里
+     *  一次性替换成「新名」；alsoChapters=true 时连已写正文也替换。
+     *  解决用户实测痛点：改名只新建一张卡，旧卡全留着 → 三张男主卡并存、大纲还是旧名、设定混乱。
+     *  机械字符串替换（确定性、零遗漏、不重写其他内容），比让 AI 逐卡改可靠得多。 */
+    suspend fun renameGlobal(pid: Long, old: String, new: String, alsoChapters: Boolean = false): ToolResult {
+        val o = old.trim()
+        val n = new.trim()
+        if (o.length < 2) return ToolResult(false, "要替换的旧名至少 2 个字（避免误替换）")
+        if (o == n) return ToolResult(false, "新旧名称相同")
+        val dao = Repo.dao
+        val ts = SimpleDateFormat("MMdd-HHmm", Locale.getDefault()).format(Date())
+        var cardCount = 0
+        val cardNames = mutableListOf<String>()
+        // 1) 全部设定卡：卡名+内容里替换
+        val cards = withContext(Dispatchers.IO) { dao.cards(pid) }
+        for (c in cards) {
+            val newName = c.name.replace(o, n)
+            val newContent = c.content.replace(o, n)
+            if (newName == c.name && newContent == c.content) continue
+            try {
+                val appCtx = Repo.app
+                if (appCtx != null) {
+                    val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+                    d.mkdirs()
+                    File(d, "全书联动备份-$ts.md").appendText(
+                        "==== ${c.category}/${c.name}（替换前） ====\n${c.content.take(2000)}${if (c.content.length > 2000) "\n…（超长截断）" else ""}\n\n",
+                        Charsets.UTF_8
+                    )
+                }
+            } catch (_: Exception) { }
+            val updated = c.copy(name = newName, content = newContent, updatedAt = System.currentTimeMillis())
+            withContext(Dispatchers.IO) { dao.updateCard(updated) }
+            WriterEngine.exportCardFile(pid, updated, Repo.app)
+            cardCount++
+            cardNames.add(c.name)
+        }
+        // 2) 章节：标题+大纲始终替换（大纲是写作的依据，必须联动）；正文仅在 alsoChapters=true 时替换
+        var outlineCount = 0
+        var bodyCount = 0
+        val chs = withContext(Dispatchers.IO) { dao.chapters(pid) }
+        for (ch in chs) {
+            val t = ch.title.replace(o, n)
+            val ol = ch.outline.replace(o, n)
+            val body = if (alsoChapters) ch.content.replace(o, n) else ch.content
+            if (t == ch.title && ol == ch.outline && body == ch.content) continue
+            if (alsoChapters && body != ch.content) {
+                // 正文改动前备份（项目文件夹/正文备份）
+                try {
+                    val appCtx = Repo.app
+                    if (appCtx != null) {
+                        val d = File(FileTools.baseDir(appCtx, pid), "正文备份")
+                        d.mkdirs()
+                        File(d, "第${ch.chapterIndex}章-${ch.title.ifBlank { "未命名" }.replace(Regex("[\\\\/:*?\"<>|]"), "_")}-联动备份$ts.txt")
+                            .writeText(ch.content, Charsets.UTF_8)
+                    }
+                } catch (_: Exception) { }
+                bodyCount++
+            }
+            if (ol != ch.outline) outlineCount++
+            val updated = ch.copy(
+                title = t, outline = ol, content = body,
+                wordCount = if (body != ch.content) body.length else ch.wordCount,
+                updatedAt = System.currentTimeMillis()
+            )
+            withContext(Dispatchers.IO) { dao.updateChapter(updated) }
+        }
+        // 3) 全卡兜底同步到项目文件夹
+        try { WriterEngine.syncAllCardsToFiles(pid, Repo.app) } catch (_: Exception) { }
+        if (cardCount == 0 && outlineCount == 0 && bodyCount == 0)
+            return ToolResult(
+                false,
+                "全书没有找到包含「$o」的设定卡/大纲/正文",
+                "确认旧名是否正确（可先 listCards 查看）。若是新设定，直接用 addCard 或 updateCard 修改对应卡。"
+            )
+        val parts = mutableListOf<String>()
+        if (cardCount > 0) parts.add("设定卡 $cardCount 张（${cardNames.take(8).joinToString("、")}${if (cardNames.size > 8) " 等" else ""}）")
+        if (outlineCount > 0) parts.add("章节大纲 $outlineCount 章")
+        if (bodyCount > 0) parts.add("已写正文 $bodyCount 章")
+        val tip = buildString {
+            append("已全书联动替换：「$o」→「$n」，共更新 ")
+            append(parts.joinToString("、"))
+            append("。")
+            if (!alsoChapters && bodyCount == 0) append("\n（已写正文中如也出现旧名，说「$o 改成 $n 连正文一起改」可把已写章节一并替换）")
+            append("\n建议再说一句「设定体检」核对全书一致性。")
+        }
+        return ToolResult(true, "🔄 全书联动完成：" + parts.joinToString("、"), tip)
+    }
+
+    /** v6.9.53：查看某张设定卡完整原文（体检对话用——AI 讨论报告时需要看到卡的完整内容） */
+    suspend fun readCard(pid: Long, name: String): ToolResult {
+        if (name.isBlank()) return ToolResult(false, "卡名不能为空")
+        val cards = withContext(Dispatchers.IO) { Repo.dao.cards(pid) }
+        val card = cards.firstOrNull { it.name == name }
+            ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
+            ?: return ToolResult(false, "找不到设定卡「$name」", "可用 listCards 查看现有卡名")
+        return ToolResult(
+            true,
+            "📄 ${card.category} / ${card.name}（${card.content.length} 字）",
+            card.content
+        )
+    }
+
     // ---------- 章节 ----------
 
     suspend fun listChapters(pid: Long, onlyMissing: Boolean = false): ToolResult {
@@ -671,14 +808,16 @@ object Tools {
             task = com.lele.novelmaster.data.TaskModels.CHECK // v6.9.41：体检可走专用模型
         )
         if (err != null) return ToolResult(false, err)
-        // v6.9.42：解析【修复】/【精简】行并应用——抽成共用函数，「设定体检」与「按报告一键修复」走同一条保存链路
-        val ar = applyCheckLines(pid, cards, out)
+        // v6.9.53：体检改为「只出报告不改卡」——此前【修复】行直接自动应用，用户没机会确认；
+        // 现在报告=修复方案，用户可在聊天里提问讨论、提出调整，确认后点「确认修复」或说「确认修复」才真正改卡
         val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
-        val fixNote = if (ar.fixedNames.isEmpty() && ar.slimmedNames.isEmpty())
-            "\n\n未修改任何卡。若上面的【问题】确实需要改卡，点报告下方「确认修复」按钮，系统会按报告逐张改好并自动保存到项目文件夹。"
+        val hasPlan = out.contains("【修复】") || out.contains("【精简】")
+        val fixNote = if (!hasPlan)
+            "\n\n未修改任何卡。本轮体检结论：无需改卡修复。"
         else
-            "\n\n✅ 已自动修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、去重精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}（原内容已备份到 设定卡/备份/设定体检备份.md）"
-        // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查）
+            "\n\n📋 以上是修复方案，未修改任何卡。有疑问？直接在聊天里问（比如「为什么说这两张卡冲突」），乐乐会带着报告和你讨论；" +
+                "无疑问点下方按钮确认修复；想按你的要求调整着修，就说「确认修复：你的调整要求」。"
+        // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查；v6.9.53 起报告即修复方案，「确认修复」直接按它执行）
         try {
             val appCtx = Repo.app
             if (appCtx != null) {
@@ -744,10 +883,10 @@ object Tools {
         return CheckApplyResult(fixed, slimmed, savedChars)
     }
 
-    /** v6.9.42 体检一键修复：体检报告只推理出问题、没改卡时，作者在报告里点「确认修复」→
-     *  读最近一份体检报告，让 AI 按报告逐张给出修复内容，走 applyCheckLines 自动改卡并保存到项目文件
-     *  v6.9.44：与「设定体检」共用同一把闸门——修复也是一次大 AI 调用（同一模型），若允许并行，
-     *  两个请求会被同一 API Key 串行排队，后发的那个 5 分钟收不到首字节被看门狗误杀（用户实测踩坑） */
+    /** 体检一键修复：作者确认报告方案后执行。v6.9.53 重写——
+     *  体检现在只出报告不改卡，报告文件里已含逐卡修复方案（【修复】/【精简】行+完整卡内容），
+     *  确认修复=直接解析报告方案并落卡（确定性、秒完成、零 AI 调用），不再二次推理。
+     *  v6.9.44 闸门保留：修复期间禁止并发体检（共用同一批设定卡）。 */
     suspend fun cardsApplyRepair(pid: Long): ToolResult {
         if (!cardsCheckGate.compareAndSet(false, true))
             return ToolResult(false, "设定体检/修复正在进行中，请等它完成再试（一般几分钟）。")
@@ -759,44 +898,91 @@ object Tools {
         val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
         val f = d.listFiles { x -> x.name.startsWith("设定体检报告-") && x.name.endsWith(".md") }
             ?.maxByOrNull { it.name }
-            ?: return ToolResult(false, "还没有体检报告。先说「设定体检」跑一次，再点修复。")
+            ?: return ToolResult(false, "还没有体检报告。先说「设定体检」跑一次，再确认修复。")
         val report = f.readText(Charsets.UTF_8)
-        if (report.contains("【通过】")) return ToolResult(false, "最近一次体检结论是【通过】，没有需要修复的问题。")
+        if (!report.contains("【修复】") && !report.contains("【精简】"))
+            return ToolResult(false, "最近一次体检（${f.name}）没有给出可改卡的修复方案（可能结论是【通过】）。有别的想改的，直接在聊天里说。")
         val dao = Repo.dao
         val cards = dao.cards(pid)
         if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。")
         com.lele.novelmaster.engine.AppTasks.setProgress("cardsRepair:$pid", "🔧 正在按体检报告修复设定卡…")
-        val (err, out) = WriterEngine.freeTask(
-            pid,
-            "任务：设定体检修复执行——下面是上一轮体检报告，把报告里指出的问题逐个修复成修正后的完整卡片内容。\n" +
-                "【体检报告】\n$report\n\n" +
-                "要求：\n" +
-                "1) 全程只用简体中文，严禁英文，严禁输出思考过程/内心分析，直接给结果；\n" +
-                "2) 只处理报告里指出的、能用改文字解决的真实矛盾；严禁动「剧情进度」「分章大纲」「写作禁忌」卡，其余任意卡（含设定圣经/世界观）都可修——系统上下文已注入全部卡的完整原文，输出整卡以原文为准；\n" +
-                "3) 跨卡统一：同一事实（能力代价、关键事件的经过、专有名词与数字）在多张卡里必须统一成同一个版本，需要改几张就分几条【修复】输出，严禁改一张留一张互相矛盾；\n" +
-                "4) 只输出格式行，不要任何其他解释。\n" +
-                "输出格式严格：\n" +
-                "【修复】每条一行：卡名｜修正后的完整卡片内容（最多8条）\n" +
-                "【精简】每条一行：卡名｜去重后的完整卡片内容（最多8条，每卡60~200字，只留干货）\n" +
-                "报告里的问题没有能改文字解决的，就只输出【无修复项】。",
-            task = com.lele.novelmaster.data.TaskModels.CHECK
-        )
-        if (err != null) return ToolResult(false, err)
-        if (out.contains("【无修复项】") || (!out.contains("【修复】") && !out.contains("【精简】"))) {
-            return ToolResult(false, "AI 判断报告里的问题无法直接改卡解决（可能要改大纲/剧情进度）。可以在聊天里直接说「修改××卡的××」，或重新体检一次。")
-        }
-        val ar = applyCheckLines(pid, cards, out)
-        val head = "🔧 按体检报告修复完成（共 ${cards.size} 张卡）"
+        val ar = applyCheckLines(pid, cards, report)
+        val head = "🔧 已按体检报告确认修复（共 ${cards.size} 张卡）"
         val note = if (ar.fixedNames.isEmpty() && ar.slimmedNames.isEmpty())
-            "\n\n未能匹配到可修改的卡（AI 给的卡名和现有卡对不上）。建议在聊天里直接说「修改××卡的××」手动指定。"
+            "\n\n未能匹配到可修改的卡（报告里的卡名和现有卡对不上，或内容已一致）。可在聊天里说「修改××卡」用 updateCard 手动指定，或重新体检一次。"
         else
-            "\n\n✅ 已修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。"
+            "\n\n✅ 已修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。建议说「设定体检」再核对一遍。"
         // 结果同样存档，方便回查
         try {
             val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
-            File(d, "设定体检修复-$ts.md").writeText("# 按报告修复 $ts\n\n$out$note\n", Charsets.UTF_8)
+            File(d, "设定体检修复-$ts.md").writeText("# 按报告确认修复 $ts\n\n${report.take(3000)}\n$note\n", Charsets.UTF_8)
         } catch (_: Exception) { }
-        return ToolResult(true, head, out + note)
+        return ToolResult(true, head, note)
+    }
+
+    /** v6.9.53：按用户的调整要求修复设定卡——体检对话的执行端。
+     *  用户对报告有疑问/想调整（如「李炎那张保留别删」「君既白并进君无咎」），讨论定案后
+     *  用本工具把「最近体检报告 + 用户特别要求」一起交给 AI 出修复方案并落卡。 */
+    suspend fun cardsRepairWith(pid: Long, instruction: String): ToolResult {
+        if (instruction.isBlank()) return ToolResult(false, "请把你的调整要求一并告诉我")
+        if (!cardsCheckGate.compareAndSet(false, true))
+            return ToolResult(false, "设定体检/修复正在进行中，请等它完成再试（一般几分钟）。")
+        return try {
+            val appCtx = Repo.app
+            val report = appCtx?.let {
+                val d = File(FileTools.baseDir(it, pid), "设定卡/备份")
+                d.listFiles { x -> x.name.startsWith("设定体检报告-") && x.name.endsWith(".md") }
+                    ?.maxByOrNull { it.name }?.readText(Charsets.UTF_8)?.take(4000)
+            } ?: ""
+            val dao = Repo.dao
+            val cards = dao.cards(pid)
+            if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。")
+            com.lele.novelmaster.engine.AppTasks.setProgress("cardsRepair:$pid", "🔧 正在按你的要求修复设定卡…")
+            val (err, out) = WriterEngine.freeTask(
+                pid,
+                "任务：按作者要求修复设定卡。\n" +
+                    (if (report.isNotBlank()) "【最近体检报告（供参考）】\n$report\n\n" else "") +
+                    "【作者的特别要求】\n$instruction\n\n" +
+                    "要求：\n" +
+                    "1) 全程只用简体中文，严禁英文，严禁输出思考过程/内心分析，直接给结果；\n" +
+                    "2) 作者的特别要求优先级最高，先满足要求再兼顾报告；报告与要求冲突时以要求为准；\n" +
+                    "3) 严禁动「剧情进度」「分章大纲」「写作禁忌」卡，其余任意卡（含设定圣经/世界观）都可修——系统上下文已注入全部卡的完整原文，输出整卡以原文为准整体重写，严禁凭印象补写；\n" +
+                    "4) 跨卡统一：同一事实在多张卡里必须统一成同一个版本；需要删掉某张卡时，把它的独有信息并入指定卡，并在【删除】行列出该卡卡名；\n" +
+                    "5) 只输出格式行，不要任何其他解释。\n" +
+                    "输出格式严格：\n" +
+                    "【修复】每条一行：卡名｜修正后的完整卡片内容（最多8条）\n" +
+                    "【精简】每条一行：卡名｜去重后的完整卡片内容（最多8条，每卡60~200字，只留干货）\n" +
+                    "【删除】每条一行：卡名（独有信息已并入其他卡、需要整卡删除的卡，最多3张）\n" +
+                    "没有可改的就只输出【无修复项】。",
+                task = com.lele.novelmaster.data.TaskModels.CHECK
+            )
+            if (err != null) return ToolResult(false, err)
+            if (out.contains("【无修复项】") || (!out.contains("【修复】") && !out.contains("【精简】"))) {
+                return ToolResult(false, "AI 判断这个要求无法只靠改卡解决（可能要改大纲/正文）。可以再说得具体一点，或先改大纲。")
+            }
+            val ar = applyCheckLines(pid, cards, out)
+            // 【删除】卡：整卡删除（方案确认过才会走到这里）
+            val deleted = mutableListOf<String>()
+            for (line in out.lines()) {
+                val t = line.trim()
+                if (!t.startsWith("【删除】")) continue
+                val name = t.removePrefix("【删除】").trim().split("｜", "|")[0].trim()
+                if (name.isBlank() || name == "分章大纲" || name == "剧情进度" || name == "写作禁忌") continue
+                val card = cards.firstOrNull { it.name == name } ?: continue
+                withContext(Dispatchers.IO) { Repo.dao.deleteCard(card) }
+                deleted.add(card.name)
+            }
+            val head = "🔧 已按你的要求修复设定卡"
+            val parts = mutableListOf<String>()
+            if (ar.fixedNames.isNotEmpty()) parts.add("修复 ${ar.fixedNames.size} 张：${ar.fixedNames.joinToString("、")}")
+            if (ar.slimmedNames.isNotEmpty()) parts.add("精简 ${ar.slimmedNames.size} 张（约省 ${ar.savedChars} 字）")
+            if (deleted.isNotEmpty()) parts.add("删除 ${deleted.size} 张：${deleted.joinToString("、")}")
+            val note = if (parts.isEmpty())
+                "\n\n未能匹配到可修改的卡。可在聊天里说「看XX卡」核对卡名后再试。"
+            else
+                "\n\n✅ " + parts.joinToString("；") + "\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。建议说「设定体检」再核对一遍一致性。"
+            ToolResult(true, head, out.take(2500) + note)
+        } finally { cardsCheckGate.set(false) }
     }
 
     /** v6.9.29 查看体检报告：读 设定卡/备份/ 下最近的「设定体检报告-*.md」，只读不跑AI */
@@ -1105,6 +1291,9 @@ object Tools {
                 pid, args.optString("category"), args.optString("name"), args.optString("content"),
                 if (args.has("priority")) args.optInt("priority") else null, context
             )
+            "updateCard" -> updateCard(pid, args.optString("name"), args.optString("content"))
+            "renameGlobal" -> renameGlobal(pid, args.optString("old"), args.optString("new"), args.optBoolean("alsoChapters", false))
+            "readCard" -> readCard(pid, args.optString("name"))
             "deleteCard" -> deleteCard(pid, args.optLong("cardId"))
             "writeNextChapter" -> writeNextChapter(pid, context)
             "rewriteChapter" -> rewriteChapter(pid, args.optInt("index"))
@@ -1139,6 +1328,8 @@ object Tools {
             "subplotCheck" -> subplotCheck(pid)
             "cardsCheck" -> cardsCheck(pid)
             "cardsCheckReport" -> cardsCheckReport(pid)
+            "cardsApplyRepair" -> cardsApplyRepair(pid)
+            "cardsRepairWith" -> cardsRepairWith(pid, args.optString("instruction"))
             "cardsSlim" -> cardsSlim(pid)
             "setChapterOutline" -> setChapterOutline(pid, args.optInt("index"), args.optString("text"))
             "nameGen" -> nameGen(pid, args.optString("kind", "人物"), args.optInt("count", 8))

@@ -31,14 +31,14 @@ object ChatService {
      *  v6.9.34 修复：补齐 11 个一致性体检/修复工具（此前系统提示里宣传了这些工具，
      *  但 KNOWN_TOOLS 白名单没加——AI 自由对话输出工具块会被 runTool 静默拒绝） */
     val KNOWN_TOOLS = setOf(
-        "createProject", "switchProject", "updateProject", "listProjects", "addCard", "deleteCard", "writeNextChapter", "rewriteChapter",
+        "createProject", "switchProject", "updateProject", "listProjects", "addCard", "deleteCard", "updateCard", "renameGlobal", "readCard", "writeNextChapter", "rewriteChapter",
         "startAutoWrite", "stopAutoWrite", "generateOutlines", "inspireFromText",
         "readChapter", "listCards", "listChapters", "exportTxt", "deleteProject",
         "contextPreview", "moveChapter", "copyChapter",
         "polishChapter", "publishPolish", "expandDialogue", "styleRewrite", "hookChapter", "goldenLines",
         "plotBrainstorm", "characterCheck", "consistencyCheck", "nameGen", "genBlurb",
         "chapterSelfCheck", "fullSelfCheck", "selfCheckProgress", "undoSelfCheck", "supplementChapter",
-        "foreshadowCheck", "markHookRecovered", "subplotCheck", "cardsCheck", "cardsCheckReport", "cardsSlim", "setChapterOutline",
+        "foreshadowCheck", "markHookRecovered", "subplotCheck", "cardsCheck", "cardsCheckReport", "cardsApplyRepair", "cardsRepairWith", "cardsSlim", "setChapterOutline",
         "createFolder", "deleteFolder", "renameFolder",
         "createFile", "writeFile", "appendFile", "readFile",
         "deleteFile", "renameFile", "listFiles"
@@ -561,12 +561,14 @@ object ChatService {
                 "<tool>{\"name\":\"工具名\",\"args\":{\"参数\":\"值\"}}</tool>\n" +
                 "可用工具：\n" +
                 "— 项目/设定：createProject{title,genre,desc,totalCh,chWords}(仅无会话时) | updateProject{title,genre,desc,totalCh,chWords}(改当前会话，不跳出) | switchProject{pid} | listProjects{} | addCard{category,name,content}(category:" +
-                CardCategories.all.joinToString("/") + ") | deleteCard{cardId} | listCards{category可空}\n" +
+                CardCategories.all.joinToString("/") + ") | updateCard{name,content}(修改已有设定卡·整卡覆盖) | deleteCard{cardId} | renameGlobal{old,new,alsoChapters可空}(全书联动改名/改设定) | readCard{name}(看某张卡完整原文) | listCards{category可空}\n" +
                 "— 写作：writeNextChapter{} | rewriteChapter{index} | startAutoWrite{from,to} | stopAutoWrite{} | generateOutlines{} | readChapter{index} | listChapters{onlyMissing} | moveChapter{from,to} | copyChapter{index} | contextPreview{} | exportTxt{} | deleteProject{}(仅作者明确说删除会话时)\n" +
                 "— 专家功能(index可空=最新章)：polishChapter | publishPolish{}(发布打磨·去AI味+开头+节奏+钩子，发布前最后一道工序) | expandDialogue | styleRewrite{style} | hookChapter | goldenLines | plotBrainstorm{} | characterCheck{name} | consistencyCheck{}(全书体检·只列矛盾) | nameGen{kind,count} | genBlurb{}\n" +
-                "— 一致性体检/修复：chapterSelfCheck{index}(单章自检·矛盾自动修正) | fullSelfCheck{}(全书逐章自检修复) | selfCheckProgress{}(自检进度) | undoSelfCheck{index}(撤销最近一次修改) | supplementChapter{index}(按大纲补写缺失剧情) | cardsCheck{}(设定体检·检查全部设定卡+分章大纲矛盾/重复并自动修复精简) | cardsCheckReport{}(查看最近一次设定体检报告·只读) | cardsSlim{}(设定瘦身·全部设定卡去重压缩抓重点) | setChapterOutline{index,text}(手动修改第N章大纲并同步镜像卡·text传新大纲全文)\n" +
+                "— 一致性体检/修复：chapterSelfCheck{index}(单章自检·矛盾自动修正) | fullSelfCheck{}(全书逐章自检修复) | selfCheckProgress{}(自检进度) | undoSelfCheck{index}(撤销最近一次修改) | supplementChapter{index}(按大纲补写缺失剧情) | cardsCheck{}(设定体检·只出报告不改卡) | cardsCheckReport{}(查看最近一次体检报告·只读) | cardsApplyRepair{}(确认修复·按最近报告立即改卡) | cardsRepairWith{instruction}(按作者调整要求修复) | cardsSlim{}(设定瘦身·全部设定卡去重压缩抓重点) | setChapterOutline{index,text}(手动修改第N章大纲并同步镜像卡·text传新大纲全文)\n" +
                 "— 伏笔/支线：foreshadowCheck{}(伏笔体检·埋收状态审计) | markHookRecovered{name}(标记伏笔已回收) | subplotCheck{}(支线体检·推进状态与收束建议)\n" +
                 "— 文件系统(path相对当前会话独立文件夹)：createFolder{path} | deleteFolder{path} | renameFolder{path,newName} | createFile{path,content} | writeFile{path,content} | appendFile{path,content} | readFile{path} | deleteFile{path} | renameFile{path,newName} | listFiles{path可空}\n" +
+                "【改名/统一设定铁律】作者要求改人物名/书名/专有名词/统一某个说法（境界、称呼、数字等）时，必须调 renameGlobal{old,new} 全书联动——所有设定卡、分章大纲、章节大纲一次改齐（作者说「连正文/已写章节也改」时加 alsoChapters=true），改完建议跑一次设定体检核对；严禁只新建或只改一张卡就声称改完。单张卡小修用 updateCard；改之前想确认原文用 readCard。\n" +
+                "【体检对话流程】cardsCheck 只出报告不改卡：作者对报告有疑问 → 先 cardsCheckReport/readCard 查看再如实解释，可讨论可调整；作者确认要修 → 调 cardsApplyRepair 按报告立即修复；作者带调整要求（如「保留李炎那张卡，把君既白并进去」）→ 调 cardsRepairWith{instruction} 按要求修复。没跑过体检时作者问体检相关，先跑 cardsCheck。\n" +
                 "注意：可以一次输出多个工具块；闲聊/回答问题时不要输出任何工具块。"
         )
         appendLine()

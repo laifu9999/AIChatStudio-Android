@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -241,6 +242,15 @@ fun CardsScreen(nav: NavController, pid: Long) {
             text = {
                 Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     Text(detail, style = MaterialTheme.typography.bodySmall)
+                    // v6.9.53：体检只出报告不改卡——对话式修复引导
+                    if (title.startsWith("🧾") && detail.contains("未修改任何卡")) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "💬 有疑问？回到聊天页把问题贴给乐乐（会带着报告和你讨论）；无疑问在聊天里说「确认修复」即可按报告改卡；想按你的要求调整着修，就说「确认修复：你的要求」。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             },
             confirmButton = { TextButton(onClick = { checkResult = null }) { Text("知道了") } }
