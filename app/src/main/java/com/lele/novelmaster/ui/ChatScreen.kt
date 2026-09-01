@@ -36,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,6 +51,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -77,6 +79,7 @@ import com.lele.novelmaster.data.AutoWriteManager
 import com.lele.novelmaster.data.Message
 import com.lele.novelmaster.data.Repo
 import com.lele.novelmaster.engine.ChatService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -143,6 +146,9 @@ fun ChatScreen(nav: NavHostController) {
     var drawerOpen by remember { mutableStateOf(false) }
     var showPanel by remember { mutableStateOf(false) }
     var showStyle by remember { mutableStateOf(false) }
+    // v6.9.56：本书AI设置弹窗 + 全书自检修启动确认弹窗（含「同时去AI味并润色」开关）
+    var showBookAiDlg by remember { mutableStateOf(false) }
+    var showSelfCheckDlg by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     var style by remember { mutableStateOf(ChatStylePrefs.load(ctx)) }
     // v5.5：打字机效果当前显示到的位置（key=message id）
@@ -302,6 +308,17 @@ fun ChatScreen(nav: NavHostController) {
                     color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
+                // v6.9.56：本书AI设置——就在会话名旁边，点开直接选这本书用哪个模型
+                //（原来藏在「项目仪表盘」菜单里，用户始终找不到）
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.White.copy(alpha = 0.22f),
+                    modifier = Modifier.clickable { showBookAiDlg = true }
+                ) {
+                    Text("⚙本书", color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                }
+                Spacer(Modifier.width(2.dp))
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = Color.White.copy(alpha = 0.22f),
@@ -420,6 +437,7 @@ fun ChatScreen(nav: NavHostController) {
                 onRun = { cmd -> showPanel = false; send(cmd) },
                 onNav = { r -> showPanel = false; nav.navigate(r.replace("{pid}", currentPid.toString())) },
                 onStyle = { showPanel = false; showStyle = true },
+                onSelfCheck = { showPanel = false; showSelfCheckDlg = true },
                 onPerm = {
                     showPanel = false
                     runCatching {
@@ -435,6 +453,17 @@ fun ChatScreen(nav: NavHostController) {
         ModalBottomSheet(onDismissRequest = { showStyle = false }) {
             ChatStylePanel(style) { style = it; ChatStylePrefs.save(ctx, it) }
         }
+    }
+    // v6.9.56：本书AI设置弹窗（顶栏「⚙本书」按钮）
+    if (showBookAiDlg) {
+        BookAiPickDialog(pid = currentPid, onDismiss = { showBookAiDlg = false })
+    }
+    // v6.9.56：全书自检修启动确认弹窗（含「同时去AI味并润色」开关，点启动才开跑）
+    if (showSelfCheckDlg) {
+        SelfCheckStartDialog(
+            onDismiss = { showSelfCheckDlg = false },
+            onStart = { showSelfCheckDlg = false; send("全书自检修复") }
+        )
     }
 }
 
@@ -492,14 +521,130 @@ private fun StyleChip(name: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
+/* ---------------- v6.9.56：本书AI设置弹窗 + 全书自检修启动确认弹窗 ---------------- */
+
+/** v6.9.56：本书AI设置——顶栏「⚙本书」点开即选；与「项目仪表盘」里的绑定是同一份数据（Project.apiConfigId） */
+@Composable
+private fun BookAiPickDialog(pid: Long, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val apis by Repo.dao.apiConfigsFlow().collectAsState(initial = emptyList())
+    val projects by Repo.dao.projectsFlow().collectAsState(initial = emptyList())
+    val p = projects.firstOrNull { it.id == pid }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("本书使用哪个AI模型") },
+        text = {
+            Column {
+                if (p == null) {
+                    Text("还没有真实会话，先新建一个会话再来设置本书模型。")
+                } else {
+                    Text(
+                        "为这本书单独指定 AI 接口：并行写多本书时，各书可分别用不同的 API/平台/模型，互不影响。不指定则跟随「AI模型设置」里已启用的接口。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    val active = apis.firstOrNull { it.isActive }
+                    ModelOptionRow(
+                        name = "跟随全局启用" + (active?.let { "（${it.name} · ${it.model.ifBlank { "未选模型" }}）" } ?: "（尚未启用任何接口）"),
+                        selected = p.apiConfigId == 0L
+                    ) {
+                        scope.launch(Dispatchers.IO) { Repo.dao.updateProject(p.copy(apiConfigId = 0L)) }
+                        onDismiss()
+                    }
+                    apis.forEach { a ->
+                        ModelOptionRow(
+                            name = "${a.name} · ${a.model.ifBlank { "未选模型" }}" + (if (a.isActive) "（全局启用中）" else ""),
+                            selected = p.apiConfigId == a.id
+                        ) {
+                            scope.launch(Dispatchers.IO) { Repo.dao.updateProject(p.copy(apiConfigId = a.id)) }
+                            onDismiss()
+                        }
+                    }
+                    if (apis.isEmpty()) {
+                        Text(
+                            "还没有添加任何 AI 配置，点右上角「🤖AI」去添加。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+/** 模型绑定选项行（ChatScreen 内用，与 ProjectScreen 的 ModelOption 同款） */
+@Composable
+private fun ModelOptionRow(name: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(if (selected) "🔵" else "⚪", fontSize = 15.sp)
+        Spacer(Modifier.width(8.dp))
+        Text(name, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * v6.9.56：全书自检修启动确认弹窗——点「全书自检修」不再直接开跑，
+ * 先确认「是否同时去AI味并润色」，再点启动才开跑（开关即时落库，与AI模型设置页的开关同一份配置）。
+ */
+@Composable
+private fun SelfCheckStartDialog(onDismiss: () -> Unit, onStart: () -> Unit) {
+    val ctx = LocalContext.current
+    var polish by remember { mutableStateOf(com.lele.novelmaster.data.InjectPrefs.polishWithCheck(ctx)) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("🩺 全书自检修") },
+        text = {
+            Column {
+                Text(
+                    "逐章检查剧情矛盾并自动修正；每章改前自动备份，说「撤销第N章自检修改」可恢复。",
+                    fontSize = 13.sp, color = Color(0xFF1F1B2E)
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = polish,
+                        onCheckedChange = {
+                            polish = it
+                            com.lele.novelmaster.data.InjectPrefs.setPolishWithCheck(ctx, it)
+                        }
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "同时去AI味并润色（发布级文风，剧情/对话/人物不变）",
+                        fontSize = 13.sp, modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "💡 耗时提示：检查约每章0.2章正文的量，开启润色则每章相当于重写一遍；长书会跑一阵，进度会实时播报在聊天里，期间可正常使用其他功能。",
+                    fontSize = 12.sp, color = TextSub
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onStart) { Text("🚀 启动") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
 /* ---------------- 功能卡片面板（全部功能唯一入口） ---------------- */
 
 private sealed class FAction
 private data class FRun(val cmd: String) : FAction()
 private data class FNav(val route: String) : FAction()
+private object FSelfCheck : FAction()   // v6.9.56：全书自检修——不直接开跑，先弹启动确认窗
 
 @Composable
-private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onStyle: () -> Unit, onPerm: () -> Unit) {
+private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onStyle: () -> Unit, onSelfCheck: () -> Unit, onPerm: () -> Unit) {
     val funcs: List<Triple<String, String, FAction>> = listOf(
         Triple("✍️", "写下一章", FRun("写下一章")),
         Triple("🚀", "自动写作", FNav("autowrite/{pid}")),
@@ -512,13 +657,14 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
         Triple("📊", "项目仪表盘", FNav("project/{pid}")),
         Triple("💎", "全书体检", FRun("全书体检")),
         Triple("🔬", "自检最新章", FRun("自检最新章")),
-        Triple("🩺", "全书自检修复", FRun("全书自检修复")),
+        Triple("🩺", "全书自检修", FSelfCheck),
+        Triple("✨", "去AI味全书", FRun("全书去AI味润色")),
         Triple("🪝", "伏笔体检", FRun("伏笔体检")),
         Triple("🧵", "支线体检", FRun("支线体检")),
         Triple("🧾", "设定体检", FRun("设定体检")),
         Triple("✂️", "设定瘦身", FRun("设定瘦身")),
         Triple("💡", "剧情推演", FRun("推演后续剧情")),
-        Triple("✨", "润色最新章", FRun("润色最新章")),
+        Triple("🌈", "润色最新章", FRun("润色最新章")),
         Triple("🚀", "发布打磨", FRun("发布打磨最新章")),
         Triple("💬", "生成金句", FRun("生成金句")),
         Triple("📝", "简介书名", FRun("生成简介和书名")),
@@ -552,6 +698,7 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
                                 when (action) {
                                     is FRun -> onRun(action.cmd)
                                     is FNav -> onNav(action.route)
+                                    is FSelfCheck -> onSelfCheck()
                                     is FAction2 -> action.go()
                                 }
                             }

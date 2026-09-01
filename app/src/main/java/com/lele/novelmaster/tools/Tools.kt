@@ -605,6 +605,57 @@ object Tools {
         else ToolResult(false, err)
     }
 
+    /** v6.9.56 全书去AI味润色：逐章发布级润色（只改文字表达不改剧情），进度实时播报；每章改前自动备份，改后可撤销 */
+    suspend fun polishWholeBook(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val project = dao.project(pid) ?: return ToolResult(false, "项目不存在")
+        // v6.9.41：全书润色可走「发布打磨」专用模型，未绑定回落本书/全局模型
+        val cfg = com.lele.novelmaster.data.TaskModels.apiFor(Repo.app, pid, com.lele.novelmaster.data.TaskModels.POLISH)
+            ?: return ToolResult(false, "请先在【AI模型】中添加并启用一个模型")
+        val chs = dao.chapters(pid).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
+        if (chs.isEmpty()) return ToolResult(false, "还没有已写章节，先写正文再来润色")
+        // v6.9.56：已润色章记录——重跑时自动跳过已润色章，只补润失败的章
+        val recordDir = WriterEngine.dir(Repo.app, pid, "自检记录")
+        val recordFile = recordDir?.let { java.io.File(it, "润色记录.txt") }
+        val done = recordFile?.takeIf { it.exists() }?.readLines(Charsets.UTF_8)
+            ?.mapNotNull { l -> l.split("|").getOrNull(0)?.trim()?.toIntOrNull() }?.toMutableSet() ?: mutableSetOf()
+        val targets = chs.filter { it.chapterIndex !in done }
+        if (targets.isEmpty()) {
+            val msg = "✨ 全书 ${chs.size} 章此前已全部润色完成，没有需要补润的章节。（想重新整体润色：先到【项目文件/自检记录】删除「润色记录.txt」）"
+            dao.insertMessage(Message(projectId = pid, role = "tool", kind = "tool", content = msg))
+            return ToolResult(true, "全书已润色完成", msg)
+        }
+        dao.insertMessage(
+            Message(projectId = pid, role = "tool", kind = "tool",
+                content = "✨ 全书去AI味润色开始：本次处理 ${targets.size}/${chs.size} 章" +
+                    (if (done.isNotEmpty()) "（已润色的 ${done.size} 章自动跳过）" else "") +
+                    "。每章只改文字表达、删AI套路句，剧情/对话/人物一律不变；改前自动备份（说「撤销第N章自检修改」可恢复）。")
+        )
+        var ok = 0
+        val failed = mutableListOf<Int>()
+        targets.forEachIndexed { i, ch ->
+            val fresh = dao.chapter(ch.id) ?: ch
+            val good = try {
+                WriterEngine.polishForPublish(cfg, dao, project, fresh, Repo.app)
+            } catch (_: Exception) { false }
+            if (good) {
+                ok++
+                try { recordFile?.appendText("${ch.chapterIndex}|${System.currentTimeMillis()}\n", Charsets.UTF_8) } catch (_: Exception) { }
+            } else failed.add(ch.chapterIndex)
+            if ((i + 1) % 2 == 0 || i + 1 == targets.size) {
+                dao.insertMessage(
+                    Message(projectId = pid, role = "tool", kind = "tool",
+                        content = "✨ 全书去AI味润色进度：已完成 ${i + 1}/${targets.size} 章" + (if (ok > 0) "（成功润色 $ok 章）" else ""))
+                )
+            }
+        }
+        val summary = "✨ 全书去AI味润色完成（本次共 ${targets.size} 章）：成功 $ok 章" +
+            (if (failed.isNotEmpty()) "；未成功：第${failed.joinToString("、")}章（多因AI输出异常，重跑一次本功能会自动补润这些章）" else "") +
+            "\n📚 润色过的章节文字已按发布级标准处理，可到【导出与发布】导出全书。"
+        dao.insertMessage(Message(projectId = pid, role = "tool", kind = "tool", content = summary))
+        return ToolResult(true, "全书去AI味润色完成", summary)
+    }
+
     /** 2. 对话扩写：把叙述改造成生动对话场景 */
     suspend fun expandDialogue(pid: Long, idx: Int): ToolResult {
         val (n, ch) = locate(pid, idx)

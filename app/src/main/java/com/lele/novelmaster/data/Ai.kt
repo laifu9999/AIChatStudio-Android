@@ -410,13 +410,34 @@ object AiClient {
      *  - 其他：同时给 thinking.type 与 enable_thinking / reasoning_effort——
      *    若服务商报 400 不认识参数，由 openaiCall 自动去参重试兜底，保证任何模型都能用。
      */
+    /**
+     * v6.9.56：实际生效的思考档位。
+     * glm-5 系（如 glm-5.3-flash）是「始终思考」模型——用户没选思考强度（默认档）时它默认思考量全开，
+     * 实测写一章正文/一张设定卡要 5~10 分钟（用户反馈"始终写不出正文、设定卡也慢"的根因）。
+     * 因此默认档下对 glm-5 系自动按最低思考量（effort=low）执行；用户明确选了 高/低/无 则尊重用户选择。
+     */
+    private fun effectiveThinkMode(cfg: ApiConfig): String {
+        val m = cfg.thinkMode
+        if (m.isNotBlank()) return m
+        val model = cfg.model.lowercase().removePrefix("chatglm").removePrefix("glm").let { "glm$it" }
+        return if (alwaysThink[cfg.model] == true ||
+            model.startsWith("glm-5") || model.startsWith("glm5")
+        ) "low" else ""
+    }
+
+    private fun isAlwaysThinkModel(model: String): Boolean {
+        val m = model.lowercase().removePrefix("chatglm").removePrefix("glm").let { "glm$it" }
+        return m.startsWith("glm-5") || m.startsWith("glm5")
+    }
+
     private fun applyThinkingOpenai(o: JSONObject, cfg: ApiConfig) {
-        val mode = cfg.thinkMode
+        val mode = effectiveThinkMode(cfg)
         if (mode.isBlank()) return
         if (thinkingUnsupported[cfg.model] == true) return
         // v6.9.54：「始终思考」模型——关不掉思考，用 reasoning_effort 控制思考量
         // （无思考/低强度→low 把思考压到最低，高强度→high），实测 glm-5.3-flash effort=low 合法生效
-        if (alwaysThink[cfg.model] == true) {
+        // v6.9.56：glm-5 系按模型名直接判定为始终思考（不再依赖首次 400 报错才触发）
+        if (alwaysThink[cfg.model] == true || isAlwaysThinkModel(cfg.model)) {
             o.put("reasoning_effort", if (mode == "high") "high" else "low")
             return
         }
@@ -490,7 +511,8 @@ object AiClient {
         maxTokens: Int,
         stream: Boolean
     ): Response {
-        val useThink = cfg.thinkMode.isNotBlank() && thinkingUnsupported[cfg.model] != true
+        // v6.9.56：用「实际生效档位」判断是否注入思考参数——glm-5 系默认档也要带 effort=low
+        val useThink = effectiveThinkMode(cfg).isNotBlank() && thinkingUnsupported[cfg.model] != true
         val url = cfg.baseUrl.trimEnd('/') + "/chat/completions"
         fun build(withThink: Boolean): Request = Request.Builder()
             .url(url)

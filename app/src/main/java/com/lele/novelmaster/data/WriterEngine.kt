@@ -26,7 +26,7 @@ object WriterEngine {
 
     /** 会话项目子文件夹（正文/大纲/设定卡…），context 为空时返回 null（仅跳过落盘，不影响写作）。
      *  v6.9.32：create=false 用于清理/读取旧路径——只定位不 mkdirs，避免清出空文件夹（用户踩坑：多出「大纲」文件夹） */
-    private fun dir(context: Context?, pid: Long, sub: String, create: Boolean = true): File? {
+    fun dir(context: Context?, pid: Long, sub: String, create: Boolean = true): File? {
         if (context == null) return null
         return try {
             val base = File(context.filesDir, "novels/$pid/files/$sub")
@@ -248,10 +248,11 @@ object WriterEngine {
                     temperature = 0.5,
                     maxTokens = 2000
                 )
-                val tre = Regex("^第\\s*(\\d+)\\s*章\\s*[《\\[]([^》\\]]+)[》\\]]")
+                // v6.9.56：同样容忍 markdown 修饰与中文数字章号
+                val tre = Regex("^[#\\s>*·•\\-—]*第\\s*([0-9０-９]+|[零一二两三四五六七八九十百千]+)\\s*章\\s*[《\\[]([^》\\]]+)[》\\]]")
                 for (line in reply.lines()) {
                     val m = tre.find(line.trim()) ?: continue
-                    val idx = m.groupValues[1].toIntOrNull() ?: continue
+                    val idx = chapterNumOf(m.groupValues[1]) ?: continue
                     val t = m.groupValues[2].trim()
                     val ch = needTitle.firstOrNull { it.chapterIndex == idx } ?: continue
                     if (t.isNotBlank()) dao.updateChapter(ch.copy(title = t))
@@ -543,7 +544,13 @@ object WriterEngine {
         // v6.9.32 加固：1) 只认行首「第N章」——AI 说明文字里出现「第N章」不再被当成大纲写进章节；
         // 2) 章号后含「缺失/说明/如下」等 meta 词的行直接跳过（用户踩坑：说明文字被写进大纲）；
         // 3) 项目符号续行并入上一章（支持多行大纲）；4) 结束时统一写回
-        val regex = Regex("^第\\s*(\\d+)\\s*章")
+        // v6.9.56 全面加固（用户实测 glm-5.3-flash 输出「#### 第2章《标题》」「第二十三章：…」全部漏解析，
+        // 章节标题空着 → 分章大纲/正文全部显示「未命名」）：
+        //   ① 容忍行首 markdown 修饰（####、**、>、·、- 等）；
+        //   ② 章号支持中文数字（第二十三章 → 23）；
+        //   ③ 「第N章《标题》大纲」无冒号格式也能提取标题；
+        //   ④ 标题/大纲剥离残留的 markdown 星号。
+        val regex = Regex("^[#\\s>*·•\\-—─|]*第\\s*([0-9０-９]+|[零一二两三四五六七八九十百千]+)\\s*章")
         val meta = Regex("缺失|暂缺|待补|已补|补齐|补全|说明|如下|示例|格式|汇总|整理")
         class Acc(val ch: Chapter, var title: String, var outline: String)
         val acc = LinkedHashMap<Int, Acc>()
@@ -562,7 +569,7 @@ object WriterEngine {
                 }
                 continue
             }
-            val idx = m.groupValues[1].toIntOrNull() ?: continue
+            val idx = chapterNumOf(m.groupValues[1]) ?: continue
             val ch = chapters.firstOrNull { it.chapterIndex == idx } ?: continue
             var rest = line.substring(m.range.last + 1).trim()
             val sep = rest.indexOfFirst { it == '：' || it == ':' }
@@ -572,10 +579,22 @@ object WriterEngine {
             var outline = ch.outline
             if (sep >= 0) {
                 val t = rest.substring(0, sep).trim().removeSurrounding("《", "》")
+                    .removeSurrounding("《", "》").trim('*', ' ', '《', '》', '「', '」')
                 if (t.isNotBlank()) title = t
-                outline = rest.substring(sep + 1).trim()
+                outline = rest.substring(sep + 1).trim().trim('*', ' ')
             } else {
-                outline = rest.removeSurrounding("《", "》").trim()
+                // v6.9.56：无冒号时优先识别「第N章《标题》大纲…」——书名号里有内容当标题，
+                // 剩余部分当大纲；没有书名号才整段当大纲（旧行为，标题留空由补齐流程兜底）
+                val tm = Regex("^《([^《》]+)》\\s*[:：]?\\s*(.*)$").find(rest)
+                    ?: Regex("^\\[([^\\[\\]]+)]\\s*[:：]?\\s*(.*)$").find(rest)
+                if (tm != null) {
+                    val t = tm.groupValues[1].trim()
+                    val body = tm.groupValues[2].trim()
+                    if (t.isNotBlank()) title = t
+                    outline = body.ifBlank { rest.removeSurrounding("《", "》").trim() }
+                } else {
+                    outline = rest.removeSurrounding("《", "》").trim()
+                }
             }
             if (outline.isNotBlank() || title != ch.title) {
                 last = Acc(ch, title, outline)
@@ -587,6 +606,35 @@ object WriterEngine {
                 dao.updateChapter(a.ch.copy(title = a.title, outline = a.outline))
             }
         }
+    }
+
+    /**
+     * v6.9.56：章号解析——阿拉伯数字（含全角）直接转，中文数字（第二十三章的「二十三」）走
+     * 中文数字换算；解析失败返回 null（该行忽略）。
+     */
+    private fun chapterNumOf(s: String): Int? {
+        val t = s.trim()
+        t.map { c -> Character.getNumericValue(c) }.takeIf { list -> list.all { it in 0..9 } }
+            ?.let { list -> return list.fold(0) { acc, d -> acc * 10 + d } }
+        return cnNumToArabic(t)
+    }
+
+    /** 中文数字（零一二两三四五六七八九十百千）转阿拉伯数字；「十」=10、「二十三」=23、「一百零五」=105 */
+    private fun cnNumToArabic(s: String): Int? {
+        if (s.isBlank()) return null
+        val digit = mapOf('零' to 0, '一' to 1, '两' to 2, '二' to 2, '三' to 3, '四' to 4, '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9)
+        var total = 0
+        var cur = 0
+        for (c in s) {
+            when {
+                digit.containsKey(c) -> cur = digit[c]!!
+                c == '十' -> { total += (if (cur == 0) 1 else cur) * 10; cur = 0 }
+                c == '百' -> { total += (if (cur == 0) 1 else cur) * 100; cur = 0 }
+                c == '千' -> { total += (if (cur == 0) 1 else cur) * 1000; cur = 0 }
+                else -> return null
+            }
+        }
+        return (total + cur).takeIf { it > 0 }
     }
 
     /**
@@ -835,6 +883,32 @@ object WriterEngine {
      *  2) 生成正文 → 存库 → 同时落盘 files/正文/第N章-标题.txt
      *  3) 摘要 / 剧情进度 / 伏笔回收
      */
+    /**
+     * v6.9.56：开写前标题兜底——先免费从大纲文本提取（「第N章《标题》：」/首句《标题》/首句短语），
+     * 提取不到再花一次小调用起名（glm-5 系默认档已压到 effort=low，小调用秒级）。失败静默跳过不阻塞写章。
+     */
+    private suspend fun ensureChapterTitle(cfg: ApiConfig, dao: NovelDao, ch0: Chapter): Chapter {
+        // 1) 免费提取：大纲里若带《标题》直接用
+        val fromOutline = Regex("《([^《》]{2,12})》").find(ch0.outline.take(60))?.groupValues?.get(1)?.trim()
+        if (!fromOutline.isNullOrBlank()) {
+            val ch = ch0.copy(title = fromOutline.take(16))
+            dao.updateChapter(ch)
+            return ch
+        }
+        // 2) 小调用起名
+        return try {
+            val ask = "给下面这章起一个2~8字的网文风格章节标题。只输出标题本身，不要书名号、不要解释：\n" +
+                "本章大纲：${ch0.outline.take(120).ifBlank { "（无大纲）" }}"
+            val t = AiClient.chat(cfg, listOf(ChatMsg("user", ask)), temperature = 0.5, maxTokens = 300)
+                .trim().trim('*', '#', ' ', '《', '》', '「', '」', '"', '"').take(16)
+            if (t.isNotBlank() && !t.contains("\n")) {
+                val ch = ch0.copy(title = t)
+                dao.updateChapter(ch)
+                ch
+            } else ch0
+        } catch (_: Exception) { ch0 }
+    }
+
     suspend fun writeOne(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter, context: Context? = null) {
         // v6.9.39：同章正文任务闸门——自动写作写到某章时，若该章正被编辑器AI重写/聊天润色等占用，
         // 抛错让本书自动写作立即中止（避免两路同时写同一章互相覆盖）；等该任务完成后可重启自动写作
@@ -848,6 +922,12 @@ object WriterEngine {
     }
 
     private suspend fun writeOneInner(project: Project, cfg: ApiConfig, dao: NovelDao, ch0: Chapter, context: Context? = null) {
+        // v6.9.56：正文没标题兜底——大纲阶段漏了标题的章，开写前先补一个（免费优先：从大纲文本提取；
+        // 提取不到再花一次小调用起名），否则正文/镜像卡/导出文件全程显示「未命名」
+        var ch0 = ch0
+        if (ch0.title.isBlank()) {
+            ch0 = ensureChapterTitle(cfg, dao, ch0)
+        }
         val cards = dao.cards(project.id)
         val chapters = dao.chapters(project.id)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0, sumCount(), winPrev())
@@ -1101,7 +1181,7 @@ object WriterEngine {
      * 长度校验（原文 60%~160%）兜底，异常润色稿直接放弃保安全；改前备份、改后落盘正文文件。
      * 返回是否采用。
      */
-    private suspend fun polishForPublish(cfg: ApiConfig, dao: NovelDao, project: Project, ch: Chapter, context: Context?): Boolean {
+    suspend fun polishForPublish(cfg: ApiConfig, dao: NovelDao, project: Project, ch: Chapter, context: Context?): Boolean {
         val orig = ch.content
         val reply = try {
             AiClient.chat(

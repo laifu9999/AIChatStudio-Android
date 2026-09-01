@@ -290,6 +290,11 @@ object IntentRouter {
         }
 
         // ------- 专家级写作功能 -------
+        // v6.9.56：全书去AI味润色——必须放在「发布打磨/润色」路由之前（命令文本含「润色」会被单章路由误拦）
+        if (Regex("全书.{0,6}(去\\s*AI\\s*味|润色)|(去\\s*AI\\s*味).{0,6}全书|润色全书|全书润色").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.polishWholeBook(pid)
+        }
         // v6.9.35：发布打磨——必须在「润色」路由之前（「发布打磨」含「打磨」语义更specific；且「发布打磨最新章」不带「润色」二字不冲突，但放前面防将来扩展误拦）
         if (Regex("发布打磨|深度打磨|上架打磨|打磨(第|最新|本章)|打磨一下").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
