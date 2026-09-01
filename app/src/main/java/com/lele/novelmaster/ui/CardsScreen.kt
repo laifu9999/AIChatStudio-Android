@@ -159,6 +159,13 @@ fun CardsScreen(nav: NavController, pid: Long) {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
                 items(list, key = { it.id }) { card ->
                     val sysOutline = card.name == "分章大纲"  // v6.9.28：系统镜像卡防误删/误改，点按看全文
+                    // v6.9.58：人物卡标题显示「唯一名」（剥掉「（主角）」等称谓后缀），与体检报告/对话里的
+                    // 人物名对照表口径一致；同分类存在同唯一名的其他卡时保留全名避免混同
+                    val dispName = if (card.category == "人物设定") {
+                        val bare = com.lele.novelmaster.data.Prompts.personBareName(card.name)
+                        val dup = list.any { it.id != card.id && it.category == "人物设定" && com.lele.novelmaster.data.Prompts.personBareName(it.name) == bare }
+                        if (bare.isBlank() || dup) card.name else bare
+                    } else card.name
                     ElevatedCard(
                         Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .then(if (sysOutline) Modifier.clickable { viewCard = card } else Modifier)
@@ -169,7 +176,7 @@ fun CardsScreen(nav: NavController, pid: Long) {
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(card.name, style = MaterialTheme.typography.titleSmall)
+                                    Text(dispName, style = MaterialTheme.typography.titleSmall)
                                     if (card.category == "伏笔钩子" && card.status.isNotBlank()) {
                                         Text(
                                             "  ${card.status}",
@@ -220,7 +227,11 @@ fun CardsScreen(nav: NavController, pid: Long) {
                                     Icon(Icons.Default.Edit, contentDescription = "编辑", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 IconButton(onClick = {
-                                    scope.launch(Dispatchers.IO) { Repo.dao.deleteCard(card) }
+                                    // v6.9.58：删库同时删项目文件夹里的卡文件，防 syncFromLocalFiles 把旧文件当新卡复活
+                                    scope.launch(Dispatchers.IO) {
+                                        Repo.dao.deleteCard(card)
+                                        com.lele.novelmaster.data.WriterEngine.deleteCardFile(pid, card, Repo.app)
+                                    }
                                 }) {
                                     Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }

@@ -221,6 +221,9 @@ object Tools {
         val c = withContext(Dispatchers.IO) { Repo.dao.cards(pid).firstOrNull { it.id == cardId } }
             ?: return ToolResult(false, "找不到该设定卡")
         withContext(Dispatchers.IO) { Repo.dao.deleteCard(c) }
+        // v6.9.58：同步删除项目文件夹里的卡文件——否则下次 syncFromLocalFiles 会把旧文件
+        // 当新卡重新导入，刚删的卡「复活」（UI 与库不一致的另一个来源）
+        WriterEngine.deleteCardFile(pid, c, Repo.app)
         return ToolResult(true, "已删除", "「${c.category} / ${c.name}」已移除")
     }
 
@@ -291,6 +294,9 @@ object Tools {
             } catch (_: Exception) { }
             val updated = c.copy(name = newName, content = newContent, updatedAt = System.currentTimeMillis())
             withContext(Dispatchers.IO) { dao.updateCard(updated) }
+            // v6.9.58：卡名变了必须删掉旧卡名文件——否则下次 syncFromLocalFiles 会把旧文件当新卡
+            // 重新导入（用户实测：改卡名后菜单里新旧两张卡并存，UI 与库不一致）
+            if (newName != c.name) WriterEngine.deleteCardFile(pid, c, Repo.app)
             WriterEngine.exportCardFile(pid, updated, Repo.app)
             cardCount++
             cardNames.add(c.name)
@@ -1366,7 +1372,11 @@ object Tools {
             "deleteCard" -> deleteCard(pid, args.optLong("cardId"))
             "writeNextChapter" -> writeNextChapter(pid, context)
             "rewriteChapter" -> rewriteChapter(pid, args.optInt("index"))
-            "startAutoWrite" -> startAutoWrite(pid, args.optInt("from", 1), args.optInt("to", 300), context)
+            // v6.9.58：to 缺省用本书目标章数（此前硬编码 300——作者说共 500 章而 AI 调 startAutoWrite 不带 to 时只写到 300 就停）
+            "startAutoWrite" -> {
+                val proj = withContext(Dispatchers.IO) { Repo.dao.project(pid) }
+                startAutoWrite(pid, args.optInt("from", 1), args.optInt("to", proj?.targetChapters ?: 300), context)
+            }
             "stopAutoWrite" -> stopAutoWrite(pid)
             "generateOutlines" -> generateOutlines(pid, context)
             "inspireFromText" -> inspireFromText(pid, args.optString("inspiration"), context)

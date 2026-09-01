@@ -229,12 +229,14 @@ object IntentRouter {
         // ------- 自动写作 -------
         if (!asking && Regex("自动写作|一键写完|自动写完|自动写下去|全部?自动|开始自动").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先告诉我写哪本书")
+            // v6.9.58：范围缺省到本书目标章数（此前硬编码 300——说「共500章」会只写到300）
+            val defTo = runCatching { Repo.dao.project(pid) }.getOrNull()?.targetChapters ?: 300
             val rangePair = Regex("(从第)?([0-9零一二三四五六七八九十百千]{1,4})(章?)?(到|~|至|\\-)?第?([0-9零一二三四五六七八九十百千]{1,4})章?").find(noAi)
             val (from, to) = if (rangePair != null) {
                 val a = parseChineseNum(rangePair.groupValues[2])
                 val b = parseChineseNum(rangePair.groupValues[5])
-                Pair(if (a in 1..100000) a else 1, if (b in 1..100000) b else 300)
-            } else Pair(1, 300)
+                Pair(if (a in 1..100000) a else 1, if (b in 1..100000) b else defTo)
+            } else Pair(1, defTo)
             return Tools.startAutoWrite(pid, from, to, context)
         }
         if (Regex("^(停止|暂停|中止|停).*(写|自动)|停止写作|别写了|暂停写作").containsMatchIn(raw)) {

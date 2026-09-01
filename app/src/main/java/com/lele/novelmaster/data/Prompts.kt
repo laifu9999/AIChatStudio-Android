@@ -34,6 +34,13 @@ object Prompts {
     fun normCardName(s: String): String =
         s.replace(Regex("[\\\\/:*?\"<>|（）()·．.\\s_－—~～]"), "")
 
+    /** v6.9.58：从卡名提取人物「唯一名」——「林墨（主角）」「男主·林墨」「林墨(女主)」→「林墨」。
+     *  人物名对照表（writerSystem）、personNamesMatch（WriterEngine）、fixCastNames（正文校正）三处共用同一口径 */
+    fun personBareName(s: String): String {
+        val strip = Regex("(?:男主|女主|主角|男二|女二|男三|女三|配角|重要配角|反派)")
+        return normCardName(s.replace(strip, ""))
+    }
+
     /** 按优先级与关键词相关度挑选要注入的设定卡 */
     fun selectCards(all: List<SettingCard>, focusText: String): List<SettingCard> {
         // v6.9.23：分章大纲系统卡不参与整卡注入——写章走「大纲窗口」（前两章+本章+后一章）独立注入，
@@ -93,6 +100,14 @@ object Prompts {
         //        之前和普通卡挤 900 字预算会被截断/丢弃，导致体系自相矛盾；
         //  第3层 其余卡（伏笔/主线/大纲/相关卡）维持 900 字预算，注入总量基本恒定
         val charCards = selected.filter { it.category == "人物设定" }
+        // v6.9.58：人物名对照表——全书唯一名铁律（跨章人名漂移「林墨→林哲/林川」的提示词层根治）
+        val castNames = charCards.map { personBareName(it.name) }.filter { it.length >= 2 }.distinct()
+        if (castNames.isNotEmpty()) {
+            appendLine("【全书人物名对照表（唯一名，全书每章必须逐字一致）】")
+            castNames.forEach { appendLine("· $it") }
+            appendLine("人物名铁律：正文中出现的已有人物，名字必须与上表逐字一致；严禁写成音近字/形近字/错别字等任何变体（例如唯一名是「林墨」，就绝不能写成「林哲」「林昭」「林川」）；严禁给已有人物改名，严禁另造同地位新角色顶替已有人物；需要新配角时，其姓名必须与上表所有人名明显不同。")
+            appendLine()
+        }
         val worldCards = selected.filter { it.category == "世界观" || it.category == "设定圣经" }
         // v6.9.3：写作禁忌卡单独完整注入——它是自检修正过的矛盾模式清单，
         // 混在普通卡里走 900 字预算会被 300 字/卡截断，避坑信息不完整

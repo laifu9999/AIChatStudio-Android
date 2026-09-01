@@ -45,13 +45,66 @@ object WriterEngine {
      * 用于「男主重复生成两张卡、信息还不一致」的根治：重复保存自动并入原卡。
      */
     fun personNamesMatch(a: String, b: String): Boolean {
-        val strip = Regex("(?:男主|女主|主角|男二|女二|男三|女三|配角|重要配角|反派)")
-        val na = Prompts.normCardName(a.replace(strip, ""))
-        val nb = Prompts.normCardName(b.replace(strip, ""))
+        val na = Prompts.personBareName(a)
+        val nb = Prompts.personBareName(b)
         if (na.isBlank() || nb.isBlank()) return false
         if (na == nb) return true
         val (short, long) = if (na.length <= nb.length) na to nb else nb to na
         return short.length >= 2 && long.contains(short)
+    }
+
+    /**
+     * v6.9.58：人物名统一校正（代码层兜底）——AI 跨章把「林墨」写成「林哲/林川」这类同姓变体时自动改回唯一名。
+     * 与提示词层（writerSystem 人物名对照表）、自检层（selfCheckChapter 人名核查项）构成三道防线。
+     * 保守策略，宁漏勿错：
+     *  · 只处理与某个人物唯一名「同长度且同姓（首字相同）」的候选变体；
+     *  · 变体不得与任何唯一名相等/互含（防止把「林雪儿」并进「林雪」这类正常情况）；
+     *  · 变体中不得含有常见构词字（间/中/路/道/风/雪/云…），防止把「林间」「云道」等普通词当人名；
+     *  · 同姓的唯一名不止一个时不猜归属，直接放弃（例如「林墨」「林川」都是唯一名时，「林哲」不动）；
+     *  · 变体至少出现 2 次、或（两字名时）出现 1 次但紧跟「说/道/笑/皱眉」等人名上下文，才替换；
+     *  · 替换用边界正则（前后不能再是汉字），不会误伤「林哲安」里的「林哲」。
+     * 返回 (修正后正文, 替换处数)；无人物卡或无变体时原样返回。
+     */
+    fun fixCastNames(text: String, cards: List<SettingCard>): Pair<String, Int> {
+        val cast = cards.filter { it.category == "人物设定" }
+            .map { Prompts.personBareName(it.name) }
+            .filter { it.length in 2..4 }
+            .distinct()
+        if (cast.isEmpty() || text.length < 10) return text to 0
+        val castSet = cast.toSet()
+        // 常见构词字：变体含这些字时大概率是普通词不是人名（林间小路/云道/山门…）
+        val wordish = "间中里外上下前后子头口心面身手脚步眼耳风雨雪月日天云烟尘气地山水路道门桥梁城村镇国朝殿堂院室房树花草木叶枝石光影音声调海江湖河溪泉田土火冰金铁刀剑枪旗车马船舟纸书文语句话事物品药酒茶饭汤饼"
+        // 人名上下文（前瞻）：候选名后紧跟这些字，基本可确认是「人物在做动作/说话」
+        val ctx = Regex("(?=说|道|问|答|笑|喊|叫|低|抬|看|望|皱|点|摇|冷|轻|沉|叹|瞪|愣|盯|握|挥|转|冲|拦|追|劝|命|拒|怒|惊|喜|哀|惧|应|和|与|把|让|给|朝|向|对|拉|拍|推|牵|扶|抱|搂|躬|站|走|跑|坐|跪|俯|仰|睁|闭|抬眸|点头|摇头|皱眉|开口|冷笑|苦笑|转身|说道|笑道|问道|答道|喊道|沉声|淡淡)")
+        var out = text
+        var total = 0
+        for (name in cast) {
+            val surname = name.first()
+            val n = name.length
+            // 同姓的其他唯一名——存在即歧义，本名不做任何变体替换
+            if (cast.any { it != name && it.first() == surname }) continue
+            val candidates = Regex(Regex.escape(surname.toString()) + "[\\u4e00-\\u9fa5]{" + (n - 1) + "}")
+                .findAll(out).map { it.value }.toSet()
+            for (cand in candidates) {
+                if (cand == name || castSet.contains(cand)) continue
+                if (castSet.any { it.contains(cand) || cand.contains(it) }) continue
+                if (cand.drop(1).any { it in wordish }) continue
+                // 带边界匹配（前后不能再是汉字），避免误伤更长的人名/词
+                val bounded = Regex("(?<![\\u4e00-\\u9fa5])" + Regex.escape(cand) + "(?![\\u4e00-\\u9fa5])")
+                val occurrences = bounded.findAll(out).toList()
+                if (occurrences.isEmpty()) continue
+                val totalHits = occurrences.size
+                val ctxHits = occurrences.count { m ->
+                    val end = m.range.last + 1
+                    end < out.length && ctx.matchAt(out, end) != null
+                }
+                if (ctxHits == 0) continue
+                if (!(totalHits >= 2 || (totalHits == 1 && n == 2))) continue
+                out = bounded.replace(out, name)
+                total += totalHits
+            }
+        }
+        return out to total
     }
 
     /** v6.9.41：注入偏好读取（无全局上下文时用默认值：摘要0章、窗口前2章） */
@@ -64,6 +117,16 @@ object WriterEngine {
         try {
             val d = dir(context, projectId, "设定卡/${card.category}") ?: return
             File(d, safeName(card.name) + ".md").writeText("# ${card.category} · ${card.name}\n\n${card.content}\n", Charsets.UTF_8)
+        } catch (_: Exception) { }
+    }
+
+    /** v6.9.58：删除项目文件夹里的设定卡文件——删卡/改卡名后必须调用，
+     *  否则下次 syncFromLocalFiles 会把旧文件当新卡重新导入（删掉的卡「复活」、新旧卡并存） */
+    fun deleteCardFile(projectId: Long, card: SettingCard, context: Context?) {
+        if (context == null) return
+        try {
+            val d = dir(context, projectId, "设定卡/${card.category}") ?: return
+            File(d, safeName(card.name) + ".md").delete()
         } catch (_: Exception) { }
     }
 
@@ -1037,6 +1100,16 @@ object WriterEngine {
             } catch (_: Exception) { break }
         }
 
+        // v6.9.58：人物名统一校正——AI 把「林墨」写成「林哲/林川」这类同姓变体时自动改回唯一名（跨章人名一致性）
+        runCatching {
+            val (fixed, nFix) = fixCastNames(content, cards)
+            if (nFix > 0) {
+                content = fixed
+                dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                    content = "🔧 人物名统一：本章自动把 $nFix 处与人物卡不一致的人名写法改回唯一名"))
+            }
+        }
+
         var ch = ch0.copy(
             content = content,
             wordCount = content.length,
@@ -1092,7 +1165,9 @@ object WriterEngine {
             // v6.9.25：人物卡按本章正文出场过滤（长篇人物多时自检注入随卡数线性膨胀）——
             // 出场人物/必发人物全量对照；未出场人物只留名单供称谓/人数对照，设定省略
             val body = ch0.content
-            fun bareName(n: String) = n.substringAfterLast('·', n).substringAfterLast('•', n).trim()
+            // v6.9.58：改用 personBareName——旧写法不剥「（主角）」等括号称谓，正文写「林墨」时
+            // 卡名「林墨（主角）」contains 匹配不上，会被误判为未出场人物
+            fun bareName(n: String) = Prompts.personBareName(n).ifBlank { n.substringAfterLast('·', n).substringAfterLast('•', n).trim() }
             val present = hard.filter { it.category != "人物设定" || it.priority == 2 || body.contains(bareName(it.name)) }
             val absent = hard.filter { it.category == "人物设定" && it.priority != 2 && !body.contains(bareName(it.name)) }
             present.joinToString("\n") { "【${it.category}·${it.name}】${it.content.take(300)}" } +
@@ -1118,7 +1193,8 @@ object WriterEngine {
                         "【第${ch0.chapterIndex}章正文】\n${ch0.content.take(3000)}\n\n" +
                         "任务：只检查正文是否矛盾——1) 违背设定（体质/灵根/境界/功法/称谓/世界观规则）；\n" +
                         "2) 与前情摘要冲突（时间线颠倒、人数/物品对不上、事件衔接矛盾）；\n" +
-                        "3) 遗漏或违背本章大纲：大纲要求的关键事件没写、剧情走向明显跑偏（轻微措辞/详略差异不算）。\n" +
+                        "3) 遗漏或违背本章大纲：大纲要求的关键事件没写、剧情走向明显跑偏（轻微措辞/详略差异不算）；\n" +
+                        "4) 人物名与人物卡不一致：正文把已有人物写成了变体名（如人物卡是「林墨」，正文写成「林哲/林昭/林川」），必须逐字对照人物卡名单核查。\n" +
                         "无矛盾：只输出【通过】。\n" +
                         "有矛盾：每行一条，格式：原文片段=>修正后片段（原文片段必须是正文里连续出现的文字，最多3条，改最小的范围）。\n" +
                         "只允许修正矛盾本身，严禁借机改写剧情、增删情节或润色其他文字；拿不准的地方不要动。\n" +
@@ -1480,9 +1556,15 @@ object WriterEngine {
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
         val content = cleanBody(AiClient.chat(cfg, messages).trim(), ch.chapterIndex, ch.title)
         if (content.isBlank()) return "AI返回空内容"
+        // v6.9.58：人物名统一校正（重写稿同样把变体名改回唯一名）
+        val fixedContent = runCatching { fixCastNames(content, cards) }.getOrDefault(content to 0)
+        if (fixedContent.second > 0) {
+            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                content = "🔧 人物名统一：重写稿自动把 ${fixedContent.second} 处与人物卡不一致的人名写法改回唯一名"))
+        }
         val newCh = ch.copy(
-            content = content,
-            wordCount = content.length,
+            content = fixedContent.first,
+            wordCount = fixedContent.first.length,
             status = 1,
             summary = "",
             updatedAt = System.currentTimeMillis()
@@ -1494,7 +1576,7 @@ object WriterEngine {
             if (ctx != null) {
                 dir(ctx, ch.projectId, "正文")?.let { d ->
                     File(d, safeName("第${newCh.chapterIndex}章-${newCh.title.ifBlank { "未命名" }}") + ".txt")
-                        .writeText(content + "\n", Charsets.UTF_8)
+                        .writeText(fixedContent.first + "\n", Charsets.UTF_8)
                 }
             }
         } catch (_: Exception) { }
@@ -1548,8 +1630,10 @@ object WriterEngine {
         val cards = dao.cards(projectId)
         val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch, sumCount(), winPrev()).toMutableList()
         messages.add(ChatMsg("user", instruction))
-        val out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
+        var out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
+        // v6.9.58：人物名统一校正（润色/扩写/改风格等任务稿同样把变体名改回唯一名）
+        runCatching { val (f, n) = fixCastNames(out, cards); if (n > 0) out = f }
         if (replace && out.length >= 300) {
             // v6.9.14：替换正文（润色/扩写/补写/改风格/钩子等）前先备份原文——撤销工具可直接恢复
             try {
