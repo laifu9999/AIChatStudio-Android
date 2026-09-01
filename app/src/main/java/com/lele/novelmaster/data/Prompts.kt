@@ -37,8 +37,10 @@ object Prompts {
     /** v6.9.58：从卡名提取人物「唯一名」——「林墨（主角）」「男主·林墨」「林墨(女主)」→「林墨」。
      *  人物名对照表（writerSystem）、personNamesMatch（WriterEngine）、fixCastNames（正文校正）三处共用同一口径 */
     fun personBareName(s: String): String {
+        // v6.9.58b：先剥任意括号后缀——「慕容雪（圣女）」这类非称谓括号也要去掉，否则唯一名超长
+        val noParen = s.replace(Regex("（[^）]*）|\\([^)]*\\)"), "")
         val strip = Regex("(?:男主|女主|主角|男二|女二|男三|女三|配角|重要配角|反派)")
-        return normCardName(s.replace(strip, ""))
+        return normCardName(noParen.replace(strip, ""))
     }
 
     /** 按优先级与关键词相关度挑选要注入的设定卡 */

@@ -56,13 +56,15 @@ object WriterEngine {
     /**
      * v6.9.58：人物名统一校正（代码层兜底）——AI 跨章把「林墨」写成「林哲/林川」这类同姓变体时自动改回唯一名。
      * 与提示词层（writerSystem 人物名对照表）、自检层（selfCheckChapter 人名核查项）构成三道防线。
-     * 保守策略，宁漏勿错：
+     * 保守策略，宁漏勿错（算法经 test_castnames.py 复刻模拟器 15 用例验证）：
      *  · 只处理与某个人物唯一名「同长度且同姓（首字相同）」的候选变体；
      *  · 变体不得与任何唯一名相等/互含（防止把「林雪儿」并进「林雪」这类正常情况）；
      *  · 变体中不得含有常见构词字（间/中/路/道/风/雪/云…），防止把「林间」「云道」等普通词当人名；
      *  · 同姓的唯一名不止一个时不猜归属，直接放弃（例如「林墨」「林川」都是唯一名时，「林哲」不动）；
      *  · 变体至少出现 2 次、或（两字名时）出现 1 次但紧跟「说/道/笑/皱眉」等人名上下文，才替换；
-     *  · 替换用边界正则（前后不能再是汉字），不会误伤「林哲安」里的「林哲」。
+     *  · v6.9.58b：只有左侧边界（前一个字符不能是汉字）——中文里人名后面几乎总跟着汉字（动词/助词），
+     *    右侧一刀切会永远不触发；右侧风险改由「更长名延伸检测」兜住：某次出现后跟既非动词又非虚词的
+     *    汉字 X，且 cand+X 在别处以人名上下文出现 → cand 疑似更长人名前缀（林哲·安），跳过宁漏勿错。
      * 返回 (修正后正文, 替换处数)；无人物卡或无变体时原样返回。
      */
     fun fixCastNames(text: String, cards: List<SettingCard>): Pair<String, Int> {
@@ -74,8 +76,10 @@ object WriterEngine {
         val castSet = cast.toSet()
         // 常见构词字：变体含这些字时大概率是普通词不是人名（林间小路/云道/山门…）
         val wordish = "间中里外上下前后子头口心面身手脚步眼耳风雨雪月日天云烟尘气地山水路道门桥梁城村镇国朝殿堂院室房树花草木叶枝石光影音声调海江湖河溪泉田土火冰金铁刀剑枪旗车马船舟纸书文语句话事物品药酒茶饭汤饼"
-        // 人名上下文（前瞻）：候选名后紧跟这些字，基本可确认是「人物在做动作/说话」
-        val ctx = Regex("(?=说|道|问|答|笑|喊|叫|低|抬|看|望|皱|点|摇|冷|轻|沉|叹|瞪|愣|盯|握|挥|转|冲|拦|追|劝|命|拒|怒|惊|喜|哀|惧|应|和|与|把|让|给|朝|向|对|拉|拍|推|牵|扶|抱|搂|躬|站|走|跑|坐|跪|俯|仰|睁|闭|抬眸|点头|摇头|皱眉|开口|冷笑|苦笑|转身|说道|笑道|问道|答道|喊道|沉声|淡淡)")
+        // 虚词/副词：候选名后面跟这些字时，是「名+状语」不是「更长人名」
+        val func = "才再又也就都还便即亦更最很挺颇略微稍微已曾刚将欲想要会能可不没未无非别莫勿毋先常皆均尽共只且而因由被其之乎者也焉哉矣么呢吧吗啊呀哦哟喽咧咯呐的地得了着"
+        // 人名上下文（前瞻）：候选名后紧跟这些字/词，基本可确认是「人物在做动作/说话」
+        val ctx = Regex("(?=说|道|问|答|笑|喊|叫|低|抬|看|望|皱|点|摇|冷|轻|沉|叹|瞪|愣|盯|握|挥|转|冲|拦|追|劝|命|拒|怒|惊|喜|哀|惧|应|和|与|把|让|给|朝|向|对|拉|拍|推|牵|扶|抱|搂|躬|站|走|跑|坐|跪|俯|仰|睁|闭|回|垂|眯|撇|抿|甩|摆|伸|弯|颤|抖|挪|退|进|出|来|去|过|靠|倚|停|留|跟|随|送|迎|待|急|忙|赶|飞|闯|逃|藏|躲|潜|落|坠|升|翻|滚|旋|绕|扫|瞥|瞧|瞅|闻|罢|咳|哭|泣|吼|骂|嚷|讥|嘲|逼|催|唤|邀|谢|怪|饶|罚|赏|抬眸|点头|摇头|皱眉|开口|冷笑|苦笑|转身|说道|笑道|问道|答道|喊道|沉声|淡淡|闻言|见状|话音|语气|目光|眼神|眉头|嘴角|眼中|脸上|心头|半晌|良久|许久|片刻|顿时|立刻|连忙|急忙|慌忙|突然|随即|当即|缓缓|微微|默默|悄悄|静静|匆匆)")
         var out = text
         var total = 0
         for (name in cast) {
@@ -89,8 +93,8 @@ object WriterEngine {
                 if (cand == name || castSet.contains(cand)) continue
                 if (castSet.any { it.contains(cand) || cand.contains(it) }) continue
                 if (cand.drop(1).any { it in wordish }) continue
-                // 带边界匹配（前后不能再是汉字），避免误伤更长的人名/词
-                val bounded = Regex("(?<![\\u4e00-\\u9fa5])" + Regex.escape(cand) + "(?![\\u4e00-\\u9fa5])")
+                // 只有左侧边界（前一个字符不能是汉字），避免误伤更长人名/词的前半
+                val bounded = Regex("(?<![\\u4e00-\\u9fa5])" + Regex.escape(cand))
                 val occurrences = bounded.findAll(out).toList()
                 if (occurrences.isEmpty()) continue
                 val totalHits = occurrences.size
@@ -100,6 +104,24 @@ object WriterEngine {
                 }
                 if (ctxHits == 0) continue
                 if (!(totalHits >= 2 || (totalHits == 1 && n == 2))) continue
+                // 更长名延伸检测（宁漏勿错）
+                var prefixOfLonger = false
+                for (m in occurrences) {
+                    val end = m.range.last + 1
+                    if (end >= out.length) continue
+                    val nx = out[end]
+                    if (nx.code !in 0x4E00..0x9FA5) continue          // 标点/引号 = 干净边界
+                    if (ctx.matchAt(out, end) != null) continue       // 后接动词 = 干净边界
+                    if (nx in func) continue                          // 后接虚词（霜才轻声/哲又…）= 名字已结束
+                    val longer = out.substring(m.range.first, end + 1)
+                    if (longer.drop(1).any { it in wordish }) continue // 含构词字 = 普通词不是更长人名
+                    val lext = Regex("(?<![\\u4e00-\\u9fa5])" + Regex.escape(longer))
+                    if (lext.findAll(out).any { m2 ->
+                            val e2 = m2.range.last + 1
+                            e2 < out.length && ctx.matchAt(out, e2) != null
+                        }) { prefixOfLonger = true; break }
+                }
+                if (prefixOfLonger) continue
                 out = bounded.replace(out, name)
                 total += totalHits
             }
