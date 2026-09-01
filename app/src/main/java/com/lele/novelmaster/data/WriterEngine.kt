@@ -1509,24 +1509,50 @@ object WriterEngine {
     suspend fun regenerateSummary(cfg: ApiConfig, dao: NovelDao, project: Project, ch0: Chapter): Chapter {
         var ch = ch0
         try {
+            // v6.9.61：摘要任务必须带上未回收伏笔清单——旧版只给正文让 AI 凭空判断「回收了之前的伏笔」，
+            // AI 根本不知道之前埋过什么、叫什么名字，只能自拟名称 → 与卡名对不上 → 已回收但永远不标记；
+            // 「新埋伏笔」同理没有对照，弱模型每章硬凑几条普通情节当伏笔 → 87 章堆出 165 条未回收
+            val openHooks = dao.cards(project.id).filter { it.category == "伏笔钩子" && it.status != "已回收" }.sortedBy { it.id }
+            // v6.9.61：清单本身也要防爆——积压上百条时全量注入会把摘要 prompt 撑爆；
+            // 取最陈 40 条（拖最久的优先给回收机会），内容截 30 字只留辨识度
+            val hookItems = openHooks.take(40)
+            val hookBlock = if (hookItems.isEmpty()) "（暂无）" else
+                hookItems.joinToString("\n") { "· 「${it.name}」：${it.content.take(30)}" }
             val sumReply = AiClient.chat(
                 cfg,
                 listOf(
                     ChatMsg("system", "你是小说编辑，只输出被要求的内容。"),
                     ChatMsg(
                         "user",
-                        "请用120字以内概括以下章节的剧情要点（含出场人物、关键事件、新埋的伏笔）。" +
-                            "若本章明确回收了之前的伏笔，最后另起一行，用【回收伏笔】开头列出名称；否则不要输出该行。\n" +
-                            "若本章新埋了之前没有的伏笔，每条另起一行，用【新埋伏笔】开头，格式：名称：一句话说明；否则不要输出。\n" +
+                        "请用120字以内概括以下章节的剧情要点（含出场人物、关键事件）。\n" +
+                            "\n【本书未回收伏笔清单】\n$hookBlock\n" +
+                            "回收判定（最重要）：拿上面清单逐条核对本章正文，若本章剧情明确回收了清单中的某条伏笔（悬念被揭开、埋下的细节产生戏剧性回报），" +
+                            "最后另起一行输出：【回收伏笔】名称1、名称2\n" +
+                            "该行名称必须从清单中逐字复制（含书名号），多条用顿号分隔；本章没有回收任何清单伏笔就绝不输出该行，严禁输出清单以外的名称、严禁自行改写名称。\n" +
+                            "新埋判定：只有本章刻意埋下的、后续要揭晓的悬念/暗示/未解之谜才算新伏笔；普通情节、冲突、转折、人物登场都绝不算。" +
+                            "若有，每条另起一行输出：【新埋伏笔】名称：一句话说明（最多2条）；没有就绝不输出该行。\n" +
                             "第${ch.chapterIndex}章《${ch.title}》正文：\n${ch.content.take(4000)}"
                     )
                 ),
                 temperature = 0.3,
                 maxTokens = 2048
             )
-            val recovered = sumReply.lineSequence()
+            // v6.9.61：回收行多名称解析 + 归一化双向匹配——旧版 recovered 整行单向 contains 且无清单对照，
+            // 名称差一个字就永久失配（已回收但不标记，未回收越积越多）
+            val recoveredLine = sumReply.lineSequence()
                 .firstOrNull { it.contains("回收伏笔") }
                 ?.substringAfter("】")?.trim().orEmpty()
+            val recoveredNames = recoveredLine.split('、', '，', ',', ';', '；', ' ', '/', '·')
+                .map { it.trim().trim('「', '」', '【', '】') }
+                .filter { it.isNotBlank() }
+            fun hookMatch(cardName: String, claimed: String): Boolean {
+                if (claimed.isBlank()) return false
+                if (claimed == cardName) return true
+                val a = Prompts.normCardName(cardName)
+                val b = Prompts.normCardName(claimed)
+                if (a.isNotBlank() && a == b) return true
+                return a.contains(b) || b.contains(a)
+            }
             val summary = sumReply.lines()
                 .filter { !it.contains("回收伏笔") && !it.contains("新埋伏笔") }
                 .joinToString(" ").trim()
@@ -1534,16 +1560,37 @@ object WriterEngine {
                 ch = ch.copy(summary = summary)
                 dao.updateChapter(ch)
             }
-            if (recovered.isNotBlank()) {
+            if (recoveredNames.isNotEmpty()) {
+                val doneList = mutableListOf<String>()
                 dao.cards(project.id)
-                    .filter { it.category == "伏笔钩子" && it.status != "已回收" && recovered.contains(it.name) }
-                    .forEach { dao.updateCard(it.copy(status = "已回收", updatedAt = System.currentTimeMillis())) }
+                    .filter { it.category == "伏笔钩子" && it.status != "已回收" }
+                    .filter { card -> recoveredNames.any { n -> hookMatch(card.name, n) } }
+                    .forEach {
+                        dao.updateCard(it.copy(status = "已回收", updatedAt = System.currentTimeMillis()))
+                        doneList.add(it.name)
+                    }
+                // v6.9.61：回收播报——用户必须能看到「回收真的发生了」，否则无法判断系统在正常工作
+                if (doneList.isNotEmpty()) {
+                    val left = dao.cards(project.id).count { it.category == "伏笔钩子" && it.status != "已回收" }
+                    dao.insertMessage(
+                        Message(projectId = project.id, role = "tool", kind = "tool",
+                            content = "🪝 第${ch.chapterIndex}章已回收伏笔：${doneList.joinToString("、") { "【$it】" }}，当前未回收 $left 条。")
+                    )
+                }
             }
-            // v6.9.15：新埋伏笔自动建档（去重）——保证「伏笔体检」有完整数据，不依赖 AI 主动建卡
-            sumReply.lines().filter { it.contains("新埋伏笔") }.forEach { line ->
+            // v6.9.15：新埋伏笔自动建档（去重）；v6.9.61：真伏笔校验 + ≥25条闸门——
+            // 未回收积压过多时禁止再埋（先清库存），防止无限堆积
+            val newHookLines = sumReply.lines().filter { it.contains("新埋伏笔") }
+            var newHookDenied = false
+            newHookLines.forEach { line ->
                 val body = line.substringAfter("】").trim()
                 val name = body.substringBefore("：").substringBefore(":").trim().take(30)
                 if (name.isNotBlank()) {
+                    val openCount = dao.cards(project.id).count { it.category == "伏笔钩子" && it.status != "已回收" }
+                    if (openCount >= 25) {
+                        newHookDenied = true
+                        return@forEach
+                    }
                     val desc = body.substringAfter("：", "").substringAfter(":", "").trim()
                     val exists = dao.cards(project.id).any { it.category == "伏笔钩子" && it.name == name }
                     if (!exists) {
@@ -1558,6 +1605,10 @@ object WriterEngine {
                             content = "🪝 新伏笔已记录：【$name】（${desc.ifBlank { "第${ch.chapterIndex}章埋设" }}），可随时说「伏笔体检」查看埋收状态。"))
                     }
                 }
+            }
+            if (newHookDenied) {
+                dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                    content = "⚠️ 未回收伏笔已超过 25 条，本章 AI 想埋的新伏笔未建档。建议说「伏笔体检」清理积压——回收旧伏笔比埋新伏笔更重要。"))
             }
         } catch (_: Exception) {
             // 摘要失败不影响正文

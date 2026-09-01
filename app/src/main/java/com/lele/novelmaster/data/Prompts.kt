@@ -52,8 +52,6 @@ object Prompts {
         // v6.8.2/v6.8.3：硬约束分类强制必发——手动建卡默认优先级是「常规」，用户忘选必发时
         // 人物卡/世界观/圣经可能落选导致体质灵根、力量体系等硬设定丢失
         val always = pool.filter { it.priority == 2 || it.category in HARD_CATS }
-        val foreshadow = pool.filter { it.category == "伏笔钩子" && it.status != "已回收" }
-        val normal = pool.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
 
         fun score(c: SettingCard): Int {
             var s = if (c.category in CardCategories.KEY_CATS) 1 else 0
@@ -67,6 +65,19 @@ object Prompts {
             }
             return s + minOf(hits, 6)
         }
+
+        // v6.9.61：未回收伏笔不再无限全发——长篇会堆出上百条「埋设中」，全部必发挤爆普通卡预算，
+        // 实际大多被 budgetCardBlock 截掉（假注入：播报数字上有，AI 根本没看见，谈何回收）。
+        // 改为「最陈的6条（拖久读者必忘，优先给回收机会）+ 与本章大纲最相关的6条」共12条上限，
+        // 其余交给「伏笔体检」对照各章摘要清理状态；回收节奏由摘要任务的清单对照驱动。
+        val openHooks = pool.filter { it.category == "伏笔钩子" && it.status != "已回收" }
+        val hookOldest = openHooks.sortedBy { it.id }.take(6)
+        val hookRelevant = openHooks
+            .filter { h -> hookOldest.none { o -> o.id == h.id } }
+            .sortedByDescending { score(it) }
+            .take(6)
+        val foreshadow = hookOldest + hookRelevant
+        val normal = pool.filter { it.priority == 1 && it.id !in always.map { a -> a.id } && it.id !in foreshadow.map { f -> f.id } }
 
         val ranked = normal.sortedByDescending { score(it) }.take(14)
         val merged = (always + foreshadow + ranked).distinctBy { it.id }
@@ -84,7 +95,7 @@ object Prompts {
         appendLine("你是一位顶级网络小说作家，正在按大纲逐章写作。严格遵守：")
         appendLine("1. 人物的体质、灵根、血脉、境界、功法、外貌、称谓、性格是硬性设定，必须与【人物设定】逐字一致，绝不允许自行更改或另造（例如设定为先天剑体/天灵根，就绝不能写成其他体质灵根）。世界观规则同样不得违背。")
         appendLine("2. 与前情摘要、上一章结尾自然衔接；不重复已写过的情节，不另起炉灶。")
-        appendLine("3. 伏笔规则：【伏笔钩子】中状态为“埋设中”的伏笔要按计划推进；“已回收”的不可再当新伏笔。需要埋新伏笔时自然埋下。")
+        appendLine("3. 伏笔规则：【未回收伏笔】块列出当前埋设中的伏笔（已回收的不在其中，绝不可再当新伏笔写）。每章结合本章大纲判断：若某条伏笔的回收时机已到，就挑 1~2 条在剧情中自然回收——让当初埋下的细节重新登场并产生新的戏剧意义（揭开悬念/促成反转/情感冲击），回收要出人意料又在情理之中，严禁一句带过的生硬交代、严禁为凑数硬收；时机未到的继续自然推进。埋新伏笔要克制：只埋刻意设计的悬念（反常细节、暗示、未解之谜），普通情节、冲突、转折都不是伏笔。")
         appendLine("4. 每章必须有推进、有冲突、章末留钩子（悬念）。多用场景与对话（对话建议占三成以上，对话要有潜台词、能推动剧情与信息差），少干巴巴的旁白。")
         appendLine("5. 只输出正文本身：不要输出章节标题、章节号、序号、解释、总结或任何多余内容。")
         appendLine("6. 必须一次性写完整一章：从开头一路写到章末钩子，情节自然收束，绝不允许中途停笔、省略或写“未完待续/下半部分”。")
@@ -114,8 +125,12 @@ object Prompts {
         // v6.9.3：写作禁忌卡单独完整注入——它是自检修正过的矛盾模式清单，
         // 混在普通卡里走 900 字预算会被 300 字/卡截断，避坑信息不完整
         val taboo = selected.filter { it.category == "辅助设定" && it.name == "写作禁忌" }
+        // v6.9.61：未回收伏笔从「其余卡 900 字预算」里抽出来——之前和普通卡挤预算，
+        // 300字/卡截断后排在后面的伏笔整条丢失（假注入）。独立成块、单卡截100字、总量可控
+        val hookCards = selected.filter { it.category == "伏笔钩子" && it.status != "已回收" }
         val rest = selected.filter {
             it.category != "人物设定" && it.category != "世界观" && it.category != "设定圣经" &&
+                it.category != "伏笔钩子" &&
                 it.id !in taboo.map { t -> t.id }
         }
         if (charCards.isNotEmpty()) {
@@ -132,6 +147,12 @@ object Prompts {
         if (taboo.isNotEmpty()) {
             appendLine("【写作禁忌（本书已写错并被系统纠正的矛盾模式，原文=>修正，绝不允许再犯）】")
             append(budgetCardBlock(taboo, budget = taboo.size * 600, perCard = 600))
+            appendLine()
+        }
+        // v6.9.61：未回收伏笔独立块——名称+一句话说明，逐条完整注入（selectCards 已限 12 条）
+        if (hookCards.isNotEmpty()) {
+            appendLine("【未回收伏笔（埋设中，结合本章大纲择机自然回收；回收时机已到的优先处理）】")
+            hookCards.forEach { appendLine("· 「${it.name}」：${it.content.take(100)}") }
             appendLine()
         }
         if (charCards.isNotEmpty() || worldCards.isNotEmpty()) {
