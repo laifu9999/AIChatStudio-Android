@@ -775,7 +775,8 @@ object Tools {
         return if (err == null) ToolResult(true, "全书体检报告（${written.size} 章已检查）：", out + tip) else ToolResult(false, err)
     }
 
-    /** 8.0b 伏笔体检：对照伏笔钩子卡与各章摘要，评估埋设/回收状态并给回收建议（只分析不修改） */
+    /** 8.0b 伏笔体检：对照伏笔钩子卡与各章摘要，评估埋设/回收状态并给回收建议（只分析不修改）；
+     *  v6.9.61：未回收>30条时只逐条评估最陈30条（防输出超限截断+用户读不完），其余列名录+给清理指引 */
     suspend fun foreshadowCheck(pid: Long): ToolResult {
         val dao = Repo.dao
         val hooks = dao.cards(pid).filter { it.category == "伏笔钩子" }
@@ -785,33 +786,67 @@ object Tools {
         val chapters = dao.chapters(pid).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
         val summaryBlock = chapters.takeLast(30)
             .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》：${it.summary.take(60)}" }
+        // v6.9.61：逐条评估对象——未回收超30条时聚焦最陈30条（早埋的最该先处理）
+        val focusOpen = if (open.size > 30) open.sortedBy { it.id }.take(30) else open
+        val restCount = open.size - focusOpen.size
         val (err, out) = WriterEngine.freeTask(
             pid,
             "任务：伏笔体检（只分析，不修改任何卡与正文）。\n" +
                 "【伏笔清单】\n" +
-                (if (open.isNotEmpty()) "未回收：\n" + open.joinToString("\n") { "· ${it.name}：${it.content.take(80)}" } + "\n" else "") +
-                (if (done.isNotEmpty()) "已回收：\n" + done.joinToString("\n") { "· ${it.name}" } + "\n" else "") +
+                (if (focusOpen.isNotEmpty()) "未回收（" + (if (restCount > 0) "共${open.size}条，下面是最早埋设的${focusOpen.size}条" else "共${open.size}条") + "）：\n" +
+                    focusOpen.joinToString("\n") { "· ${it.name}：${it.content.take(80)}" } + "\n" else "") +
+                (if (restCount > 0) "（另有 $restCount 条较新伏笔本轮不逐条评估）\n" else "") +
+                (if (done.isNotEmpty()) "已回收：\n" + done.take(40).joinToString("\n") { "· ${it.name}" } + (if (done.size > 40) "\n（其余${done.size - 40}条略）" else "") + "\n" else "") +
                 "\n【最近章节摘要】\n$summaryBlock\n\n" +
                 "请输出：\n" +
-                "1) 每条未回收伏笔一行：评估状态——「已过很久未回收（剧情已推进较远，读者可能遗忘）」/「仍在合理埋设期」/「摘要显示其实已回收但未标记」；\n" +
+                "1) 清单里每条未回收伏笔一行：评估状态——「已过很久未回收（剧情已推进较远，读者可能遗忘）」/「仍在合理埋设期」/「摘要显示其实已回收但未标记」；\n" +
                 "2) 对应尽快回收的伏笔，给出建议的回收时机与方式（各一句话）；\n" +
                 "3) 已回收伏笔若与最近摘要明显矛盾也要指出。\n" +
                 "按紧急度从高到低排序，不要解释格式。"
         )
-        return if (err == null) ToolResult(true, "🪝 伏笔体检（未回收 ${open.size} 条 / 已回收 ${done.size} 条）：", out) else ToolResult(false, err)
+        // v6.9.61：大积压时追加可操作的清理指引
+        val tip = if (open.size > 30) {
+            "\n\n💡 当前未回收伏笔已达 ${open.size} 条（多数为写作过程自动记录）。清理方法：从上面的评估里挑「其实已回收/已过很久」的，直接说「标记伏笔 甲、乙、丙 已回收」可一次批量标记；新版本每章最多记 2 条新伏笔，未回收超 25 条自动停记新账。"
+        } else ""
+        return if (err == null) ToolResult(true, "🪝 伏笔体检（未回收 ${open.size} 条 / 已回收 ${done.size} 条）：", out + tip) else ToolResult(false, err)
     }
 
-    /** 8.0c 标记伏笔已回收：伏笔体检发现「已回收但未标记」时的人工确认入口（v6.9.16） */
+    /** 8.0c 标记伏笔已回收：伏笔体检发现「已回收但未标记」时的人工确认入口（v6.9.16）；
+     *  v6.9.61：支持批量——「标记伏笔 a、b、c 已回收」按分隔符拆分逐条处理，尽力而为（找不到的单独列出，不整批失败） */
     suspend fun markHookRecovered(pid: Long, name: String): ToolResult {
         if (name.isBlank()) return ToolResult(false, "请说明要标记哪条伏笔，如：标记伏笔「神秘令牌」已回收")
         val dao = Repo.dao
+        // v6.9.61：多名称拆分——名称串里的分隔符拆开逐条处理；单名称行为不变
+        val names = name.split('、', '，', ',', ';', '；', '/', '·')
+            .map { it.trim().trim('「', '」', '【', '】', '"', '\'' , ' ').trim() }
+            .filter { it.isNotBlank() && it != "已回收" && !it.startsWith("标记") }
+        if (names.isEmpty()) return ToolResult(false, "请说明要标记哪条伏笔，如：标记伏笔「神秘令牌」已回收")
         val hooks = dao.cards(pid).filter { it.category == "伏笔钩子" }
-        val target = hooks.firstOrNull { it.name == name }
-            ?: hooks.firstOrNull { it.name.contains(name) || name.contains(it.name) }
-            ?: return ToolResult(false, "找不到伏笔「$name」。可用「伏笔体检」或设定卡页查看现有伏笔清单。")
-        if (target.status == "已回收") return ToolResult(false, "伏笔「${target.name}」已经是已回收状态")
-        dao.updateCard(target.copy(status = "已回收", updatedAt = System.currentTimeMillis()))
-        return ToolResult(true, "🪝 已标记伏笔「${target.name}」为已回收", "该伏笔不再出现在「未回收」清单中。若标错了，可在设定卡页改回「埋设中」。")
+        val doneList = mutableListOf<String>()
+        val missList = mutableListOf<String>()
+        for (n in names) {
+            val target = hooks.firstOrNull { it.status != "已回收" && it.name == n }
+                ?: hooks.firstOrNull { it.status != "已回收" && (it.name.contains(n) || n.contains(it.name)) }
+            if (target == null) {
+                // 区分「已经是已回收」与「根本找不到」，反馈更准确
+                val already = hooks.firstOrNull { it.name == n || it.name.contains(n) || n.contains(it.name) }
+                if (already != null) doneList.add("${already.name}(原本已回收)")
+                else missList.add(n)
+            } else {
+                dao.updateCard(target.copy(status = "已回收", updatedAt = System.currentTimeMillis()))
+                doneList.add(target.name)
+            }
+        }
+        val left = dao.cards(pid).count { it.category == "伏笔钩子" && it.status != "已回收" }
+        return if (missList.isEmpty()) {
+            val head = if (names.size == 1) "🪝 已标记伏笔「${doneList.firstOrNull() ?: ""}」为已回收"
+            else "🪝 已标记 ${doneList.size} 条伏笔为已回收：${doneList.joinToString("、") { "「$it」" }}"
+            ToolResult(true, head, "当前未回收 $left 条。若标错了，可在设定卡页改回「埋设中」。")
+        } else {
+            ToolResult(true,
+                "🪝 已标记 ${doneList.size} 条：${doneList.joinToString("、") { "「$it」" }}；${missList.size} 条没找到：${missList.joinToString("、") { "「$it」" }}",
+                "没找到的可先「伏笔体检」核对名称。当前未回收 $left 条。")
+        }
     }
 
     /** 8.0d 支线任务体检：对照支线任务卡与各章摘要，评估推进状态并给收束建议（只分析不修改，v6.9.18） */

@@ -377,13 +377,26 @@ object IntentRouter {
         // v6.9.16：标记伏笔已回收——必须放在伏笔体检路由之前（后者匹配一切含「伏笔」的输入）
         // v6.9.19：新增「把伏笔X标记回收 / 伏笔X已回收」语序识别
         // v6.9.20：排除查询语序（「伏笔已回收的有哪些/已回收伏笔列表」→ 交给伏笔体检）
-        if (Regex("标记.{0,4}伏笔.{0,6}(已回收|回收)|伏笔[「'\"]?[^」'\"]{1,20}[」'\"]?.{0,6}(标记|已回收|回收)|(已回收|回收).{0,4}标记").containsMatchIn(raw) &&
+        // v6.9.61：名称捕获 {1,20}→{1,80} 支持批量「标记伏笔 a、b、c 已回收」（顿号串整体传出，markHookRecovered 内部拆分）
+        if (Regex("标记.{0,4}伏笔.{0,6}(已回收|回收)|伏笔[「'\"]?[^」'\"]{1,80}[」'\"]?.{0,6}(标记|已回收|回收)|(已回收|回收).{0,4}标记").containsMatchIn(raw) &&
             !Regex("有哪些|哪些|列表|清单").containsMatchIn(raw)
         ) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
-            val hookName = (Regex("标记.{0,4}伏笔[「'\"]?([^」'\"]{1,20})[」'\"]?").find(raw)?.groupValues?.getOrNull(1)
-                ?: Regex("伏笔[「'\"]?([^」'\"]{1,20})[」'\"]?.{0,6}(标记|已回收|回收)").find(raw)?.groupValues?.getOrNull(1)
-                )?.trim()?.takeIf { it.isNotEmpty() && !it.contains("回收") && !it.contains("标记") } ?: ""
+            // v6.9.61b：书名号/引号会让贪婪捕获在「」处截断（「甲」、「乙」只抓到甲）——提取前先剥掉所有书名号引号；
+            // 贪婪捕获尾部会带动词残渣（"标记为已"/"标记已"），循环剥尾直到干净；后续子句（然后/帮我…）先截断
+            val flat = raw.replace("「", "").replace("」", "").replace("\"", "").replace("'", "")
+            val hookName = (Regex("标记.{0,4}伏笔([^」'\"]{1,80})").find(flat)?.groupValues?.getOrNull(1)
+                ?: Regex("伏笔([^」'\"]{1,80}).{0,6}(标记|已回收|回收)").find(flat)?.groupValues?.getOrNull(1)
+                )?.trim()?.let { g0 ->
+                    var cur = Regex("然后|接着|之后再|顺便|麻烦|帮我|请").split(g0)[0]
+                    var prev: String? = null
+                    while (cur != prev) {
+                        prev = cur
+                        cur = cur.trim().trimEnd('、', '，', ',', ' ', '的', '再', '为')
+                        cur = Regex("[、，,\\s]*(?:已回收|回收|标记|已)$").replace(cur, "").trim()
+                    }
+                    cur.trim().trimEnd('、', '，', ',', ' ', '的', '再', '为')
+                }?.takeIf { it.isNotEmpty() && !it.contains("回收") && !it.contains("标记") } ?: ""
             return Tools.markHookRecovered(pid, hookName)
         }
         // v6.9.12：伏笔体检——必须放在「全书体检」路由之前（后者含裸「体检」正则会误拦截）
