@@ -1011,6 +1011,7 @@ object WriterEngine {
                         "3) 遗漏或违背本章大纲：大纲要求的关键事件没写、剧情走向明显跑偏（轻微措辞/详略差异不算）。\n" +
                         "无矛盾：只输出【通过】。\n" +
                         "有矛盾：每行一条，格式：原文片段=>修正后片段（原文片段必须是正文里连续出现的文字，最多3条，改最小的范围）。\n" +
+                        "只允许修正矛盾本身，严禁借机改写剧情、增删情节或润色其他文字；拿不准的地方不要动。\n" +
                         "若是大纲关键事件遗漏等无法局部修改的结构性问题，输出一行：重大偏离：<一句话说明>。"
                     )
             ),
@@ -1109,11 +1110,13 @@ object WriterEngine {
                     ChatMsg("system", "你是资深网文编辑，做发布前终修。只输出润色后的完整正文，不要任何解释、标题或说明。"),
                     ChatMsg("user",
                         "润色下面这章小说正文：只优化文字表达，剧情走向、事件、对话内容、人物设定一律不得增删改。\n" +
-                            "去AI味硬要求：\n" +
+                            "总原则：宁可少改，不可错改——任何拿不准、可能改变剧情或语义的地方，保持原文不动；你只做文字层面的机械替换与删减，不做创作。\n" +
+                            "严禁事项：不得新增事件、人物、物件或伏笔；不得删除任何情节；不得改变对话的含义与结论；不得改动人物的能力/称谓/关系；不得合并或拆分段落情节。\n" +
+                            "去AI味硬要求（仅限替换句式与删套话）：\n" +
                             "1) 删掉总结式结尾段（结尾必须落在具体动作/对话/悬念上）；\n" +
                             "2) 删「仿佛/宛如/似乎」式堆砌比喻，删「眸中闪过一丝」「嘴角勾起一抹」「空气仿佛凝固」套路句；\n" +
                             "3) 长短句交替、节奏有变化，不写等长段落；\n" +
-                            "4) 对话口语化、符合人物身份，去书面腔；\n" +
+                            "4) 对话口语化、符合人物身份，去书面腔（只改说法，不改对话传达的信息）；\n" +
                             "5) 心理用动作与细节呈现，删「他知道/他明白/殊不知」式作者旁白；\n" +
                             "6) 不滥用成语与四字排比，形容词少而准。\n" +
                             "字数与原文相当（上下不超过两成）。\n" +
@@ -1560,6 +1563,16 @@ object AutoWriteManager {
         it.copy(logs = (listOf("${fmt.format(Date())} $msg") + it.logs).take(120))
     }
 
+    /** v6.9.55：余额/欠费/鉴权类错误识别——这类错误重试无意义，自动写作应立即停止并明确提示 */
+    private fun isBillingError(msg: String): Boolean {
+        val m = msg.lowercase()
+        return m.contains("401") || m.contains("402") || m.contains("payment required") ||
+            m.contains("insufficient") || m.contains("balance") || m.contains("quota") ||
+            m.contains("unauthorized") || m.contains("invalid api key") ||
+            msg.contains("余额") || msg.contains("欠费") || msg.contains("额度") ||
+            msg.contains("充值") || msg.contains("未实名") || msg.contains("已冻结") || msg.contains("鉴权")
+    }
+
     fun start(projectId: Long, from: Int, to: Int, context: Context? = null) {
         if (isRunning(projectId)) return
         // v6.9.33：同步置位再拉起前台服务（服务观察 state，避免启动时读到 running=false 误发"已结束"通知）
@@ -1591,31 +1604,62 @@ object AutoWriteManager {
                 update(projectId) { it.copy(total = targets.size, done = 0) }
                 var done = 0
                 var fail = 0
-                for (t in targets) {
+                // v6.9.55：失败/未完成章清单——重跑自动写作时这些章会被补写，已有正文的章自动跳过
+                val failedChapters = mutableListOf<Int>()
+                var stoppedByBilling = false
+                loop@ for (t in targets) {
                     if (!isActive || !isRunning(projectId)) break
                     update(projectId) { it.copy(currentChapter = "第${t.chapterIndex}章 ${t.title.ifBlank { "写作中…" }}") }
-                    try {
-                        val fresh = dao.chapter(t.id) ?: t
-                        if (fresh.content.isNotBlank() && fresh.status == 2) {
-                            log(projectId, "跳过第${t.chapterIndex}章（已编辑定稿，不覆盖）")
-                            done++
-                            update(projectId) { it.copy(done = done) }
-                            continue
+                    val fresh0 = dao.chapter(t.id) ?: t
+                    // v6.9.55：只要有正文就不覆盖（此前 status==2 才跳过，重跑会把写完未定稿的章整章重写，白烧 token 且违背「不影响写好的」）
+                    if (fresh0.content.isNotBlank()) {
+                        log(projectId, "跳过第${t.chapterIndex}章（已有正文，不覆盖）")
+                        done++
+                        update(projectId) { it.copy(done = done) }
+                        continue
+                    }
+                    // v6.9.55：每章自动重试一次——偶发网络/限流失败先自己重试，再不行才记为失败章继续下一章
+                    var written = false
+                    for (attempt in 1..2) {
+                        try {
+                            // 重读最新状态：上一次尝试若已把正文落盘（如体检阶段才报错），这次直接视为完成
+                            val fresh = dao.chapter(t.id) ?: t
+                            if (fresh.content.isNotBlank()) { written = true; break }
+                            WriterEngine.writeOne(project, cfg, dao, fresh, context)
+                            written = true
+                            break
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            val msg = e.message ?: ""
+                            // v6.9.55：余额/欠费/鉴权类错误立即停止——重试无意义，用户需要先充值/换模型
+                            if (isBillingError(msg)) {
+                                log(projectId, "🛑 模型余额不足或鉴权失败，自动写作已停止：${msg.take(160)}")
+                                log(projectId, "请充值或更换启用的AI模型后，重新开启自动写作——已写好的章节会自动跳过，只补写缺失章")
+                                stoppedByBilling = true
+                                break
+                            }
+                            if (attempt < 2) log(projectId, "⚠️ 第${t.chapterIndex}章第${attempt}次写作失败（${msg.take(120)}），自动重试…")
+                            else log(projectId, "❌ 第${t.chapterIndex}章重试后仍失败：${msg.take(160)}")
                         }
-                        WriterEngine.writeOne(project, cfg, dao, fresh, context)
+                    }
+                    if (stoppedByBilling) break@loop
+                    if (written) {
                         fail = 0
                         done++
                         update(projectId) { it.copy(done = done) }
                         log(projectId, "✅ 第${t.chapterIndex}章完成（$done/${targets.size}）")
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
+                    } else {
+                        failedChapters.add(t.chapterIndex)
                         fail++
-                        log(projectId, "❌ 第${t.chapterIndex}章失败：${e.message?.take(200)}")
                         if (fail >= 3) { log(projectId, "连续失败3次，本任务已自动停止"); break }
                     }
                 }
-                log(projectId, "任务结束：完成 $done/${targets.size} 章")
+                log(projectId, "任务结束：完成 $done/${targets.size} 章" +
+                    (if (failedChapters.isNotEmpty()) "；未完成：第${failedChapters.joinToString("、")}章" else ""))
+                if (failedChapters.isNotEmpty()) {
+                    log(projectId, "💡 重新开启自动写作即可断点续写：已写好的章节自动跳过，只补写缺失/失败的章（已有正文不会被改动）")
+                }
             } finally {
                 update(projectId) { it.copy(running = false, currentChapter = "") }
                 jobs.remove(projectId)
