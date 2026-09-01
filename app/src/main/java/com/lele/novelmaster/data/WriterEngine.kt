@@ -870,6 +870,8 @@ object WriterEngine {
                 }
                 // 最后一行可能没有换行结尾
                 passCount += applyInspireLine(projectId, sb.substring(processed), context)
+            } catch (e: CancellationException) {
+                throw e   // v6.9.60：用户停止——立即中断，不能被下面的 catch(Exception) 吞掉继续下一轮
             } catch (e: Exception) {
                 if (count == 0 && passCount == 0) return "AI 生成设定失败：${e.message?.take(200)}"
                 break
@@ -897,6 +899,37 @@ object WriterEngine {
         return if (count == 0)
             "AI未能生成可识别的设定（回复片段：$lastSnippet）。建议换一个模型，或把灵感说得更具体一点。"
         else null
+    }
+
+    /**
+     * v6.9.60：一个会话只写一本书——拦截「同一会话里又生成另一本书的设定卡」（GLM-5.2 实测混入）。
+     * 书已确立（8 核心类中已有 ≥4 类）时：
+     *  · 单卡类（世界观/主线/冲突/圣经/全书大纲/剧情进度）已有卡且本次是另一张卡名 → 拦（新书设定会覆盖旧书）；
+     *  · 人物设定已有 ≥4 人且新名与所有现有人物对不上 → 拦（新书人物混入）。
+     * 缺类补齐（该类还没有卡）、人物称谓变体归并、正常修改都不受影响。
+     * 返回拦截提示文案；null = 放行。force=true 时跳过人物拦截（用户明确要求新增角色后的重试）。
+     */
+    suspend fun checkNewBookGuard(pid: Long, category: String, name: String, force: Boolean = false): String? {
+        val cards = Repo.dao.cards(pid)
+        val core = setOf("世界观", "人物设定", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "支线任务", "伏笔钩子")
+        val haveCore = cards.map { it.category }.distinct().count { it in core }
+        if (haveCore < 4) return null   // 书还没确立，正常建卡
+        val singleCats = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")
+        if (category in singleCats) {
+            val exist = cards.firstOrNull { it.category == category && it.name !in OUTLINE_CARD_NAMES } ?: return null
+            if (Prompts.normCardName(exist.name) == Prompts.normCardName(name)) return null   // 同一张卡的更新放行
+            return "🛑 一个会话只写一本书：本书已有「$category」卡（${exist.name}，${exist.content.length} 字），" +
+                "本次写入疑似另一本书的设定，已拦截、未保存。要修改本书的$category 请说「修改$category」；要开新书请在侧边栏新建会话。"
+        }
+        if (category == "人物设定" && !force) {
+            val cast = cards.filter { it.category == "人物设定" }
+            if (cast.size < 4) return null
+            if (cast.any { personNamesMatch(it.name, name) }) return null
+            return "🛑 一个会话只写一本书：本书已确立 ${cast.size} 个角色（${cast.take(4).joinToString("、") { it.name }} 等），" +
+                "「$name」与现有角色都对不上，疑似另一本书的人物，已拦截、未保存。" +
+                "如确要给本书新增该角色，请先向作者确认，再用 addCard 带 force=true 重发一次；要开新书请在侧边栏新建会话。"
+        }
+        return null
     }
 
     /** 解析一行「分类｜名称｜内容」，落库落盘并立即在聊天里显示，返回 1/0 */
@@ -928,6 +961,11 @@ object WriterEngine {
         if (name == "写作禁忌") return 0
         val content = parts.drop(2).joinToString("｜").trim()
         if (content.length < 4) return 0
+        // v6.9.60：一个会话只写一本书——新书设定卡混入拦截（GLM-5.2 实测）
+        checkNewBookGuard(projectId, cat, name)?.let { msg ->
+            dao.insertMessage(Message(projectId = projectId, role = "tool", kind = "tool", content = msg))
+            return 0
+        }
         // v6.2：防重复——同名同分类 → 跳过；单卡分类（世界观/主线/冲突/圣经/全书大纲/剧情进度）
         // 一类只允许一张，模型又输出同类不同名的 → 更新已有卡，绝不新建
         val singleCats = setOf("世界观", "主线剧情", "核心冲突", "设定圣经", "全书大纲", "剧情进度")

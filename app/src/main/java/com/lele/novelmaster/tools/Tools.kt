@@ -158,7 +158,7 @@ object Tools {
         return ToolResult(true, "设定卡共 ${filtered.size} 张：", detail)
     }
 
-    suspend fun addCard(pid: Long, category: String, name: String, content: String, priority: Int? = null, context: Context? = null): ToolResult {
+    suspend fun addCard(pid: Long, category: String, name: String, content: String, priority: Int? = null, context: Context? = null, force: Boolean = false): ToolResult {
         if (category !in CardCategories.all) return ToolResult(false, "未知分类「$category」", "可选：" + CardCategories.all.joinToString("、"))
         if (name.isBlank() || content.isBlank()) return ToolResult(false, "名称和内容不能为空")
         // v6.9.6：「写作禁忌」由写后自检系统维护，AI 不得创建/覆盖
@@ -167,6 +167,10 @@ object Tools {
         // v6.9.50：项目必须真实存在——此前幽灵会话里 addCard 照样"成功"，卡片全变成看不见的孤儿数据
         if (withContext(Dispatchers.IO) { Repo.dao.project(pid) } == null)
             return ToolResult(false, "项目不存在", "当前会话已失效，请退出重新进入或新建会话后再操作")
+        // v6.9.60：一个会话只写一本书——拦截同一会话里混入的另一本书的设定卡（GLM-5.2 实测）
+        WriterEngine.checkNewBookGuard(pid, category, name, force)?.let {
+            return ToolResult(false, it, "本会话=一本书。缺类补齐、修改现有卡、经作者确认的新增角色不受影响。")
+        }
         val prio = priority ?: when (category) {
             "设定圣经", "世界观", "主线剧情", "核心冲突", "剧情进度" -> 2
             "伏笔钩子" -> 1
@@ -1395,7 +1399,8 @@ object Tools {
             )
             "addCard" -> addCard(
                 pid, args.optString("category"), args.optString("name"), args.optString("content"),
-                if (args.has("priority")) args.optInt("priority") else null, context
+                if (args.has("priority")) args.optInt("priority") else null, context,
+                args.optBoolean("force", false)
             )
             "updateCard" -> updateCard(pid, args.optString("name"), args.optString("content"))
             "renameGlobal" -> renameGlobal(pid, args.optString("old"), args.optString("new"), args.optBoolean("alsoChapters", false))

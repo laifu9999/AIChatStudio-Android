@@ -2,6 +2,7 @@ package com.lele.novelmaster.data
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -163,7 +164,9 @@ object AiClient {
         val ladder = ladderFor(cfg, maxTokens)
         var lastErr: Exception? = null
         // v6.9：包装 onDelta——每个字节到达都刷新全局活动时间戳（喂看门狗）
+        // v6.9.60：每个增量先检查协程取消——点停止后下一个增量（毫秒级）立即中断，不再等整条流读完
         val fed: suspend (String) -> Unit = { d ->
+            currentCoroutineContext().ensureActive()
             lastActivityMs = System.currentTimeMillis()
             onDelta(d)
         }
@@ -585,6 +588,7 @@ object AiClient {
             try {
                 while (true) {
                     val line = reader.readLine() ?: break
+                    currentCoroutineContext().ensureActive()  // v6.9.60：点停止立即中断，不等下一个增量
                     val t = line.trim()
                     if (t.isEmpty() || !t.startsWith("data:")) continue
                     val payload = t.removePrefix("data:").trim()
@@ -730,6 +734,7 @@ object AiClient {
             try {
                 while (true) {
                     val line = reader.readLine() ?: break
+                    currentCoroutineContext().ensureActive()  // v6.9.60：点停止立即中断，不等下一个增量
                     val t = line.trim()
                     if (t.isEmpty() || !t.startsWith("data:")) continue
                     val payload = t.removePrefix("data:").trim()
