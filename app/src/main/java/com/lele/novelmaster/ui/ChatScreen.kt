@@ -368,7 +368,8 @@ fun ChatScreen(nav: NavHostController) {
                                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
                                         CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp), color = th.userBubble)
                                         Spacer(Modifier.width(8.dp))
-                                        Text(if (elapsedSec > 0) "乐乐正在输入…（已用时 ${elapsedSec}s，点发送键可停止）" else "乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
+                                        // v6.9.54：思考型模型（如 glm-5 系始终思考）正文出来前可能静默数分钟——明确告知是思考/排队不是卡死
+                                        Text(if (elapsedSec > 60) "乐乐正在深度思考中…（复杂任务思考可达数分钟，非卡死；已用时 ${elapsedSec}s，点发送键可停止）" else if (elapsedSec > 0) "乐乐正在输入…（已用时 ${elapsedSec}s，点发送键可停止）" else "乐乐正在输入…（再点发送键可停止）", color = TextSub, fontSize = 13.sp)
                                     }
                                 }
                             }

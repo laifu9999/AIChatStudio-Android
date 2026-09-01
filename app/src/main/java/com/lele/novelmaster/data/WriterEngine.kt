@@ -1096,9 +1096,58 @@ object WriterEngine {
     }
 
     /**
+     * v6.9.54：发布级润色（去AI味终修）——整章重写文字表达，剧情/事件/对话内容/设定不得增删改。
+     * 长度校验（原文 60%~160%）兜底，异常润色稿直接放弃保安全；改前备份、改后落盘正文文件。
+     * 返回是否采用。
+     */
+    private suspend fun polishForPublish(cfg: ApiConfig, dao: NovelDao, project: Project, ch: Chapter, context: Context?): Boolean {
+        val orig = ch.content
+        val reply = try {
+            AiClient.chat(
+                cfg,
+                listOf(
+                    ChatMsg("system", "你是资深网文编辑，做发布前终修。只输出润色后的完整正文，不要任何解释、标题或说明。"),
+                    ChatMsg("user",
+                        "润色下面这章小说正文：只优化文字表达，剧情走向、事件、对话内容、人物设定一律不得增删改。\n" +
+                            "去AI味硬要求：\n" +
+                            "1) 删掉总结式结尾段（结尾必须落在具体动作/对话/悬念上）；\n" +
+                            "2) 删「仿佛/宛如/似乎」式堆砌比喻，删「眸中闪过一丝」「嘴角勾起一抹」「空气仿佛凝固」套路句；\n" +
+                            "3) 长短句交替、节奏有变化，不写等长段落；\n" +
+                            "4) 对话口语化、符合人物身份，去书面腔；\n" +
+                            "5) 心理用动作与细节呈现，删「他知道/他明白/殊不知」式作者旁白；\n" +
+                            "6) 不滥用成语与四字排比，形容词少而准。\n" +
+                            "字数与原文相当（上下不超过两成）。\n" +
+                            "【第${ch.chapterIndex}章正文】\n$orig")
+                ),
+                temperature = 0.6,
+                maxTokens = AiClient.MAX_TOKENS_HUGE
+            )
+        } catch (_: Exception) { return false }
+        val t = reply.trim()
+        if (t.isBlank() || t.length < orig.length * 0.6 || t.length > orig.length * 1.6) return false
+        // 改前备份（供撤销恢复）
+        try {
+            dir(context, project.id, "正文备份")?.let { d ->
+                File(d, safeName("第${ch.chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + "-备份" + System.currentTimeMillis() + ".txt")
+                    .writeText(orig + "\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+        dao.updateChapter(ch.copy(content = t, wordCount = t.length, updatedAt = System.currentTimeMillis()))
+        try {
+            dir(context, project.id, "正文")?.let { d ->
+                File(d, safeName("第${ch.chapterIndex}章-${ch.title.ifBlank { "未命名" }}") + ".txt")
+                    .writeText(t + "\n", Charsets.UTF_8)
+            }
+        } catch (_: Exception) { }
+        return true
+    }
+
+    /**
      * v6.9.9：全书逐章自检修复——把「全书体检」（只查不修）和「单章自检」（能修）合二为一。
      * 对每章依次跑 selfCheckChapter：发现矛盾自动修正并沉淀禁忌卡；每 3 章插一次进度播报。
      * 成本：每章一次小调用（~18% 正文），N 章约等于 0.2N 章正文的 token。
+     * v6.9.54：新增「同步润色去AI味」开关（InjectPrefs.polishWithCheck，默认开）——
+     * 每章查完矛盾（状态非 suspect）后顺手按发布级文风整章润色，跑完一次即直达可发布状态。
      */
     suspend fun fullSelfCheck(cfg: ApiConfig, dao: NovelDao, project: Project, context: Context? = null): Pair<String?, String> {
         val chapters = dao.chapters(project.id).filter { it.content.isNotBlank() }.sortedBy { it.chapterIndex }
@@ -1106,30 +1155,49 @@ object WriterEngine {
         var passed = 0
         var fixed = 0
         var suspect = 0
+        var polished = 0
         val fixedChapters = mutableListOf<Int>()
-        chapters.forEachIndexed { i, ch ->
-            val before = ch.content
+        val doPolish = polishOn(context)
+        chapters.forEachIndexed { i, ch0 ->
+            val before = ch0.content
             val status = try {
-                selfCheckChapter(cfg, dao, project, ch, context, quiet = true)
+                selfCheckChapter(cfg, dao, project, ch0, context, quiet = true)
             } catch (_: Exception) { "suspect" }
             when (status) {
                 "pass" -> passed++
-                "fixed" -> { fixed++; fixedChapters.add(ch.chapterIndex) }
+                "fixed" -> { fixed++; fixedChapters.add(ch0.chapterIndex) }
                 else -> suspect++
+            }
+            // v6.9.54：同步润色去AI味（疑似矛盾章不润色，等作者处理完再说）；用修完的最新正文
+            if (status != "suspect" && doPolish) {
+                val fresh = dao.chapter(ch0.id) ?: ch0
+                if (fresh.content.isNotBlank()) {
+                    val ok = try { polishForPublish(cfg, dao, project, fresh, context) } catch (_: Exception) { false }
+                    if (ok) polished++
+                }
             }
             if ((i + 1) % 3 == 0 || i + 1 == chapters.size) {
                 dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                     content = "🔬 全书自检进度：已检查 ${i + 1}/${chapters.size} 章" +
-                        (if (fixed > 0) "，已修复 $fixed 章" else "")))
+                        (if (fixed > 0) "，已修复 $fixed 章" else "") +
+                        (if (doPolish) "，已润色 $polished 章" else "")))
             }
         }
         val summary = "🔬 全书自检完成（共 ${chapters.size} 章）：\n" +
             "· ✅ 无矛盾：$passed 章\n" +
             "· 🔧 已自动修正：$fixed 章" + (if (fixedChapters.isNotEmpty()) "（第${fixedChapters.joinToString("、")}章）" else "") + "\n" +
             "· ⚠️ 疑似矛盾待复核：$suspect 章\n" +
-            "修正模式已沉淀进【写作禁忌】卡，后续章节不再重犯同类错误。"
+            (if (doPolish) "· ✨ 已同步润色去AI味：$polished 章（发布级文风，改前均有备份）\n" else "") +
+            "修正模式已沉淀进【写作禁忌】卡，后续章节不再重犯同类错误。" +
+            (if (doPolish && suspect == 0) "\n📚 全书已达可发布状态：可直接到【导出与发布】导出全书 TXT。" else "")
         dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool", content = summary))
         return null to summary
+    }
+
+    /** v6.9.54：全书自检修时同步润色去AI味是否开启（ctx 为空时兜底全局 Context，无 Context 视为开启） */
+    private fun polishOn(ctx: Context?): Boolean {
+        val c = ctx ?: Repo.app ?: return true
+        return InjectPrefs.polishWithCheck(c)
     }
 
     /**

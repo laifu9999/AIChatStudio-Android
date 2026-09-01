@@ -312,10 +312,21 @@ object AiClient {
                 openaiCall(cfg, probe, 0.1, 2048, stream = false).use { resp ->
                     val body = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
-                        if (isThinkingParamError("HTTP ${resp.code}: $body")) {
-                            thinkingUnsupported[cfg.model] = true
-                            "⚠️ 该模型/服务商不认识思考参数，已自动忽略（按模型默认运行，不影响使用）"
-                        } else "❌ 测试失败：HTTP ${resp.code}: ${body.take(200)}"
+                        when {
+                            // v6.9.54：「始终思考」模型（智谱 glm-5 系等）——自动切 reasoning_effort 并缓存
+                            isAlwaysThinkError("HTTP ${resp.code}: $body") -> {
+                                alwaysThink[cfg.model] = true
+                                if (mode == "none")
+                                    "⚠️ 该模型始终思考、无法关闭（如智谱glm-5系列）。已自动改用最低思考量（effort=low）并记住，正常出内容，正文生成不受影响"
+                                else
+                                    "✅ 已按${if (mode == "high") "高" else "低"}强度控制思考量（该模型无法完全关闭思考，已用 effort=${if (mode == "high") "high" else "low"}）"
+                            }
+                            isThinkingParamError("HTTP ${resp.code}: $body") -> {
+                                thinkingUnsupported[cfg.model] = true
+                                "⚠️ 该模型/服务商不认识思考参数，已自动忽略（按模型默认运行，不影响使用）"
+                            }
+                            else -> "❌ 测试失败：HTTP ${resp.code}: ${body.take(200)}"
+                        }
                     } else {
                         val msg = JSONObject(body)
                             .optJSONArray("choices")?.optJSONObject(0)
@@ -403,6 +414,12 @@ object AiClient {
         val mode = cfg.thinkMode
         if (mode.isBlank()) return
         if (thinkingUnsupported[cfg.model] == true) return
+        // v6.9.54：「始终思考」模型——关不掉思考，用 reasoning_effort 控制思考量
+        // （无思考/低强度→low 把思考压到最低，高强度→high），实测 glm-5.3-flash effort=low 合法生效
+        if (alwaysThink[cfg.model] == true) {
+            o.put("reasoning_effort", if (mode == "high") "high" else "low")
+            return
+        }
         val host = cfg.baseUrl.lowercase()
         val model = cfg.model.lowercase()
         val deepseek = host.contains("deepseek") || model.contains("deepseek")
@@ -432,11 +449,23 @@ object AiClient {
     private fun isThinkingParamError(msg: String?): Boolean {
         val m = msg?.lowercase().orEmpty()
         if (!m.contains("http 400") && !m.contains("http 422")) return false
-        val kw = m.contains("thinking") || m.contains("reasoning")
+        // v6.9.54：补中文「思考」——智谱等中文报错（如「不支持关闭思考」）此前匹配不到，导致去参重试不触发
+        val kw = m.contains("thinking") || m.contains("reasoning") || m.contains("思考")
         val err = m.contains("unrecognized") || m.contains("unknown") || m.contains("invalid") ||
             m.contains("not support") || m.contains("unexpected") || m.contains("extra") ||
             m.contains("unsupported") || m.contains("不支持") || m.contains("未知") || m.contains("无效")
         return kw && err
+    }
+
+    /**
+     * v6.9.54：「始终思考」模型（智谱 glm-5 系实测报 1210「该模型始终思考，不支持关闭思考；请使用 low、high 或 max」）。
+     * 这类模型关不掉思考，改用 reasoning_effort 控制思考量（实测 effort=low 时思考量骤降且合法）。
+     */
+    private val alwaysThink = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    private fun isAlwaysThinkError(msg: String?): Boolean {
+        val m = msg ?: return false
+        return m.contains("始终思考") || m.contains("不支持关闭思考")
     }
 
     /**
@@ -472,10 +501,19 @@ object AiClient {
         var resp = executeCall(build(useThink), stream)
         if (!resp.isSuccessful && useThink) {
             val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
-            if (isThinkingParamError("HTTP ${resp.code}: $b")) {
-                thinkingUnsupported[cfg.model] = true
-                resp.close()
-                resp = executeCall(build(false), stream)
+            when {
+                // v6.9.54：「始终思考」模型（如智谱 glm-5 系拒绝 disabled）——记缓存后原样重发，
+                // applyThinkingOpenai 会转走 reasoning_effort 分支（无思考/低→low，高→high）
+                isAlwaysThinkError("HTTP ${resp.code}: $b") -> {
+                    alwaysThink[cfg.model] = true
+                    resp.close()
+                    resp = executeCall(build(useThink), stream)
+                }
+                isThinkingParamError("HTTP ${resp.code}: $b") -> {
+                    thinkingUnsupported[cfg.model] = true
+                    resp.close()
+                    resp = executeCall(build(false), stream)
+                }
             }
         }
         return resp
@@ -540,8 +578,13 @@ object AiClient {
                             onDelta(piece)
                         } else {
                             // v6.0：思考过程(reasoning_content/reasoning)只收集不显示
+                            // v6.9.54：思考增量也刷新活动时间戳（喂看门狗）——glm-5 系等「始终思考」模型
+                            // 长任务思考可达数分钟（实测 138 章建书思考 5000+ 字），不喂狗会被看门狗误杀
                             val tk = jstr(d, "reasoning_content").ifEmpty { jstr(d, "reasoning") }
-                            if (tk.isNotEmpty()) think.append(tk)
+                            if (tk.isNotEmpty()) {
+                                think.append(tk)
+                                lastActivityMs = System.currentTimeMillis()
+                            }
                         }
                     }
                 }
@@ -678,7 +721,11 @@ object AiClient {
                             for (i in 0 until parts.length()) {
                                 val p = parts.optJSONObject(i) ?: continue
                                 // v6.9.48：思考强度模式下思考段带 thought:true——绝不进正文、不回调显示
-                                if (p.optBoolean("thought")) continue
+                                // v6.9.54：思考段同样喂看门狗（Gemini 长思考任务同理不被误杀）
+                                if (p.optBoolean("thought")) {
+                                    lastActivityMs = System.currentTimeMillis()
+                                    continue
+                                }
                                 val piece = jstr(p, "text")
                                 if (piece.isNotEmpty()) {
                                     sb.append(piece)

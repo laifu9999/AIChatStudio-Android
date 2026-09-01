@@ -177,6 +177,32 @@ fun AiScreen(nav: NavController) {
                     }
                 }
             }
+            // v6.9.54：后台功能开关——全书自检修时同步润色去AI味（点击开启/关闭，即时生效）
+            item {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                var polChk by remember { mutableStateOf(InjectPrefs.polishWithCheck(ctx)) }
+                Spacer(Modifier.height(10.dp))
+                ElevatedCard(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.padding(14.dp).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("✨ 自检修同步润色去AI味", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                "「全书自检修」每章查完矛盾后顺手按发布级文风整章润色（剧情/对话不变，只改文字表达），跑完即可导出发布。关闭更省 token；每次润色前自动备份。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = polChk, onCheckedChange = { on ->
+                            polChk = on
+                            InjectPrefs.setPolishWithCheck(ctx, on)
+                        })
+                    }
+                }
+            }
         }
     }
 
