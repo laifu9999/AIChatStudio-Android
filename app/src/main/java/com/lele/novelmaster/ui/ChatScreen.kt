@@ -220,7 +220,7 @@ fun ChatScreen(nav: NavHostController) {
         scope.launch {
             val r = com.lele.novelmaster.tools.Tools.createProject(
                 title = "未命名会话", genre = "", desc = "",
-                totalCh = 30, chWords = 1800, force = true
+                totalCh = 1, chWords = 1800, force = true
             )
             r.newProjectId?.let { currentPid = it }
             creatingSession = false
@@ -247,7 +247,7 @@ fun ChatScreen(nav: NavHostController) {
                 val r = runCatching {
                     com.lele.novelmaster.tools.Tools.createProject(
                         title = "未命名会话", genre = "", desc = "",
-                        totalCh = 30, chWords = 1800, force = true
+                        totalCh = 1, chWords = 1800, force = true
                     )
                 }.getOrNull()
                 val np = r?.newProjectId ?: 0L
@@ -728,8 +728,9 @@ private open class FAction2(val go: () -> Unit) : FAction()
 private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit) {
     val scope = rememberCoroutineScope()
     var title by remember { mutableStateOf("") }
-    var genre by remember { mutableStateOf("玄幻") }
-    var total by remember { mutableStateOf("300") }
+    // v6.9.57：不再预填默认风格/章数——风格按灵感自动定，章数按作者要求
+    var genre by remember { mutableStateOf("") }
+    var total by remember { mutableStateOf("") }
     var creating by remember { mutableStateOf(false) }
 
     androidx.compose.material3.AlertDialog(
@@ -737,15 +738,15 @@ private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit
         title = { Text("新建会话（新小说）", fontWeight = FontWeight.Bold) },
         text = {
             Column {
-                Text("也可以稍后在聊天里直接描述灵感，AI 会自动完善设定。", fontSize = 12.sp, color = TextSub)
+                Text("风格和章数都可以留空：风格会按你发的灵感自动定，章数按你在聊天里要求的章数。", fontSize = 12.sp, color = TextSub)
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(value = title, onValueChange = { title = it }, modifier = Modifier.fillMaxWidth(), label = { Text("书名") }, singleLine = true)
                 Spacer(Modifier.height(8.dp))
-                OutlinedTextField(value = genre, onValueChange = { genre = it }, modifier = Modifier.fillMaxWidth(), label = { Text("类型") }, singleLine = true)
+                OutlinedTextField(value = genre, onValueChange = { genre = it }, modifier = Modifier.fillMaxWidth(), label = { Text("类型（可留空）") }, singleLine = true)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = total, onValueChange = { total = it.filter { c -> c.isDigit() }.take(3) },
-                    modifier = Modifier.fillMaxWidth(), label = { Text("目标章数（1~600）") }, singleLine = true
+                    modifier = Modifier.fillMaxWidth(), label = { Text("目标章数（1~600，可留空默认300）") }, singleLine = true
                 )
             }
         },

@@ -98,6 +98,22 @@ object ChatService {
             runCatching { com.lele.novelmaster.data.WriterEngine.syncFromLocalFiles(currentPid, context) }
         }
 
+        // v6.9.57：作者消息里明确给出目标章数（共N章/总共N章/目标N章/全书N章/N章完本）→
+        // 代码级直接落库，绝不被默认/占位章数顶掉（此前 AI 忘调 updateProject 时会一直沿用默认章数）
+        if (currentPid > 0L) {
+            val numStr = Regex("(?:共|总共|目标|全书)\\s*([0-9零一二三四五六七八九十百千]{1,5})\\s*章").find(input)
+                ?.groupValues?.get(1)
+                ?: Regex("([0-9零一二三四五六七八九十百千]{1,5})\\s*章\\s*完本").find(input)?.groupValues?.get(1)
+            if (numStr != null) {
+                val n = IntentRouter.parseChineseNum(numStr)
+                val proj = Repo.dao.project(currentPid)
+                if (n in 1..600 && proj != null && proj.targetChapters != n) {
+                    val r = com.lele.novelmaster.tools.Tools.updateProject(currentPid, totalCh = n)
+                    appendToolResult(currentPid, r)
+                }
+            }
+        }
+
         // 1. 本地快速路由（确定性口令，不耗 token）
         val tool = IntentRouter.handle(input, currentPid, context)
         if (tool != null) {
@@ -518,7 +534,7 @@ object ChatService {
         appendLine(
             "【创作流程】\n" +
                 "1) 作者打招呼、闲聊、问问题 → 像真人朋友一样自然回复，不强行拉回写小说。\n" +
-                "2) 作者给出灵感/题材（例如「帮写一个家庭幸福的小说，共36章」）→ 立即全套执行：updateProject 写入书名/类型/章数 → 用 addCard 逐条建全设定（世界观、主要人物各一张、主线剧情、核心冲突、支线任务、伏笔钩子至少3个、设定圣经、全书大纲）→ generateOutlines 补全分章大纲 → 汇报「设定和大纲已就绪，说『写下一章』开写」。\n" +
+                "2) 作者给出灵感/题材（例如「帮写一个家庭幸福的小说，共36章」）→ 立即全套执行：updateProject 写入书名/类型/章数 → 用 addCard 逐条建全设定（世界观、主要人物各一张、主线剧情、核心冲突、支线任务、伏笔钩子至少3个、设定圣经、全书大纲）→ generateOutlines 补全分章大纲 → 汇报「设定和大纲已就绪，说『写下一章』开写」。**updateProject 的 totalCh 必须用作者消息里明确说的章数（如「共36章」就是36），作者没说才自行合理确定，严禁沿用默认/占位章数；genre 从灵感内容里提炼真实题材，严禁套「玄幻」等默认值。**\n" +
                 "3) **设定和大纲建完后停下等作者说「写下一章」/「开始写第一章」/「继续」才写正文**，绝不要默认自动写。\n" +
                 "3.1) **系统硬性校验**：设定卡八类（世界观、人物设定、主线剧情、核心冲突、支线任务、伏笔钩子、设定圣经、全书大纲）+ 分章大纲没建全时，writeNextChapter/startAutoWrite 会被系统拒绝并自动补全。所以必须先建全设定（工具回执可见）再写正文，严禁跳步、严禁没建完就调写作工具。不要创建「分卷大纲」卡（已废弃，与分章大纲重复）。\n" +
                 "4) 已有会话时严禁 createProject（一律用 updateProject 改当前会话）；所有创作都在当前会话内完成，绝不跳会话。\n" +
@@ -530,6 +546,7 @@ object ChatService {
                 "8) 保存类工具执行后系统会自动回执「已保存：分类/名称」，你**不要再把卡片全文复述进聊天**，只报一句话清单（保存好了哪些、还缺哪些）和下一步。\n" +
                 "8.1) 内容太多一次保存不完就**分多个 addCard 分批保存**，每条都要真的调工具；全部存完后汇报「已保存好哪些、还缺哪些」，缺的部分等作者说「继续」接着补，已保存的绝不重做。\n" +
                 "8.2) 同一本书里**世界观/主线剧情/核心冲突/设定圣经/全书大纲/剧情进度 各只允许一张卡**——系统会自动去重，你换名字重建也没用，要改就更新原卡。\n" +
+                "8.3) **人物卡一人一张**：每个有名字的人物全书只允许一张人物设定卡。建人物卡前先对照已保存清单，同一人物（含「男主×××」「×××（女主）」这类带称谓的变体）已存在就必须 updateCard 更新原卡，严禁 addCard 新建第二张；人物的能力/境界/关系等任何信息必须与设定圣经、主线剧情完全一致，发现两张卡说法不同，以先建的那张为准，把不一致的一张重写成统一版本。\n" +
                 "9) 作者可能直接修改本地项目文件（设定卡/正文/大纲 .md/.txt），系统每次对话前都会把最新文件内容自动同步进设定库——你注入到的就是作者改过的最新版，无需让作者重新粘贴。\n" +
                 "10) 回复用自然中文，发挥才华，字数不限；别输出内心分析/思考过程，别复述本协议。\n"
         )

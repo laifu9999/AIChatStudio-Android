@@ -70,7 +70,8 @@ object Tools {
             }
             val p = Project(
                 title = t,
-                genre = genre.ifBlank { "玄幻" },
+                // v6.9.57：不再默认「玄幻」——风格由灵感/作者指令决定，没给就留空（显示为未分类）
+                genre = genre.trim(),
                 description = desc,
                 targetChapters = totalCh.coerceAtLeast(1),
                 chapterWordTarget = chWords.coerceAtLeast(500)
@@ -180,6 +181,10 @@ object Tools {
                 // v6.7：全书大纲类的回退匹配排除 分章大纲 系统卡，防止覆盖
                 ?: if (category in singleCats) Repo.dao.cards(pid).firstOrNull {
                     it.category == category && it.name !in com.lele.novelmaster.data.WriterEngine.OUTLINE_CARD_NAMES
+                } else null
+                // v6.9.57：人物设定去重——同一人物（含称谓变体）只允许一张卡，重复保存并入原卡，杜绝男主两张卡信息不一致
+                ?: if (category == "人物设定") Repo.dao.cards(pid).firstOrNull {
+                    it.category == "人物设定" && com.lele.novelmaster.data.WriterEngine.personNamesMatch(it.name, name)
                 } else null
             if (exist != null) {
                 Repo.dao.updateCard(exist.copy(name = name, content = content, priority = prio, status = status))
@@ -907,8 +912,15 @@ object Tools {
             val newContent = parts[1].trim()
             if (name.isBlank() || newContent.length < 20 || !seen.add(name)) continue
             if (name == "分章大纲" || name == "剧情进度" || name == "写作禁忌") continue
-            val card = cards.firstOrNull { it.name == name }
-                ?: cards.firstOrNull { it.name.contains(name) || name.contains(it.name) }
+            // v6.9.57：修复找不到卡根治——AI 报告里的卡名常带「」《》【】等装饰、全半角差异或类别前缀，
+            // 旧匹配（精确→contains）对不上就整条丢弃。现在：去装饰 → normCardName 归一化精确 → 归一化 contains →
+            // 归一化前两字兜底（错别字如「君无咎/君无昝」也能对上），逐级放宽
+            val bare = name.replace(Regex("[「」『』《》\\[\\]【】\"'（）()·]"), "").trim()
+            val target = com.lele.novelmaster.data.Prompts.normCardName(bare)
+            val card = cards.firstOrNull { it.name == bare }
+                ?: cards.firstOrNull { com.lele.novelmaster.data.Prompts.normCardName(it.name) == target }
+                ?: cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.isNotEmpty() && target.isNotEmpty() && (a.contains(target) || target.contains(a)) }
+                ?: (if (target.length >= 2) cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.length >= 2 && a.startsWith(target.take(2)) } else null)
                 ?: continue
             if (card.name == "分章大纲" || card.name == "剧情进度" || card.name == "写作禁忌" || card.content == newContent) continue
             // 精简必须真的变短才应用（防止 AI 复读原文）
@@ -1019,7 +1031,13 @@ object Tools {
                 if (!t.startsWith("【删除】")) continue
                 val name = t.removePrefix("【删除】").trim().split("｜", "|")[0].trim()
                 if (name.isBlank() || name == "分章大纲" || name == "剧情进度" || name == "写作禁忌") continue
-                val card = cards.firstOrNull { it.name == name } ?: continue
+                // v6.9.57：与 applyCheckLines 同口径——去装饰 + 归一化匹配，报告卡名带引号/前缀也能删对
+                val bare = name.replace(Regex("[「」『』《》\\[\\]【】\"'（）()·]"), "").trim()
+                val target = com.lele.novelmaster.data.Prompts.normCardName(bare)
+                val card = cards.firstOrNull { it.name == bare }
+                    ?: cards.firstOrNull { com.lele.novelmaster.data.Prompts.normCardName(it.name) == target }
+                    ?: cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.isNotEmpty() && target.isNotEmpty() && (a.contains(target) || target.contains(a)) }
+                    ?: continue
                 withContext(Dispatchers.IO) { Repo.dao.deleteCard(card) }
                 deleted.add(card.name)
             }

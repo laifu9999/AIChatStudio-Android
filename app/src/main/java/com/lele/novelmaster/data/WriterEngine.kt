@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -36,6 +37,22 @@ object WriterEngine {
     }
 
     private fun safeName(s: String) = s.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40).ifBlank { "未命名" }
+
+    /**
+     * v6.9.57：人物名等价判定（Tools.addCard 与灵感落卡 applyInspireLine 共用）。
+     * 先去掉「男主/女主/主角/男二/反派/重要配角」等称谓前缀，再 normCardName 归一化；
+     * 归一化后相等，或（两边都≥2字时）一方包含另一方，视为同一人物。
+     * 用于「男主重复生成两张卡、信息还不一致」的根治：重复保存自动并入原卡。
+     */
+    fun personNamesMatch(a: String, b: String): Boolean {
+        val strip = Regex("(?:男主|女主|主角|男二|女二|男三|女三|配角|重要配角|反派)")
+        val na = Prompts.normCardName(a.replace(strip, ""))
+        val nb = Prompts.normCardName(b.replace(strip, ""))
+        if (na.isBlank() || nb.isBlank()) return false
+        if (na == nb) return true
+        val (short, long) = if (na.length <= nb.length) na to nb else nb to na
+        return short.length >= 2 && long.contains(short)
+    }
 
     /** v6.9.41：注入偏好读取（无全局上下文时用默认值：摘要0章、窗口前2章） */
     private fun sumCount() = Repo.app?.let { InjectPrefs.summaryCount(it) } ?: 0
@@ -131,6 +148,27 @@ object WriterEngine {
         return try { ensureOutlinesInner(projectId, from, to, context) } finally { outlineGate.set(false) }
     }
 
+    /**
+     * v6.9.57：大纲批次调用带 3 次重试。
+     * 此前任一批次抛异常（超时/空返回/网络抖动）会炸掉整个 coroutineScope，
+     * 表现为聊天里「执行工具失败」，几百章的大纲永远生成不完整。
+     * 现在单批失败只跳过该批（后面 stillMissing 补漏轮会再兜一遍），绝不中止全局。
+     */
+    private suspend fun outlineChat(cfg: ApiConfig, user: String, maxTokens: Int): String? {
+        repeat(3) { attempt ->
+            if (attempt > 0) delay(1500L * attempt)
+            runCatching {
+                return AiClient.chat(
+                    cfg,
+                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
+                    temperature = 0.7,
+                    maxTokens = maxTokens
+                )
+            }
+        }
+        return null
+    }
+
     private suspend fun ensureOutlinesInner(projectId: Long, from: Int = 1, to: Int = Int.MAX_VALUE, context: Context? = null): String? {
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在"
@@ -155,22 +193,20 @@ object WriterEngine {
                 val f = first.first().chapterIndex
                 val t = first.last().chapterIndex
                 val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, first.size)
-                val reply = AiClient.chat(
-                    cfg,
-                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
-                    temperature = 0.7,
-                    maxTokens = 6000
-                )
-                applyOutlines(dao, chapters, reply)
-                val done = doneCount.addAndGet(first.size)
-                com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
-                dao.insertMessage(
-                    Message(projectId = projectId, role = "tool", kind = "tool",
-                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章…")
-                )
-                seed = dao.chapters(projectId)
-                    .filter { it.chapterIndex in f..t && it.outline.isNotBlank() }
-                    .sortedBy { it.chapterIndex }.takeLast(3)
+                // v6.9.57：带重试；失败不中止，缺的章由补漏轮兜底
+                val reply = outlineChat(cfg, user, 6000)
+                if (!reply.isNullOrBlank()) applyOutlines(dao, chapters, reply)
+                if (!reply.isNullOrBlank()) {
+                    val done = doneCount.addAndGet(first.size)
+                    com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
+                    dao.insertMessage(
+                        Message(projectId = projectId, role = "tool", kind = "tool",
+                            content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章…")
+                    )
+                    seed = dao.chapters(projectId)
+                        .filter { it.chapterIndex in f..t && it.outline.isNotBlank() }
+                        .sortedBy { it.chapterIndex }.takeLast(3)
+                }
             }
             coroutineScope {
                 for (batch in batches.drop(1)) {
@@ -179,21 +215,19 @@ object WriterEngine {
                             val f = batch.first().chapterIndex
                             val t = batch.last().chapterIndex
                             val user = Prompts.buildOutlineUser(project, cards, chapters, f, t, batch.size, seed)
-                            val reply = AiClient.chat(
-                                cfg,
-                                listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
-                                temperature = 0.7,
-                                maxTokens = 6000
-                            )
-                            applyOutlines(dao, chapters, reply)
-                            val done = doneCount.addAndGet(batch.size)
-                            com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
-                            // v6.9.44：并行批次完成顺序随机，不再显示「第f~t章」区间（区间乱序让作者误以为大纲生成乱序；
-                            // 内容始终按章号写入，与完成顺序无关），只报累计进度，数字天然递增
-                            dao.insertMessage(
-                                Message(projectId = projectId, role = "tool", kind = "tool",
-                                    content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章…")
-                            )
+                            // v6.9.57：带重试；单批失败只跳过，由补漏轮兜底，不再炸掉整轮
+                            val reply = outlineChat(cfg, user, 6000)
+                            if (!reply.isNullOrBlank()) {
+                                applyOutlines(dao, chapters, reply)
+                                val done = doneCount.addAndGet(batch.size)
+                                com.lele.novelmaster.engine.AppTasks.setProgress("outline:$projectId", "🧭 正在生成分章大纲 $done/${missing.size} 章…")
+                                // v6.9.44：并行批次完成顺序随机，不再显示「第f~t章」区间（区间乱序让作者误以为大纲生成乱序；
+                                // 内容始终按章号写入，与完成顺序无关），只报累计进度，数字天然递增
+                                dao.insertMessage(
+                                    Message(projectId = projectId, role = "tool", kind = "tool",
+                                        content = "🧭 分章大纲进度：已生成 $done/${missing.size} 章…")
+                                )
+                            }
                         }
                     }
                 }
@@ -214,13 +248,9 @@ object WriterEngine {
                     // v6.9.43：逐批取最新快照——前一小批刚补的大纲立刻成为下一批的上下文
                     val snap = dao.chapters(projectId)
                     val user = Prompts.buildOutlineUser(project, cards, snap, f, t, batch.size)
-                    val reply = AiClient.chat(
-                        cfg,
-                        listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", user)),
-                        temperature = 0.7,
-                        maxTokens = 3000
-                    )
-                    applyOutlines(dao, chaptersNow, reply)
+                    // v6.9.57：带重试
+                    val reply = outlineChat(cfg, user, 3000)
+                    if (!reply.isNullOrBlank()) applyOutlines(dao, chaptersNow, reply)
                 }
                 val left = dao.chapters(projectId).count { it.outline.isBlank() && it.chapterIndex in from..to }
                 dao.insertMessage(
@@ -242,20 +272,18 @@ object WriterEngine {
                     appendLine("严格每章一行输出「第N章《标题》」，不要任何解释、不要遗漏：")
                     needTitle.forEach { appendLine("第${it.chapterIndex}章：${it.outline.take(60)}") }
                 }
-                val reply = AiClient.chat(
-                    cfg,
-                    listOf(ChatMsg("system", Prompts.OUTLINE_SYSTEM), ChatMsg("user", ask)),
-                    temperature = 0.5,
-                    maxTokens = 2000
-                )
-                // v6.9.56：同样容忍 markdown 修饰与中文数字章号
-                val tre = Regex("^[#\\s>*·•\\-—]*第\\s*([0-9０-９]+|[零一二两三四五六七八九十百千]+)\\s*章\\s*[《\\[]([^》\\]]+)[》\\]]")
-                for (line in reply.lines()) {
-                    val m = tre.find(line.trim()) ?: continue
-                    val idx = chapterNumOf(m.groupValues[1]) ?: continue
-                    val t = m.groupValues[2].trim()
-                    val ch = needTitle.firstOrNull { it.chapterIndex == idx } ?: continue
-                    if (t.isNotBlank()) dao.updateChapter(ch.copy(title = t))
+                // v6.9.57：标题补齐也带重试（outlineChat 温度 0.7 对起标题无碍）
+                val reply = outlineChat(cfg, ask, 2000)
+                if (!reply.isNullOrBlank()) {
+                    // v6.9.56：同样容忍 markdown 修饰与中文数字章号
+                    val tre = Regex("^[#\\s>*·•\\-—]*第\\s*([0-9０-９]+|[零一二两三四五六七八九十百千]+)\\s*章\\s*[《\\[]([^》\\]]+)[》\\]]")
+                    for (line in reply.lines()) {
+                        val m = tre.find(line.trim()) ?: continue
+                        val idx = chapterNumOf(m.groupValues[1]) ?: continue
+                        val t = m.groupValues[2].trim()
+                        val ch = needTitle.firstOrNull { it.chapterIndex == idx } ?: continue
+                        if (t.isNotBlank()) dao.updateChapter(ch.copy(title = t))
+                    }
                 }
             }
         }
@@ -823,6 +851,8 @@ object WriterEngine {
         val sameName = dao.findCard(projectId, cat, name)
             // v6.9.41：归一化名兜底——AI 这次输出「慕昭（魔尊_反派）」、上次存的是「慕昭（魔尊/反派）」也认得是同一张
             ?: dao.cards(projectId).firstOrNull { it.category == cat && Prompts.normCardName(it.name) == Prompts.normCardName(name) }
+            // v6.9.57：人物设定去重——「男主林墨」vs「林墨」「林墨（主角）」这类称谓变体也认成同一人，更新原卡不新建
+            ?: if (cat == "人物设定") dao.cards(projectId).firstOrNull { it.category == cat && personNamesMatch(it.name, name) } else null
         // v6.9：全书大纲类的回退匹配要排除 分章大纲 系统卡，防止 AI 存主卡时覆盖掉它们
         val dupCard = sameName ?: if (cat in singleCats)
             dao.cards(projectId).firstOrNull { it.category == cat && it.name !in OUTLINE_CARD_NAMES } else null
