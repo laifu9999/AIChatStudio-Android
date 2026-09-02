@@ -319,7 +319,11 @@ object AiClient {
     }
 
     /** 测试连接：发一句极短的请求 */
-    suspend fun testConnection(cfg: ApiConfig): String {
+    suspend fun testConnection(cfg0: ApiConfig): String {
+        val cfg = sanitizeCfg(cfg0)   // v6.9.67：密钥/地址净化
+        if (cfg.baseUrl.isBlank()) throw RuntimeException("API地址没填——请先填 Base URL（可从「选择服务商」预设里一键带入）")
+        if (cfg.apiKey.isBlank()) throw RuntimeException("API密钥没填——请到服务商后台复制密钥粘贴进来")
+        if (cfg.model.isBlank()) throw RuntimeException("还没选模型——请先点「获取模型」再从列表里选一个")
         val reply = chat(
             cfg,
             listOf(ChatMsg("user", "请只回复四个字：连接成功")),
@@ -395,7 +399,8 @@ object AiClient {
     }
 
     /** 自动获取该服务下所有可用模型 */
-    suspend fun listModels(cfg: ApiConfig): List<String> = withContext(Dispatchers.IO) {
+    suspend fun listModels(cfg0: ApiConfig): List<String> = withContext(Dispatchers.IO) {
+        val cfg = sanitizeCfg(cfg0)   // v6.9.67：密钥/地址净化
         if (cfg.provider == "gemini") {
             val body = httpGet("https://generativelanguage.googleapis.com/v1beta/models?key=${cfg.apiKey}", null)
             val arr = JSONObject(body).optJSONArray("models") ?: return@withContext emptyList()
@@ -432,6 +437,39 @@ object AiClient {
             is String -> v
             else -> v.toString()
         }
+    }
+
+    // ---------- v6.9.67：配置净化 + 报错人话化（修复「填了密钥连不上」） ----------
+
+    /**
+     * 配置净化：修复「填了 APIKey 连不上」的隐形坑——
+     *  ① 密钥里混进空格/换行/全角空格/零宽字符（网页复制 key 最常见），拼进
+     *     Authorization 头直接被 OkHttp 拒绝或被服务端判无效；
+     *  ② Base URL 漏写 https:// 前缀（如 open.bigmodel.cn/api/paas/v4），
+     *     OkHttp 报「Expected URL scheme」这种没人看得懂的错；
+     *  ③ Base URL 里混不可见字符。
+     * 所有请求入口统一调用，DB 里已存的脏配置也能救。
+     */
+    private fun sanitizeCfg(cfg: ApiConfig): ApiConfig {
+        val key = cfg.apiKey.replace(Regex("\\s+"), "").replace(Regex("[\\u200B-\\u200D\\uFEFF\\u00A0\\u3000]"), "")
+        var url = cfg.baseUrl.trim().replace(Regex("[\\u200B-\\u200D\\uFEFF\\u00A0\\u3000]"), "")
+        if (url.isNotEmpty() && !url.startsWith("http://") && !url.startsWith("https://")) url = "https://$url"
+        if (url == "https://" || url == "http://") url = ""
+        return if (key == cfg.apiKey && url == cfg.baseUrl) cfg else cfg.copy(apiKey = key, baseUrl = url)
+    }
+
+    /** 把 HTTP 状态码翻译成人话——连接失败时用户能自己定位是密钥/地址/模型/额度哪一层的问题 */
+    private fun humanHttpError(code: Int, body: String): String {
+        val b = body.take(300)
+        val hint = when (code) {
+            401, 403 -> "API密钥无效或未授权——请核对密钥是否复制完整、是否属于这个平台、账号是否有权限"
+            404 -> "接口地址不对——Base URL 一般以 /v1 或 /v4 结尾（不要带 /chat/completions），或所选模型名不属于该平台"
+            400 -> "请求被拒——最常见是模型名写错（点「获取模型」从列表里选），或该平台不认某个参数"
+            429 -> "额度不足或请求太频繁——免费模型有速率限制，稍等再试或换个模型"
+            in 500..599 -> "服务商服务器开小差——稍后重试"
+            else -> ""
+        }
+        return "HTTP $code" + (if (hint.isNotEmpty()) "：$hint" else "") + (if (b.isNotEmpty()) "｜$b" else "")
     }
 
     // ---------- 思考强度（v6.9.47） ----------
@@ -552,6 +590,7 @@ object AiClient {
         maxTokens: Int,
         stream: Boolean
     ): Response {
+        val cfg = sanitizeCfg(cfg)   // v6.9.67：密钥/地址净化（去隐形字符、自动补 https://）
         // v6.9.56：用「实际生效档位」判断是否注入思考参数——glm-5 系默认档也要带 effort=low
         val useThink = effectiveThinkMode(cfg).isNotBlank() && thinkingUnsupported[cfg.model] != true
         val url = cfg.baseUrl.trimEnd('/') + "/chat/completions"
@@ -617,7 +656,7 @@ object AiClient {
         openaiCall(cfg, messages, temperature, maxTokens, stream = true).use { resp ->
             if (!resp.isSuccessful) {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
-                throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
+                throw RuntimeException(humanHttpError(resp.code, b))
             }
             val reader = java.io.BufferedReader(resp.body?.charStream() ?: return@use AiResult("", "stop"))
             val sb = StringBuilder()
@@ -676,7 +715,7 @@ object AiClient {
         // v6.9.47：统一走 openaiCall（思考参数注入 + 400 自动去参重试）
         openaiCall(cfg, messages, temperature, maxTokens, stream = false).use { resp ->
             val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
+            if (!resp.isSuccessful) throw RuntimeException(humanHttpError(resp.code, body))
             val msg = JSONObject(body)
                 .optJSONArray("choices")?.optJSONObject(0)
                 ?.optJSONObject("message")
@@ -731,6 +770,7 @@ object AiClient {
         maxTokens: Int,
         stream: Boolean
     ): Response {
+        val cfg = sanitizeCfg(cfg)   // v6.9.67：密钥/地址净化
         val path = if (stream) "streamGenerateContent?alt=sse&key=${cfg.apiKey}"
         else "generateContent?key=${cfg.apiKey}"
         val url = "https://generativelanguage.googleapis.com/v1beta/models/${cfg.model}:$path"
@@ -764,7 +804,7 @@ object AiClient {
         geminiCall(cfg, messages, temperature, maxTokens, stream = true).use { resp ->
             if (!resp.isSuccessful) {
                 val b = runCatching { resp.peekBody(4096).string() }.getOrDefault("")
-                throw RuntimeException("HTTP ${resp.code}: ${b.take(300)}")
+                throw RuntimeException(humanHttpError(resp.code, b))
             }
             val reader = java.io.BufferedReader(resp.body?.charStream() ?: return@use AiResult("", "stop"))
             val sb = StringBuilder()
@@ -818,7 +858,7 @@ object AiClient {
         // v6.9.47：统一走 geminiCall（思考配置 + 报错自动去参重试）
         geminiCall(cfg, messages, temperature, maxTokens, stream = false).use { resp ->
             val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
+            if (!resp.isSuccessful) throw RuntimeException(humanHttpError(resp.code, body))
             val cand = JSONObject(body).optJSONArray("candidates")?.optJSONObject(0)
             val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
             val sb = StringBuilder()
@@ -857,7 +897,7 @@ object AiClient {
         if (auth != null) b.header("Authorization", auth)
         streamingClient.newCall(b.build()).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}: ${body.take(300)}")
+            if (!resp.isSuccessful) throw RuntimeException(humanHttpError(resp.code, body))
             return body
         }
     }
