@@ -1530,7 +1530,7 @@ object WriterEngine {
                             "最后另起一行输出：【回收伏笔】名称1、名称2\n" +
                             "该行名称必须从清单中逐字复制（含书名号），多条用顿号分隔；本章没有回收任何清单伏笔就绝不输出该行，严禁输出清单以外的名称、严禁自行改写名称。\n" +
                             "新埋判定：只有本章刻意埋下的、后续要揭晓的悬念/暗示/未解之谜才算新伏笔；普通情节、冲突、转折、人物登场都绝不算。" +
-                            "若有，每条另起一行输出：【新埋伏笔】名称：一句话说明（最多2条）；没有就绝不输出该行。\n" +
+                            "若有，每条另起一行输出：【新埋伏笔】名称：一句话说明（说明必须点明读者在等什么答案，如「玉佩为何异动」；点不出悬念指向的就不要输出该条；最多2条）；没有就绝不输出该行。\n" +
                             "第${ch.chapterIndex}章《${ch.title}》正文：\n${ch.content.take(4000)}"
                     )
                 ),
@@ -1580,8 +1580,10 @@ object WriterEngine {
             }
             // v6.9.15：新埋伏笔自动建档（去重）；v6.9.61：真伏笔校验 + ≥25条闸门——
             // 未回收积压过多时禁止再埋（先清库存），防止无限堆积
+            // v6.9.64：建档硬校验——说明为空或过短＝点不出悬念指向，多半是普通情节凑数，拒绝建档
             val newHookLines = sumReply.lines().filter { it.contains("新埋伏笔") }
             var newHookDenied = false
+            var newHookSkipped = 0
             newHookLines.forEach { line ->
                 val body = line.substringAfter("】").trim()
                 val name = body.substringBefore("：").substringBefore(":").trim().take(30)
@@ -1592,23 +1594,31 @@ object WriterEngine {
                         return@forEach
                     }
                     val desc = body.substringAfter("：", "").substringAfter(":", "").trim()
+                    if (desc.length < 6) {
+                        newHookSkipped++
+                        return@forEach
+                    }
                     val exists = dao.cards(project.id).any { it.category == "伏笔钩子" && it.name == name }
                     if (!exists) {
                         dao.insertCard(
                             SettingCard(
                                 projectId = project.id, category = "伏笔钩子", name = name,
-                                content = desc.ifBlank { "第${ch.chapterIndex}章埋设" },
+                                content = desc,
                                 status = "埋设中"
                             )
                         )
                         dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
-                            content = "🪝 新伏笔已记录：【$name】（${desc.ifBlank { "第${ch.chapterIndex}章埋设" }}），可随时说「伏笔体检」查看埋收状态。"))
+                            content = "🪝 新伏笔已记录：【$name】（$desc），可随时说「伏笔体检」查看埋收状态。"))
                     }
                 }
             }
             if (newHookDenied) {
                 dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                     content = "⚠️ 未回收伏笔已超过 25 条，本章 AI 想埋的新伏笔未建档。建议说「伏笔体检」清理积压——回收旧伏笔比埋新伏笔更重要。"))
+            }
+            if (newHookSkipped > 0) {
+                dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                    content = "🔍 本章有 $newHookSkipped 条疑似凑数的「新伏笔」（说明里点不出悬念指向）未建档；若确属伏笔，可在设定卡手动补记。"))
             }
         } catch (_: Exception) {
             // 摘要失败不影响正文
