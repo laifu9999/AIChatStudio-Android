@@ -312,6 +312,30 @@ object Prompts {
             appendLine("【开篇大纲（全书基调与人物出场基准，本批章节必须自然承接以下剧情与人物线，严禁推翻或另起炉灶）】")
             seed.forEach { appendLine("第${it.chapterIndex}章《${it.title}》:${it.outline}") }
         }
+        // v6.9.65：卷级剧情统筹——按每 120 章自动分卷，生成大纲时告知卷号与卷内位置，
+        // 卷末必须有本卷大高潮收束+下一卷引子，避免超长篇写成无限流水账；纯提示层，不改数据结构。
+        val volLen = 120
+        val totalCh = project.targetChapters.coerceAtLeast(1)
+        if (totalCh > 150) {
+            val vols = (totalCh + volLen - 1) / volLen
+            val vf = (from - 1) / volLen + 1
+            val vt = (to - 1) / volLen + 1
+            appendLine("【卷级统筹（全书约${totalCh}章，按每卷${volLen}章分${vols}卷；大纲必须体现卷级节奏，严禁全书匀速流水账）】")
+            if (vf == vt) {
+                val vs = (vf - 1) * volLen + 1
+                val ve = minOf(vf * volLen, totalCh)
+                val posInVol = (from - vs + 1).toDouble() / (ve - vs + 1).coerceAtLeast(1)
+                val stage = when {
+                    posInVol <= 0.3 -> "卷首段（本卷开局：引入本卷核心冲突/新地图/新势力，快速建立本卷看点）"
+                    posInVol <= 0.7 -> "卷中段（发展升级：冲突层层加码，主角实力/关系/局面持续变化）"
+                    else -> "卷末段（向本卷大高潮推进：本卷核心冲突逐步收网）"
+                }
+                appendLine("· 本批第${from}~${to}章属于第${vf}卷（第${vs}~${ve}章）——${stage}")
+                appendLine("· 卷末硬要求：第${ve}章前后必须完成本卷大高潮（重大胜负/真相揭晓/格局改变至少其一），并为下一卷留下引子")
+            } else {
+                appendLine("· 本批第${from}~${to}章跨第${vf}~${vt}卷（每卷约${volLen}章）：跨卷处必须先完成上一卷大高潮收束，再开新卷引入新冲突，严禁两卷剧情搅在一起不分主次")
+            }
+        }
         appendLine()
         append("请为第${from}章到第${to}章编写分章大纲，共${count}行。\n" +
             "硬性格式要求：①必须覆盖第${from}章到第${to}章的每一章，严禁跳章、漏章、合并章；②每章严格一行，每行必须以「第N章《标题》：」开头，标题2~8字必填，没有标题按不合格处理；③除此之外不输出任何其他文字；④输出纯文本行，严禁使用 Markdown 标记（####、**、列表符号都不行），章号必须用阿拉伯数字（第2章，不要写「第二章」）。\n" +

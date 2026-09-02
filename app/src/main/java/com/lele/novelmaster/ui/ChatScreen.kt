@@ -745,8 +745,8 @@ private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit
                 OutlinedTextField(value = genre, onValueChange = { genre = it }, modifier = Modifier.fillMaxWidth(), label = { Text("类型（可留空）") }, singleLine = true)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
-                    value = total, onValueChange = { total = it.filter { c -> c.isDigit() }.take(3) },
-                    modifier = Modifier.fillMaxWidth(), label = { Text("目标章数（1~600，可留空默认300）") }, singleLine = true
+                    value = total, onValueChange = { total = it.filter { c -> c.isDigit() }.take(4) },
+                    modifier = Modifier.fillMaxWidth(), label = { Text("目标章数（1~2000，可留空默认300）") }, singleLine = true
                 )
             }
         },
@@ -758,7 +758,7 @@ private fun CreateSessionDialog(onDismiss: () -> Unit, onCreated: (Long) -> Unit
                     scope.launch {
                         val r = com.lele.novelmaster.tools.Tools.createProject(
                             title = title.trim(), genre = genre.trim(), desc = "",
-                            totalCh = (total.toIntOrNull() ?: 300).coerceIn(1, 600), chWords = 2500,
+                            totalCh = (total.toIntOrNull() ?: 300).coerceIn(1, 2000), chWords = 2500,
                             force = true
                         )
                         onCreated(r.newProjectId ?: 0L)

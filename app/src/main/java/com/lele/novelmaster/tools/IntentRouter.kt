@@ -109,7 +109,7 @@ object IntentRouter {
             Regex("(?:目标|共|改成|改为)\\s*([0-9零一二三四五六七八九十百千]{1,4})\\s*章").find(raw)?.let { m ->
                 val pid = needPid() ?: return@let
                 val n = parseChineseNum(m.groupValues[1])
-                if (n in 1..600) return Tools.updateProject(pid, totalCh = n)
+                if (n in 1..2000) return Tools.updateProject(pid, totalCh = n)
             }
         } // v6.0: !creativeReq
 
@@ -327,6 +327,12 @@ object IntentRouter {
         if (Regex("推演|剧情走向|后续剧情|接下来怎么写|接下来剧情").containsMatchIn(raw)) {
             val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
             return Tools.plotBrainstorm(pid)
+        }
+        // v6.9.65：时间线专项体检——必须放在人物体检路由之前（「体检时间线」会被 人物体检 的
+        // 「体检+名字」宽匹配截胡当成人物名），也先于全书体检的裸「体检」
+        if (Regex("时间线\\s*(体检|检查|校对|一致|矛盾|问题|梳理)|(体检|检查|校对|梳理)\\s*(?:一下)?\\s*时间线").containsMatchIn(raw)) {
+            val pid = needPid() ?: return ToolResult(false, "请先选择一本书")
+            return Tools.timelineCheck(pid)
         }
         // v6.9.19：人物体检重写——旧正则 `人物?\s*(体检|一致性)` 里「人」必选，导致「体检林墨」
         // 根本进不了本路由（漏到全书体检）；现在裸「体检+人名」也命中，但名字含「第/章/数字」

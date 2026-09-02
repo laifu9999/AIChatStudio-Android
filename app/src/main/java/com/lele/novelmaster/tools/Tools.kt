@@ -107,7 +107,8 @@ object Tools {
         val p = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "项目不存在")
         val oldChapters = withContext(Dispatchers.IO) { Repo.dao.chapters(pid) }
         var needChapters = false
-        val newTotal = totalCh?.coerceIn(1, 600)
+        // v6.9.65：章数上限 600→2000（超长篇网文 800~1500 章是常态，旧上限把 800 章书卡在 601 章）
+        val newTotal = totalCh?.coerceIn(1, 2000)
         val newProject = p.copy(
             title = title?.trim()?.ifBlank { null } ?: p.title,
             genre = genre?.trim() ?: p.genre,
@@ -430,9 +431,9 @@ object Tools {
         // v6.4：自动写作同样过硬门槛——设定卡+分章大纲不齐全，先自动补全再开写
         val gateErr = WriterEngine.ensurePreconditions(pid, context)
         if (gateErr != null) return ToolResult(false, gateErr)
-        // 自定义范围 1~600；实际章节不足时按实际章节遍历，写完自动停
-        val f = from.coerceIn(1, 600)
-        val t = to.coerceIn(f, 600)
+        // v6.9.65：自定义范围上限 600→2000；实际章节不足时按实际章节遍历，写完自动停
+        val f = from.coerceIn(1, 2000)
+        val t = to.coerceIn(f, 2000)
         AutoWriteManager.start(pid, f, t, context)
         return ToolResult(true, "🚀 自动写作已开始", "范围：第 $f ~ $t 章（实际章节不足时写到最后一章自动停）。进度在聊天里实时播报，随时说「停止写作」中止。", navigateTo = "autowrite/$pid")
     }
@@ -810,6 +811,62 @@ object Tools {
             "\n\n💡 当前未回收伏笔已达 ${open.size} 条（多数为写作过程自动记录）。清理方法：①「疑似凑数」的直接在设定卡页删除；②「其实已回收/已过很久」的，直接说「标记伏笔 甲、乙、丙 已回收」可一次批量标记；新版本每章最多记 2 条新伏笔（且说明必须点明悬念，点不出悬念的自动拒收），未回收超 25 条自动停记新账。"
         } else ""
         return if (err == null) ToolResult(true, "🪝 伏笔体检（未回收 ${open.size} 条 / 已回收 ${done.size} 条）：", out + tip) else ToolResult(false, err)
+    }
+
+    /** 8.0b2 时间线专项体检（v6.9.65）：超长篇专用——分批构建事件时间线再全书对照找冲突。
+     *  600 章以上摘要全量单次注入会爆上下文，因此两阶段：
+     *  阶段1 每 60 章一批 → 各批提炼分段事件时间线（≤20 条带章号关键事件，增量播报进度）；
+     *  阶段2 全书时间线合并 → 找时间倒流/人物复活/季节年份矛盾/同事件二写。
+     *  ≤60 章直接单次全量体检。全程只诊断不修改；逐章矛盾引导走「全书自检」。
+     *  走「体检专用模型」（BOOKCHECK），批次间互不影响，单批失败立即返回已完成的诊断进度。 */
+    suspend fun timelineCheck(pid: Long): ToolResult {
+        val dao = Repo.dao
+        val chapters = dao.chapters(pid)
+            .filter { it.content.isNotBlank() && it.summary.isNotBlank() }
+            .sortedBy { it.chapterIndex }
+        if (chapters.isEmpty()) return ToolResult(false, "还没有已写章节（或章节尚无摘要），无法体检时间线")
+        val askFind =
+            "请检查：1) 时间倒流/事件先后错序；2) 已死亡人物之后又出现活动；3) 年龄、季节、年份自相矛盾；4) 同一事件被写成两次发生。" +
+            "逐条输出「⚠️ 第N章附近：冲突描述＋修复建议（一句话）」，按严重度从高到低排序；确认无冲突就明确说【时间线通过】。"
+        if (chapters.size <= 60) {
+            val sumBlock = chapters.joinToString("\n") { "第${it.chapterIndex}章：${it.summary.take(80)}" }
+            val (err, out) = WriterEngine.freeTask(
+                pid,
+                "任务：时间线专项体检（只诊断，不修改）。以下是全书各章摘要：\n$sumBlock\n\n$askFind",
+                task = com.lele.novelmaster.data.TaskModels.BOOKCHECK
+            )
+            val tip = if (err == null) "\n\n💡 本报告只诊断不修改。逐章矛盾可说「全书自检」自动修正；个别章可直接说「修改第N章：…」。" else ""
+            return if (err == null) ToolResult(true, "⏳ 时间线体检报告（共 ${chapters.size} 章）：", out + tip) else ToolResult(false, err)
+        }
+        // 阶段1：分段构建时间线
+        val batches = chapters.chunked(60)
+        val segs = mutableListOf<String>()
+        for ((i, b) in batches.withIndex()) {
+            dao.insertMessage(Message(projectId = pid, role = "tool", kind = "tool",
+                content = "⏳ 时间线体检：第 ${b.first().chapterIndex}~${b.last().chapterIndex} 章提炼分段事件时间线（${i + 1}/${batches.size} 批）…"))
+            val sumBlock = b.joinToString("\n") { "第${it.chapterIndex}章：${it.summary.take(80)}" }
+            val (err, out) = WriterEngine.freeTask(
+                pid,
+                "任务：从下列各章摘要提炼本段事件时间线（只输出时间线，不要任何解释）。\n$sumBlock\n\n" +
+                    "输出要求：按先后顺序一行一条「第N章：事件（30字内）」，最多 20 条；只挑影响时间走向的关键事件" +
+                    "（启程/突破/大战/死亡/复活/分别重逢/时间跨度跳跃/季节年份变化等）；无摘要或纯日常的章跳过。",
+                task = com.lele.novelmaster.data.TaskModels.BOOKCHECK
+            )
+            if (err != null) return ToolResult(false, "时间线体检在第 ${i + 1}/${batches.size} 批（第${b.first().chapterIndex}~${b.last().chapterIndex}章）中断：$err")
+            segs.add(out.trim())
+        }
+        // 阶段2：全书时间线合并找冲突
+        dao.insertMessage(Message(projectId = pid, role = "tool", kind = "tool",
+            content = "⏳ 时间线体检：全书 ${segs.size} 段时间线合并对照中…"))
+        val merged = segs.mapIndexed { i, s -> "【第${batches[i].first().chapterIndex}~${batches[i].last().chapterIndex}章时间段】\n$s" }.joinToString("\n\n")
+        val (err2, report) = WriterEngine.freeTask(
+            pid,
+            "任务：全书时间线冲突体检（只诊断，不修改）。以下是分批提炼的全书事件时间线（段与段首尾相接）：\n$merged\n\n$askFind",
+            task = com.lele.novelmaster.data.TaskModels.BOOKCHECK
+        )
+        if (err2 != null) return ToolResult(false, err2)
+        val tip = "\n\n💡 本报告只诊断不修改。逐章矛盾可说「全书自检」自动修正；个别章可直接说「修改第N章：…」。"
+        return ToolResult(true, "⏳ 时间线体检报告（共 ${chapters.size} 章，${batches.size} 段时间线）：", report + tip)
     }
 
     /** 8.0c 标记伏笔已回收：伏笔体检发现「已回收但未标记」时的人工确认入口（v6.9.16）；
@@ -1475,6 +1532,8 @@ object Tools {
             "undoSelfCheck" -> undoSelfCheck(pid, args.optInt("index", 0))
             "supplementChapter" -> supplementChapter(pid, args.optInt("index", -1))
             "foreshadowCheck" -> foreshadowCheck(pid)
+            // v6.9.65：时间线专项体检（分批构建全书时间线再找冲突，超长篇可用）
+            "timelineCheck" -> timelineCheck(pid)
             "markHookRecovered" -> markHookRecovered(pid, args.optString("name"))
             "subplotCheck" -> subplotCheck(pid)
             "cardsCheck" -> cardsCheck(pid)
