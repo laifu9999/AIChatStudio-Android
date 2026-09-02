@@ -235,6 +235,44 @@ object AiClient {
         if (t.isNotBlank()) t else throw RuntimeException("AI返回为空")
     }
 
+    /**
+     * v6.9.66：同 chat()，但保留 finishReason——正文写作/润色/重写链路用 truncated
+     * （finish_reason=length）检测「正文被 token 上限掐断在半句」的残稿，及时续写补完。
+     * chat() 丢 finishReason 是正文烂尾根因之一：截断常发生在句号处，仅靠结尾标点判断会漏网。
+     */
+    suspend fun chatRes(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double = 0.85,
+        maxTokens: Int = MAX_TOKENS_HUGE
+    ): AiResult = withContext(Dispatchers.IO) {
+        try {
+            chatResOnce(cfg, messages, temperature, maxTokens)
+        } catch (e: Exception) {
+            if (e is CancellationException || cfg.thinkMode == "none" || !isThinkExhaustedError(e.message)) throw e
+            chatResOnce(cfg.copy(thinkMode = "none"), messages, temperature, maxTokens)
+        }
+    }
+
+    private suspend fun chatResOnce(
+        cfg: ApiConfig,
+        messages: List<ChatMsg>,
+        temperature: Double,
+        maxTokens: Int
+    ): AiResult = withContext(Dispatchers.IO) {
+        val r = try {
+            chatStream(cfg, messages, temperature, maxTokens) { }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            val plain = chatPlain(cfg, messages, temperature, maxTokens).trim()
+            // 非流式兜底路径拿不到 finish_reason，按正常结束处理（主流路径是流式，有完整标志）
+            if (plain.isNotBlank()) return@withContext AiResult(stripThink(plain), "stop")
+            throw e
+        }
+        val t = stripThink(r.text.trim())
+        if (t.isNotBlank()) AiResult(t, r.finishReason) else throw RuntimeException("AI返回为空")
+    }
+
     /** 非流式兜底（max_tokens 过大时自动降级重试）。v6.9.46：全程喂不了看门狗，用 plainInflight 豁免 */
     private suspend fun chatPlain(
         cfg: ApiConfig,

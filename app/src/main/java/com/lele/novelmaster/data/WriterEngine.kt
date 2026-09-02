@@ -1031,6 +1031,51 @@ object WriterEngine {
     }
 
     /**
+     * v6.9.66：正文完整性兜底引擎（自动写作/编辑器重写/自检修共用）。
+     * 触发条件（任一）：① wasTruncated=true（finish_reason=length，AI 输出被 token 上限掐断——
+     * 截断常发生在句号处，光看结尾标点会漏网）；② 篇幅低于目标字数 85%；③ 结尾不是收束标点。
+     * 每轮用 continueMessages 从断点续写（先补完没写完的句子），续写结果再被截断就继续补，
+     * 最多 5 轮；只往后接、绝不删已有内容。返回 (补完正文, 补写轮数)。
+     */
+    private suspend fun ensureChapterComplete(
+        cfg: ApiConfig,
+        project: Project,
+        cards: List<SettingCard>,
+        ch: Chapter,
+        content0: String,
+        wasTruncated: Boolean = false
+    ): Pair<String, Int> {
+        var content = content0
+        var truncated = wasTruncated
+        var rounds = 0
+        val target = project.chapterWordTarget
+        while (rounds < 5 && (truncated || content.length < target * 85 / 100 || !endsWell(content))) {
+            rounds++
+            // v6.9.66b：记录本轮进入原因——截断触发的轮次不受「无增长即停」保护（宁可多接一句，
+            // 也不能把已判定的截断残稿原样放走）；只有长度/收束触发的轮次才防重复输出死循环
+            val enteredByTruncation = truncated
+            truncated = false
+            try {
+                val words = (target - content.length).coerceIn(300, 3000)
+                val res = AiClient.chatRes(
+                    cfg,
+                    Prompts.continueMessages(project, cards, ch, content, words),
+                    temperature = 0.85
+                )
+                val cont = res.text.trim()
+                if (cont.isBlank()) break
+                val merged = cleanBody(content + "\n" + cont, ch.chapterIndex, ch.title)
+                // 续写没实质增长且原文已收束（仅非截断场景）→ 防重复输出死循环
+                if (!enteredByTruncation && merged.length <= content.length + 20 && endsWell(content)) break
+                content = merged
+                truncated = res.truncated   // 续写又被掐断 → 下一轮接着补
+                if (!truncated && endsWell(content) && content.length >= target * 85 / 100) break
+            } catch (_: Exception) { break }
+        }
+        return content to rounds
+    }
+
+    /**
      * 写单章：
      *  1) 写前在聊天播报「📥 已注入内容」（必发卡/伏笔/摘要/结尾/相邻大纲摘要）
      *  2) 生成正文 → 存库 → 同时落盘 files/正文/第N章-标题.txt
@@ -1106,7 +1151,9 @@ object WriterEngine {
         var lastUi = 0L
         var lastSave = 0L
         val live = StringBuilder()
-        val streamed = try {
+        // v6.9.66：保留完整 AiResult——finish_reason=length（输出被 token 上限掐断）是正文烂尾
+        // 的重要根因，之前只取 .text 把截断标志丢了，半句稿直接入库
+        val writeRes = try {
             AiClient.chatStream(cfg, messages, temperature = 0.85) { delta ->
                 live.append(delta)
                 val now = System.currentTimeMillis()
@@ -1131,33 +1178,23 @@ object WriterEngine {
                         }
                     } catch (_: Exception) { }
                 }
-            }.text
+            }
         } catch (e: Exception) {
             if (liveId != 0L) dao.updateMessageContent(liveId, "⚠️ 第${ch0.chapterIndex}章生成失败：${e.message?.take(200)}")
             throw e
         }
 
-        var content = cleanBody(streamed.trim(), ch0.chapterIndex, ch0.title)
+        var content = cleanBody(writeRes.text.trim(), ch0.chapterIndex, ch0.title)
         if (content.isBlank()) throw IllegalStateException("AI返回空内容")
 
-        // v5.6/v5.7：完整性保障——太短或结尾没有收束标点时续写补完（最多5次，保证每章都写完整）
-        val target = project.chapterWordTarget
-        var fixUps = 0
-        while (fixUps < 5 && (content.length < target * 85 / 100 || !endsWell(content))) {
-            fixUps++
-            try {
-                val words = (target - content.length).coerceIn(300, 2200)
-                val cont = AiClient.chat(
-                    cfg,
-                    Prompts.continueMessages(project, cards, ch0, content, words),
-                    temperature = 0.85
-                ).trim()
-                if (cont.isBlank()) break
-                val merged = cleanBody(content + "\n" + cont, ch0.chapterIndex, ch0.title)
-                if (merged.length <= content.length + 20 && endsWell(content)) break
-                content = merged
-                if (endsWell(content) && content.length >= target * 85 / 100) break
-            } catch (_: Exception) { break }
+        // v6.9.66：完整性兜底统一走 ensureChapterComplete——除旧有的「太短/结尾没收束」外，
+        // 新增 finish_reason=length 截断检测（截断常发生在句号处，光看结尾标点会漏网）；
+        // 续写结果再被截断也继续补，直到写完整为止
+        val (completed, fixUps) = ensureChapterComplete(cfg, project, cards, ch0, content, writeRes.truncated)
+        content = completed
+        if (fixUps > 0) {
+            dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
+                content = "📝 第${ch0.chapterIndex}章初稿不完整（${if (writeRes.truncated) "AI 输出被截断" else "结尾未收束或篇幅不足"}），已自动续写 $fixUps 轮补完。"))
         }
 
         // v6.9.58：人物名统一校正——AI 把「林墨」写成「林哲/林川」这类同姓变体时自动改回唯一名（跨章人名一致性）
@@ -1349,8 +1386,9 @@ object WriterEngine {
      */
     suspend fun polishForPublish(cfg: ApiConfig, dao: NovelDao, project: Project, ch: Chapter, context: Context?): Boolean {
         val orig = ch.content
+        // v6.9.66：chatRes 保留截断标志——润色输出被 token 上限掐断时拒绝采纳，残稿不能替换原文
         val reply = try {
-            AiClient.chat(
+            AiClient.chatRes(
                 cfg,
                 listOf(
                     ChatMsg("system", "你是资深网文编辑，做发布前终修。只输出润色后的完整正文，不要任何解释、标题或说明。"),
@@ -1366,14 +1404,18 @@ object WriterEngine {
                             "5) 心理用动作与细节呈现，删「他知道/他明白/殊不知」式作者旁白；\n" +
                             "6) 不滥用成语与四字排比，形容词少而准。\n" +
                             "字数与原文相当（上下不超过两成）。\n" +
+                            "v6.9.66 完整性硬要求：润色稿必须是完整正文（从章首到章末一句不缺），结尾必须是完整句子落在具体动作/对话/悬念上；宁可少改，也绝不允许截断、省略结尾或写到一半停下。\n" +
                             "【第${ch.chapterIndex}章正文】\n$orig")
                 ),
                 temperature = 0.6,
                 maxTokens = AiClient.MAX_TOKENS_HUGE
             )
         } catch (_: Exception) { return false }
-        val t = reply.trim()
+        val t = reply.text.trim()
         if (t.isBlank() || t.length < orig.length * 0.6 || t.length > orig.length * 1.6) return false
+        // v6.9.66：润色稿完整性双校验——被 token 截断的残稿、结尾没收束的半句稿一律不采纳（保留原文）。
+        // 之前只查长度区间，润色稿烂尾照样替换原文，这就是「润色后结尾只说一半」的根因
+        if (reply.truncated || !endsWell(t)) return false
         // 改前备份（供撤销恢复）
         try {
             dir(context, project.id, "正文备份")?.let { d ->
@@ -1406,6 +1448,8 @@ object WriterEngine {
         var suspect = 0
         var polished = 0
         val fixedChapters = mutableListOf<Int>()
+        // v6.9.66：润色也要报章号——作者要求「修了哪章、润色哪章」必须可见
+        val polishedChapters = mutableListOf<Int>()
         val doPolish = polishOn(context)
         chapters.forEachIndexed { i, ch0 ->
             val before = ch0.content
@@ -1422,21 +1466,24 @@ object WriterEngine {
                 val fresh = dao.chapter(ch0.id) ?: ch0
                 if (fresh.content.isNotBlank()) {
                     val ok = try { polishForPublish(cfg, dao, project, fresh, context) } catch (_: Exception) { false }
-                    if (ok) polished++
+                    if (ok) { polished++; polishedChapters.add(ch0.chapterIndex) }
                 }
             }
             if ((i + 1) % 3 == 0 || i + 1 == chapters.size) {
+                // v6.9.66：进度播报带章号——当前检查到哪章、修了哪章、润了哪章（各列最近10个防刷屏）
                 dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
-                    content = "🔬 全书自检进度：已检查 ${i + 1}/${chapters.size} 章" +
-                        (if (fixed > 0) "，已修复 $fixed 章" else "") +
-                        (if (doPolish) "，已润色 $polished 章" else "")))
+                    content = "🔬 全书自检进度：已检查 ${i + 1}/${chapters.size} 章（当前第${ch0.chapterIndex}章）" +
+                        (if (fixed > 0) "\n🔧 已修复 $fixed 章：第${fixedChapters.takeLast(10).joinToString("、")}章" else "") +
+                        (if (doPolish && polished > 0) "\n✨ 已润色 $polished 章：第${polishedChapters.takeLast(10).joinToString("、")}章" else "")))
             }
         }
         val summary = "🔬 全书自检完成（共 ${chapters.size} 章）：\n" +
             "· ✅ 无矛盾：$passed 章\n" +
             "· 🔧 已自动修正：$fixed 章" + (if (fixedChapters.isNotEmpty()) "（第${fixedChapters.joinToString("、")}章）" else "") + "\n" +
             "· ⚠️ 疑似矛盾待复核：$suspect 章\n" +
-            (if (doPolish) "· ✨ 已同步润色去AI味：$polished 章（发布级文风，改前均有备份）\n" else "") +
+            (if (doPolish) "· ✨ 已同步润色去AI味：$polished 章" +
+                (if (polishedChapters.isNotEmpty()) "（第${polishedChapters.joinToString("、")}章）" else "") +
+                "（发布级文风，改前均有备份）\n" else "") +
             "修正模式已沉淀进【写作禁忌】卡，后续章节不再重犯同类错误。" +
             (if (doPolish && suspect == 0) "\n📚 全书已达可发布状态：可直接到【导出与发布】导出全书 TXT。" else "")
         dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool", content = summary))
@@ -1675,8 +1722,15 @@ object WriterEngine {
         val chapters = dao.chapters(ch.projectId)
         val messages = Prompts.buildChapterMessages(project, cards, chapters, ch, sumCount(), winPrev()).toMutableList()
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
-        val content = cleanBody(AiClient.chat(cfg, messages).trim(), ch.chapterIndex, ch.title)
+        // v6.9.66：chatRes 保留截断标志——重写稿被截断/结尾未收束先续写补完（最多5轮）
+        val res = AiClient.chatRes(cfg, messages)
+        var content = cleanBody(res.text.trim(), ch.chapterIndex, ch.title)
         if (content.isBlank()) return "AI返回空内容"
+        val (completed, rounds) = ensureChapterComplete(cfg, project, cards, ch, content, res.truncated)
+        content = completed
+        if (rounds > 0 && !endsWell(content)) {
+            return "重写稿多轮续写后结尾仍不完整（AI 输出持续被截断），本次已放弃以免烂尾入库，原稿未动。建议重试一次；反复失败请换模型或调低思考强度。"
+        }
         // v6.9.58：人物名统一校正（重写稿同样把变体名改回唯一名）
         val fixedContent = runCatching { fixCastNames(content, cards) }.getOrDefault(content to 0)
         if (fixedContent.second > 0) {
@@ -1751,8 +1805,18 @@ object WriterEngine {
         val cards = dao.cards(projectId)
         val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch, sumCount(), winPrev()).toMutableList()
         messages.add(ChatMsg("user", instruction))
-        var out = cleanBody(AiClient.chat(cfg, messages, temperature = 0.8).trim(), chapterIndex, ch.title)
+        // v6.9.66：chatRes 保留截断标志——润色/扩写/补写/自检修等替换稿被截断或结尾未收束时，
+        // 先自动续写补完（最多5轮）；补不完整拒绝替换（宁可不修也不让半句稿入库）
+        val res = AiClient.chatRes(cfg, messages, temperature = 0.8)
+        var out = cleanBody(res.text.trim(), chapterIndex, ch.title)
         if (out.isBlank()) return "AI返回为空" to ""
+        if (replace) {
+            val (completed, rounds) = ensureChapterComplete(cfg, project, cards, ch, out, res.truncated)
+            out = completed
+            if (!endsWell(out)) {
+                return "AI处理稿多轮续写后结尾仍不完整（输出持续被截断），本次未替换正文、原稿保留。请重试一次；反复失败请换模型或调低思考强度。" to ""
+            }
+        }
         // v6.9.58：人物名统一校正（润色/扩写/改风格等任务稿同样把变体名改回唯一名）
         runCatching { val (f, n) = fixCastNames(out, cards); if (n > 0) out = f }
         if (replace && out.length >= 300) {

@@ -265,9 +265,11 @@ object Prompts {
             }
             appendLine()
             val wt = project.chapterWordTarget
-            val lo = (wt * 0.85).toInt()
-            val hi = (wt * 1.15).toInt()
-            append("请写出本章完整正文，字数 ${lo}~${hi} 字，必须写完整一章（含章末钩子收束），不要中途停笔。只输出正文。")
+            // v6.9.66：字数区间放宽为 60%~120%（默认目标 2500 字 → 1500~3000 字）——
+            // 字数只是参考，完整性优先：严禁为控字数提前收尾/砍结尾，也严禁为凑字数注水拖剧情
+            val lo = (wt * 0.6).toInt()
+            val hi = (wt * 1.2).toInt()
+            append("请写出本章完整正文，字数 ${lo}~${hi} 字（参考区间：完整性与质量优先，宁可略超上限也要把剧情写完整写好，严禁为控制字数提前收尾或砍掉结尾）。必须写完整一章（含章末钩子收束），结尾必须是完整句子，不要中途停笔。只输出正文。")
         }
         return listOf(ChatMsg("system", writerSystem(selected)), ChatMsg("user", user))
     }
@@ -415,7 +417,7 @@ object Prompts {
             appendLine("【本章任务】${chapter.outline.ifBlank { chapter.title }}")
             appendLine("【已有正文（结尾部分）】")
             appendLine(currentText.takeLast(1500))
-            append("请从上文结尾处自然续写约${words.coerceIn(200, 2000)}字。只输出续写内容，不要重复已有内容，不要输出标题或解释；若本章剧情已可收束，就写到章末钩子为止。")
+            append("请先自然补完上文最后一句（若它没写完），再从断点继续续写约${words.coerceIn(200, 3000)}字。只输出续写内容，不要重复已有内容，不要输出标题或解释；一直写到本章完整收束（含章末钩子），结尾必须是完整句子，严禁写到一半停下。")
         }
         return listOf(ChatMsg("system", writerSystem(selected)), ChatMsg("user", user))
     }

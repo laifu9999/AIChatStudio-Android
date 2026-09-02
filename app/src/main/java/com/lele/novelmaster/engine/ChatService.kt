@@ -535,6 +535,7 @@ object ChatService {
             "【创作流程】\n" +
                 "1) 作者打招呼、闲聊、问问题 → 像真人朋友一样自然回复，不强行拉回写小说。\n" +
                 "2) 作者给出灵感/题材（例如「帮写一个家庭幸福的小说，共36章」）→ 立即全套执行：updateProject 写入书名/类型/章数 → 用 addCard 逐条建全设定（世界观、主要人物各一张、主线剧情、核心冲突、支线任务、伏笔钩子至少3个、设定圣经、全书大纲）→ generateOutlines 补全分章大纲 → 汇报「设定和大纲已就绪，说『写下一章』开写」。**updateProject 的 totalCh 必须用作者消息里明确说的章数（如「共36章」就是36），作者没说才自行合理确定，严禁沿用默认/占位章数；genre 从灵感内容里提炼真实题材，严禁套「玄幻」等默认值。**\n" +
+                "   **addCard 参数铁律（弱模型必读）**：参数名固定为 category/name/content——name=卡片名、content=卡内容，严禁写成 title/desc/简介 等其他键名（用错系统会报「名称和内容不能为空」）；保存顺序必须按 世界观→人物设定→主线剧情→核心冲突→支线任务→伏笔钩子→设定圣经→全书大纲 逐条输出工具块。**generateOutlines 永远是最后一步**：八类设定卡全部看到「已保存设定卡」回执之前调用会被系统直接拒绝，绝不能先建大纲后补设定。\n" +
                 "3) **设定和大纲建完后停下等作者说「写下一章」/「开始写第一章」/「继续」才写正文**，绝不要默认自动写。\n" +
                 "3.1) **系统硬性校验**：设定卡八类（世界观、人物设定、主线剧情、核心冲突、支线任务、伏笔钩子、设定圣经、全书大纲）+ 分章大纲没建全时，writeNextChapter/startAutoWrite 会被系统拒绝并自动补全。所以必须先建全设定（工具回执可见）再写正文，严禁跳步、严禁没建完就调写作工具。不要创建「分卷大纲」卡（已废弃，与分章大纲重复）。\n" +
                 "4) 已有会话时严禁 createProject（一律用 updateProject 改当前会话）；所有创作都在当前会话内完成，绝不跳会话。\n" +
@@ -783,7 +784,15 @@ object ChatService {
                 val args = obj.optJSONObject("args")
                     ?: obj.optJSONObject("arguments")
                     ?: obj.optJSONObject("params")
-                    ?: JSONObject()
+                    ?: run {
+                        // v6.9.66：弱模型把参数平铺在顶层（没有 args 包装）→ 剥掉 name/tool 后整体当参数，
+                        // 否则全部字段丢失、addCard 收到空名空内容连报「名称和内容不能为空」
+                        val flat = JSONObject()
+                        for (k in obj.keys()) {
+                            if (k != "name" && k != "tool") flat.put(k, obj.get(k))
+                        }
+                        flat
+                    }
                 return n to args
             }
         } catch (_: Exception) { }

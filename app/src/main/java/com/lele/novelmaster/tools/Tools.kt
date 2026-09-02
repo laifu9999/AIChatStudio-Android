@@ -159,6 +159,15 @@ object Tools {
         return ToolResult(true, "设定卡共 ${filtered.size} 张：", detail)
     }
 
+    /** v6.9.66：从别名键里救捞参数值——弱模型常用 title/desc 等错误键名，取第一个非空别名 */
+    private fun salvageArg(args: org.json.JSONObject, aliases: List<String>): String {
+        for (k in aliases) {
+            val v = args.optString(k)
+            if (v.isNotBlank() && v != "null") return v.trim()
+        }
+        return ""
+    }
+
     suspend fun addCard(pid: Long, category: String, name: String, content: String, priority: Int? = null, context: Context? = null, force: Boolean = false): ToolResult {
         if (category !in CardCategories.all) return ToolResult(false, "未知分类「$category」", "可选：" + CardCategories.all.joinToString("、"))
         if (name.isBlank() || content.isBlank()) return ToolResult(false, "名称和内容不能为空")
@@ -455,6 +464,16 @@ object Tools {
 
     suspend fun generateOutlines(pid: Long, context: Context? = null): ToolResult {
         return withContext(Dispatchers.IO) {
+            // v6.9.66：分章大纲必须最后生成——八类核心设定卡没建齐时直接拒绝，
+            // 弱模型经常没把卡存完就急着调本工具（用户实测截图：6 张卡报错后大纲照跑）
+            val missing = com.lele.novelmaster.data.WriterEngine.REQUIRED_CATS.filter { cat ->
+                Repo.dao.cards(pid).none { it.category == cat }
+            }
+            if (missing.isNotEmpty()) return@withContext ToolResult(
+                false,
+                "设定卡还没建全（缺：${missing.joinToString("、")}），分章大纲必须等设定卡全部建齐后才能生成。",
+                "流程铁律：设定卡在前、分章大纲最后。请立即用 addCard 逐条补全上面缺的分类（每条都要以「已保存设定卡」回执为准），全部建齐后再调 generateOutlines。"
+            )
             val err = WriterEngine.ensureOutlines(pid, context = context)
             if (err != null) ToolResult(false, err) else ToolResult(true, "已补齐缺失的分章大纲")
         }
@@ -465,6 +484,17 @@ object Tools {
         return withContext(Dispatchers.IO) {
             val err = WriterEngine.generateCardsFromInspire(pid, inspiration, context)
             if (err != null) return@withContext ToolResult(false, err)
+            // v6.9.66：自动补大纲前先查卡是否建齐——没建齐绝不触发大纲，改为引导继续补卡
+            val missing = com.lele.novelmaster.data.WriterEngine.REQUIRED_CATS.filter { cat ->
+                Repo.dao.cards(pid).none { it.category == cat }
+            }
+            if (missing.isNotEmpty()) {
+                return@withContext ToolResult(
+                    true,
+                    "已根据你的灵感开始生成设定卡",
+                    "还缺：${missing.joinToString("、")}。说「继续」接着补全设定卡；设定卡八类全部建齐后才会自动生成分章大纲（大纲永远最后生成）。"
+                )
+            }
             // 灵感落地后自动补齐分章大纲，让"一个灵感发过去就自动完成"
             val outlineErr = WriterEngine.ensureOutlines(pid)
             ToolResult(true, "已根据你的灵感生成完整设定卡" + (if (outlineErr == null) "，并自动补齐了分章大纲" else ""),
@@ -649,6 +679,8 @@ object Tools {
         )
         var ok = 0
         val failed = mutableListOf<Int>()
+        // v6.9.66：润色章号可见——成功润了哪章逐条列出
+        val okChapters = mutableListOf<Int>()
         targets.forEachIndexed { i, ch ->
             val fresh = dao.chapter(ch.id) ?: ch
             val good = try {
@@ -656,16 +688,20 @@ object Tools {
             } catch (_: Exception) { false }
             if (good) {
                 ok++
+                okChapters.add(ch.chapterIndex)
                 try { recordFile?.appendText("${ch.chapterIndex}|${System.currentTimeMillis()}\n", Charsets.UTF_8) } catch (_: Exception) { }
             } else failed.add(ch.chapterIndex)
             if ((i + 1) % 2 == 0 || i + 1 == targets.size) {
                 dao.insertMessage(
                     Message(projectId = pid, role = "tool", kind = "tool",
-                        content = "✨ 全书去AI味润色进度：已完成 ${i + 1}/${targets.size} 章" + (if (ok > 0) "（成功润色 $ok 章）" else ""))
+                        content = "✨ 全书去AI味润色进度：已完成 ${i + 1}/${targets.size} 章（当前第${ch.chapterIndex}章）" +
+                            (if (ok > 0) "\n✨ 已润色 $ok 章：第${okChapters.takeLast(10).joinToString("、")}章" else "") +
+                            (if (failed.isNotEmpty()) "\n⚠️ 未成功：第${failed.joinToString("、")}章" else ""))
                 )
             }
         }
         val summary = "✨ 全书去AI味润色完成（本次共 ${targets.size} 章）：成功 $ok 章" +
+            (if (okChapters.isNotEmpty()) "（第${okChapters.joinToString("、")}章）" else "") +
             (if (failed.isNotEmpty()) "；未成功：第${failed.joinToString("、")}章（多因AI输出异常，重跑一次本功能会自动补润这些章）" else "") +
             "\n📚 润色过的章节文字已按发布级标准处理，可到【导出与发布】导出全书。"
         dao.insertMessage(Message(projectId = pid, role = "tool", kind = "tool", content = summary))
@@ -1490,11 +1526,35 @@ object Tools {
                 args.optInt("totalCh", -1).takeIf { it > 0 },
                 args.optInt("chWords", -1).takeIf { it > 0 }
             )
-            "addCard" -> addCard(
-                pid, args.optString("category"), args.optString("name"), args.optString("content"),
-                if (args.has("priority")) args.optInt("priority") else null, context,
-                args.optBoolean("force", false)
-            )
+            // v6.9.66：弱模型参数键名自愈——卡名/内容被放进 title/desc 等别名键时自动救捞；
+            // 救不回才报错，并附上本次收到的字段清单让模型下一轮自纠（GLM-5.3-Flash 实测连错 6 次同名错误）
+            "addCard" -> {
+                var category = args.optString("category")
+                var name = args.optString("name")
+                var content = args.optString("content")
+                if (category.isBlank()) category = salvageArg(args, listOf("cat", "type", "分类", "类型"))
+                if (category.isNotBlank() && category !in CardCategories.all) {
+                    category = CardCategories.all.firstOrNull { category.contains(it) || it.contains(category) } ?: category
+                }
+                if (name.isBlank()) name = salvageArg(args, listOf("title", "cardName", "card", "character", "role", "姓名", "卡名", "卡片名", "名称", "角色"))
+                if (content.isBlank()) content = salvageArg(args, listOf("text", "body", "desc", "description", "summary", "detail", "setting", "descText", "描述", "简介", "内容", "正文", "设定"))
+                if (name.isBlank() || content.isBlank()) {
+                    val got = args.keys().asSequence().filter { it != "name" || args.optString("name").isNotBlank() }
+                        .joinToString("、") { k -> "$k=${args.optString(k).take(12)}" }
+                    return ToolResult(
+                        false,
+                        "名称和内容不能为空（卡名必须用参数 name，卡内容必须用参数 content）",
+                        "本次收到的字段：${got.ifBlank { "（无有效字段）" }}\n" +
+                            "正确格式：{\"name\":\"addCard\",\"args\":{\"category\":\"人物设定\",\"name\":\"卡名\",\"content\":\"卡片内容…\"}}\n" +
+                            "请改用标准参数名重发这一条，之前同错的条目也要逐条重发。"
+                    )
+                }
+                addCard(
+                    pid, category, name, content,
+                    if (args.has("priority")) args.optInt("priority") else null, context,
+                    args.optBoolean("force", false)
+                )
+            }
             "updateCard" -> updateCard(pid, args.optString("name"), args.optString("content"))
             "renameGlobal" -> renameGlobal(pid, args.optString("old"), args.optString("new"), args.optBoolean("alsoChapters", false))
             "readCard" -> readCard(pid, args.optString("name"))
