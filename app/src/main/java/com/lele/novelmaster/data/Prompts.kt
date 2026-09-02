@@ -53,14 +53,14 @@ object Prompts {
         // 人物卡/世界观/圣经可能落选导致体质灵根、力量体系等硬设定丢失
         val always = pool.filter { it.priority == 2 || it.category in HARD_CATS }
 
-        fun score(c: SettingCard): Int {
+        fun score(c: SettingCard, text: String = focusText): Int {
             var s = if (c.category in CardCategories.KEY_CATS) 1 else 0
-            val text = c.name + c.content
+            val hay = c.name + c.content
             var hits = 0
             var i = 0
-            while (i < focusText.length - 1) {
-                val g = focusText.substring(i, i + 2)
-                if (!g.any { it == '，' || it == '。' || it == '、' || it == ' ' || it == '：' } && text.contains(g)) hits++
+            while (i < text.length - 1) {
+                val g = text.substring(i, i + 2)
+                if (!g.any { it == '，' || it == '。' || it == '、' || it == ' ' || it == '：' } && hay.contains(g)) hits++
                 i++
             }
             return s + minOf(hits, 6)
@@ -72,8 +72,16 @@ object Prompts {
         // 伏笔是剧情资产不是待办清单，回收时机必须由剧情决定；最陈优先降级为防遗忘兜底提醒。
         val openHooks = pool.filter { it.category == "伏笔钩子" && it.status != "已回收" }
         // P0 大纲点名回收：本章大纲明确写「回收伏笔「名称」」的——大纲统筹已按剧情弧规划，
-        // 写作端必须执行，无条件注入（名称匹配用归一化相等/双向包含，容书名号与装饰符差异）
-        val p0Named = Regex("回收伏笔「([^」]{1,40})」").findAll(focusText).map { it.groupValues[1] }.toList()
+        // 写作端必须执行，无条件注入（名称匹配用归一化相等/双向包含，容书名号与装饰符差异）。
+        // v6.9.63b：同行多名提取——统筹允许单批≤2条，可能写进同一章（回收伏笔「甲」、「乙」），
+        // 旧正则只抓到第一条；改为从每个「回收伏笔」出现点向后扫到句界（句号/分号/换行/叹号/问号/「推进伏笔」）收集全部书名号名称
+        val p0Named = Regex("回收伏笔").findAll(focusText).flatMap { m ->
+            var seg = focusText.substring(m.range.first).take(80)
+            for (cut in listOf('。', '；', '\n', '！', '？')) seg = seg.split(cut).first()
+            val stop = seg.indexOf("推进伏笔")
+            if (stop >= 0) seg = seg.substring(0, stop)
+            Regex("「([^」]{1,40})」").findAll(seg).map { it.groupValues[1] }
+        }.toList()
         fun hookNamed(h: SettingCard, n: String): Boolean {
             val a = normCardName(h.name)
             val b = normCardName(n)
@@ -81,13 +89,15 @@ object Prompts {
         }
         val p0 = openHooks.filter { h -> p0Named.any { hookNamed(h, it) } }
         // P1 剧情窗口开启：伏笔名被本章大纲提及，或与本章大纲关键词重合度达标（score≥2）——
-        // 伏笔关联的人物/事件在本章登场，回收窗口自然打开，按相关度排序取前 6 条
-        val focusNorm = normCardName(focusText)
+        // 伏笔关联的人物/事件在本章登场，回收窗口自然打开，按相关度排序取前 6 条。
+        // v6.9.63b：「推进伏笔「X」」段不算窗口（推进≠回收，防止推进中的伏笔被强烈建议回收），从窗口判定文本剔除
+        val focusWin = focusText.replace(Regex("推进伏笔「[^」]{1,40}」"), "")
+        val focusNorm = normCardName(focusWin)
         val p1 = openHooks.asSequence()
             .filter { h -> h.id !in p0.map { p -> p.id } }
-            .filter { h -> (normCardName(h.name).length >= 2 && focusNorm.contains(normCardName(h.name))) || score(h) >= 2 }
+            .filter { h -> (normCardName(h.name).length >= 2 && focusNorm.contains(normCardName(h.name))) || score(h, focusWin) >= 2 }
             .toList()
-            .sortedByDescending { score(it) }
+            .sortedByDescending { score(it, focusWin) }
             .take(6)
         // P2 超龄防遗忘兜底：最陈的若干条补足名额（排在注入块末尾，写作端视作「提醒尽快安排或明确放弃」，
         // 不是命令——本章剧情没有自然窗口就宁可不收）
