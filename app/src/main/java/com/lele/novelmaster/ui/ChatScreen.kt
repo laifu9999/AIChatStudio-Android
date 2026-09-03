@@ -220,7 +220,7 @@ fun ChatScreen(nav: NavHostController) {
         scope.launch {
             val r = com.lele.novelmaster.tools.Tools.createProject(
                 title = "未命名会话", genre = "", desc = "",
-                totalCh = 1, chWords = 1800, force = true
+                totalCh = 1, chWords = 2000, force = true
             )
             r.newProjectId?.let { currentPid = it }
             creatingSession = false
@@ -247,7 +247,7 @@ fun ChatScreen(nav: NavHostController) {
                 val r = runCatching {
                     com.lele.novelmaster.tools.Tools.createProject(
                         title = "未命名会话", genre = "", desc = "",
-                        totalCh = 1, chWords = 1800, force = true
+                        totalCh = 1, chWords = 2000, force = true
                     )
                 }.getOrNull()
                 val np = r?.newProjectId ?: 0L

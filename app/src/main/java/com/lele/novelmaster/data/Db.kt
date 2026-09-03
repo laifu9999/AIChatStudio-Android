@@ -22,7 +22,7 @@ data class Project(
     val genre: String = "",
     val description: String = "",
     val targetChapters: Int = 300,
-    val chapterWordTarget: Int = 2500,
+    val chapterWordTarget: Int = 2000,
     // v6.9.34：本书绑定的独立 AI 接口（0=跟随全局「已启用」接口；多书并行时各书可用不同模型）
     val apiConfigId: Long = 0,
     val createdAt: Long = System.currentTimeMillis()

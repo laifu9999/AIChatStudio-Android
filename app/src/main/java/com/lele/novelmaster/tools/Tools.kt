@@ -1513,7 +1513,7 @@ object Tools {
             when (name) {
             "createProject" -> createProject(
                 args.optString("title"), args.optString("genre"), args.optString("desc"),
-                args.optInt("totalCh", 300), args.optInt("chWords", 1800),
+                args.optInt("totalCh", 300), args.optInt("chWords", 2000),
                 args.optBoolean("force", false), context
             )
             "listProjects" -> listProjects()
