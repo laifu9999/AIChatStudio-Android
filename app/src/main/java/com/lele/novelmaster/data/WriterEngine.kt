@@ -1856,8 +1856,9 @@ object WriterEngine {
         return null to out
     }
 
-    /** 非章节类自由任务（起名/简介/体检等）：带核心设定上下文问 AI */
-    suspend fun freeTask(projectId: Long, instruction: String, task: String = ""): Pair<String?, String> {
+    /** 非章节类自由任务（起名/简介/体检等）：带核心设定上下文问 AI。
+     *  v6.9.71：rawSystem 非空时用它做系统消息（分批体检自带速览+本批原文注入，不再全量注入全部卡） */
+    suspend fun freeTask(projectId: Long, instruction: String, task: String = "", rawSystem: String? = null): Pair<String?, String> {
         val dao = Repo.dao
         val project = dao.project(projectId) ?: return "项目不存在" to ""
         // v6.9.34：本书绑定了独立模型就用它，无则回落全局启用；v6.9.41：体检/瘦身类可用「体检专用模型」
@@ -1865,7 +1866,7 @@ object WriterEngine {
             ?: Repo.apiFor(projectId)
             ?: return "请先在【AI模型】中启用一个模型" to ""
         val cards = dao.cards(projectId)
-        val sys = buildString {
+        val sys = rawSystem ?: buildString {
             appendLine("你是资深网文主编。基于以下设定完成任务，只输出要求的内容。")
             // v6.9.42：体检报告出现大段英文思考——所有自由任务强制全程简体中文、禁止输出思考过程
             appendLine("全程只用简体中文输出，严禁英文，严禁输出思考过程/内心分析，直接给结果。")
