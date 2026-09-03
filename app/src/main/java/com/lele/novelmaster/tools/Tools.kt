@@ -973,10 +973,12 @@ object Tools {
         return try { cardsCheckInner(pid) } finally { cardsCheckGate.set(false) }
     }
 
-    private suspend fun cardsCheckInner(pid: Long): ToolResult {
+    /** v6.9.70：体检 AI 调用公共段——「设定体检」与「确认修复后自动复检」共用同一套检查口径，
+     *  保证复检用的标准和首次体检完全一致。返回 (err, 报告原文) */
+    private suspend fun cardsCheckOnce(pid: Long): Pair<String?, String> {
         val dao = Repo.dao
         val cards = dao.cards(pid)
-        if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。可到设定卡页点右上角「灵感分析」自动生成。")
+        if (cards.isEmpty()) return Pair("这本书还没有设定卡。可到设定卡页点右上角「灵感分析」自动生成。", "")
         // v6.9.46：这里只列卡名清单——全部卡的完整原文已由 freeTask(CHECK) 全量注入系统上下文，
         // 此前每卡截 160 字导致 AI「看不到设定圣经完整内容、无法输出完整卡」（用户实测踩坑）
         val cardBlock = cards.filter { it.name != "分章大纲" }.joinToString("\n") {
@@ -992,17 +994,27 @@ object Tools {
                 "4) 冗余重复（多张卡写了同一件事——如主线剧情/核心冲突/全书大纲互相复述；或单卡啰嗦超长、塞满空话）。\n" +
                 "重要：卡片「内容不够详细/单薄」不算问题——这类放进【建议】行即可，严禁为它们输出【修复】。\n" +
                 "重要：你可以看到系统上下文里全部设定卡的完整原文（见【全部设定卡完整原文】）。允许修复除「剧情进度」「分章大纲」外的任意设定卡（含设定圣经、世界观）——输出整卡时必须以原文为准整体重写，严禁凭印象补写或截断原文。\n" +
-                "重要：只报硬伤（真矛盾/真错误/明显重复）。【问题】最多列 6 条，按严重程度从高到低排序；措辞差异、详略不同、风格偏好这类不算问题，严禁凑数罗列。\n" +
+                "重要：只报硬伤（真矛盾/真错误/明显重复）。【问题】逐条列全——不设条数上限，本轮必须把所有硬伤一次性全部报完（按严重程度从高到低排序）；措辞差异、详略不同、风格偏好这类不算问题，严禁凑数罗列。\n" +
                 "重要：全程只用简体中文输出，严禁英文，严禁输出思考过程/内心独白，直接按格式给结果。\n" +
                 "输出格式严格（不要任何其他解释）：\n" +
                 "【问题】每条一行：涉及卡名｜问题一句话（只列真实矛盾/错误/明显重复，没有就不输出此行）\n" +
                 "【建议】每条一行：卡名｜一句话扩写方向（可选）\n" +
-                "【修复】只对能直接改文字解决的真实矛盾（最多5张，严禁修复「剧情进度」和「分章大纲」卡——它们由系统自动维护），每条一行：卡名｜修正后的完整卡片内容\n" +
-                "【精简】只对明显重复/啰嗦的卡去重压缩（最多8张，严禁精简「剧情进度」「分章大纲」「写作禁忌」卡），每条一行：卡名｜去重后的完整卡片内容（抓重点：每卡60~200字，只留对写作有用的干货，不新增不改设定事实）\n" +
+                "【修复】所有能直接改文字解决的真实矛盾全部输出（不设张数上限——【问题】里列出的每一条都必须有对应的修复行；严禁修复「剧情进度」和「分章大纲」卡——它们由系统自动维护），每条一行：卡名｜修正后的完整卡片内容\n" +
+                "【精简】所有明显重复/啰嗦的卡全部去重压缩（不设张数上限；严禁精简「剧情进度」「分章大纲」「写作禁忌」卡），每条一行：卡名｜去重后的完整卡片内容（抓重点：每卡60~200字，只留对写作有用的干货，不新增不改设定事实）\n" +
                 "整体没有问题就只输出【通过】。",
             task = com.lele.novelmaster.data.TaskModels.CHECK // v6.9.41：体检可走专用模型
         )
+        if (err != null) return Pair(err, "")
+        return Pair(null, out)
+    }
+
+    private suspend fun cardsCheckInner(pid: Long): ToolResult {
+        val (err, out) = cardsCheckOnce(pid)
         if (err != null) return ToolResult(false, err)
+        val dao = Repo.dao
+        val cards = dao.cards(pid)
+        val chs = dao.chapters(pid)
+        val stat = "（已建${chs.size}章，其中${chs.count { it.outline.isNotBlank() }}章有大纲）"
         // v6.9.53：体检改为「只出报告不改卡」——此前【修复】行直接自动应用，用户没机会确认；
         // 现在报告=修复方案，用户可在聊天里提问讨论、提出调整，确认后点「确认修复」或说「确认修复」才真正改卡
         val head = "🧾 设定体检完成（${cards.size} 张卡$stat）"
@@ -1011,7 +1023,7 @@ object Tools {
             "\n\n未修改任何卡。本轮体检结论：无需改卡修复。"
         else
             "\n\n📋 以上是修复方案，未修改任何卡。有疑问？直接在聊天里问（比如「为什么说这两张卡冲突」），乐乐会带着报告和你讨论；" +
-                "无疑问点下方按钮确认修复；想按你的要求调整着修，就说「确认修复：你的调整要求」。"
+                "无疑问点下方按钮确认修复——确认后会自动修复全部方案并逐轮复检，直到复检 0 问题才收工；想按你的要求调整着修，就说「确认修复：你的调整要求」。"
         // v6.9.28：报告落盘存档（设定卡页弹窗路径不进聊天记录，落盘保证可回查；v6.9.53 起报告即修复方案，「确认修复」直接按它执行）
         try {
             val appCtx = Repo.app
@@ -1134,15 +1146,57 @@ object Tools {
         if (cards.isEmpty()) return ToolResult(false, "这本书还没有设定卡。")
         com.lele.novelmaster.engine.AppTasks.setProgress("cardsRepair:$pid", "🔧 正在按体检报告修复设定卡…")
         val ar = applyCheckLines(pid, cards, report)
+        // v6.9.70：修复后自动复检闭环——用户痛点「多次体检都有问题太麻烦」。
+        // 此前确认修复只按报告改一轮，剩没剩问题全靠用户自己再跑体检，结果又冒出下一批。
+        // 现在：修复完立刻自动复检（与首次体检同口径），复检还报方案就继续修，最多 3 轮，
+        // 直到复检 0 问题才收工；每一轮进度都实时播报（AppTasks 进度条可见）
+        var totalFixed = ar.fixedNames.toMutableList()
+        var totalSlimmed = ar.slimmedNames.toMutableList()
+        var totalSaved = ar.savedChars
+        val allSkips = ar.skipped.toMutableList()
+        val roundLog = mutableListOf<String>()
+        var tailNote = ""
+        var recheckDone = 0
+        while (recheckDone < 3) {
+            recheckDone++
+            com.lele.novelmaster.engine.AppTasks.setProgress("cardsRepair:$pid", "🔁 修复后复检第 $recheckDone 轮：按首轮标准核对全部设定卡…")
+            val (verr, vout) = cardsCheckOnce(pid)
+            if (verr != null) {
+                tailNote = "\n\n⚠️ 修复后自动复检第 $recheckDone 轮未完成（$verr）。已修复的卡不受影响，可再说「设定体检」补一次核对。"
+                break
+            }
+            if (!vout.contains("【修复】") && !vout.contains("【精简】")) {
+                tailNote = if (recheckDone == 1) "\n\n✅ 修复后已自动复检：0 问题，一次搞定。" else "\n\n✅ 共自动复检 $recheckDone 轮，最终复检：0 问题。"
+                break
+            }
+            val vcards = dao.cards(pid)
+            val vr = applyCheckLines(pid, vcards, vout)
+            val applied = vr.fixedNames.size + vr.slimmedNames.size
+            roundLog.add("🔁 复检第 $recheckDone 轮发现遗留问题 → 追加修复 ${vr.fixedNames.size} 张、精简 ${vr.slimmedNames.size} 张")
+            totalFixed.addAll(vr.fixedNames)
+            totalSlimmed.addAll(vr.slimmedNames)
+            totalSaved += vr.savedChars
+            allSkips.addAll(vr.skipped)
+            if (applied == 0) {
+                tailNote = "\n\n⚠️ 复检第 $recheckDone 轮仍有修复方案但全部无法应用（卡名对不上/内容已一致/疑似截断）：\n" +
+                    vr.skipped.joinToString("\n") { "· $it" } + "\n可说「确认修复：只处理××卡」让乐乐单独处理。"
+                break
+            }
+        }
+        if (tailNote.isEmpty()) {
+            tailNote = "\n\n⚠️ 已自动修复并复检 3 轮仍未收敛到 0 问题（剩余问题多需改大纲/正文才能根除，可跑「全书自检」）。可再说「设定体检」查看剩余项。"
+        }
         val head = "🔧 已按体检报告确认修复（共 ${cards.size} 张卡）"
         // v6.9.59：未应用的方案逐条列出原因——不再让用户只能靠"再体检一次"盲验
-        val skipBlock = if (ar.skipped.isEmpty()) "" else
-            "\n\n⚠️ 有 ${ar.skipped.size} 条方案没有应用：\n" + ar.skipped.joinToString("\n") { "· $it" } +
+        val skipBlock = if (allSkips.isEmpty()) "" else
+            "\n\n⚠️ 有 ${allSkips.size} 条方案没有应用：\n" + allSkips.joinToString("\n") { "· $it" } +
                 "\n（没匹配上的卡可说「确认修复：只处理××卡」让乐乐单独处理）"
-        val note = if (ar.fixedNames.isEmpty() && ar.slimmedNames.isEmpty())
+        val roundsBlock = if (roundLog.isEmpty()) "" else "\n" + roundLog.joinToString("\n")
+        val note = if (totalFixed.isEmpty() && totalSlimmed.isEmpty())
             "\n\n未能匹配到可修改的卡（报告里的卡名和现有卡对不上，或内容已一致）。可在聊天里说「修改××卡」用 updateCard 手动指定，或重新体检一次。$skipBlock"
         else
-            "\n\n✅ 已修复 ${ar.fixedNames.size} 张卡${if (ar.slimmedNames.isNotEmpty()) "、精简 ${ar.slimmedNames.size} 张卡（约省 ${ar.savedChars} 字）" else ""}：${(ar.fixedNames + ar.slimmedNames).joinToString("、")}\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。$skipBlock"
+            "\n\n✅ 共修复 ${totalFixed.size} 张卡${if (totalSlimmed.isNotEmpty()) "、精简 ${totalSlimmed.size} 张卡（约省 $totalSaved 字）" else ""}：${(totalFixed + totalSlimmed).distinct().joinToString("、")}" +
+                "\n已同步保存到项目文件夹（设定卡/*.md），原内容备份在 设定卡/备份/设定体检备份.md。$roundsBlock$tailNote$skipBlock"
         // 结果同样存档，方便回查
         try {
             val ts = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date())
@@ -1181,9 +1235,9 @@ object Tools {
                     "4) 跨卡统一：同一事实在多张卡里必须统一成同一个版本；需要删掉某张卡时，把它的独有信息并入指定卡，并在【删除】行列出该卡卡名；\n" +
                     "5) 只输出格式行，不要任何其他解释。\n" +
                     "输出格式严格：\n" +
-                    "【修复】每条一行：卡名｜修正后的完整卡片内容（最多8条）\n" +
-                    "【精简】每条一行：卡名｜去重后的完整卡片内容（最多8条，每卡60~200字，只留干货）\n" +
-                    "【删除】每条一行：卡名（独有信息已并入其他卡、需要整卡删除的卡，最多3张）\n" +
+                    "【修复】每条一行：卡名｜修正后的完整卡片内容（全部需要修改的卡都输出，不设条数上限）\n" +
+                    "【精简】每条一行：卡名｜去重后的完整卡片内容（不设条数上限，每卡60~200字，只留干货）\n" +
+                    "【删除】每条一行：卡名（独有信息已并入其他卡、需要整卡删除的卡，不设张数上限）\n" +
                     "没有可改的就只输出【无修复项】。",
                 task = com.lele.novelmaster.data.TaskModels.CHECK
             )
