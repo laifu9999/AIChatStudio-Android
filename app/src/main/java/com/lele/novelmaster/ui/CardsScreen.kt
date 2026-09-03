@@ -71,6 +71,21 @@ fun CardsScreen(nav: NavController, pid: Long) {
     var checkResult by remember { mutableStateOf<Pair<String, String>?>(null) }
     // v6.9.28：分章大纲系统卡点按查看全文
     var viewCard by remember { mutableStateOf<SettingCard?>(null) }
+    // v6.9.72：导入/导出设定卡——菜单 + 结果弹窗；导入跑在 AppTasks 宿主（离开页面任务照常完成）
+    var showIOMenu by remember { mutableStateOf(false) }
+    var ioResult by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val importBusy = "cardsImport:$pid" in appTasks.running
+    val saveCardsFile = rememberCardsExportSaver()
+    val pickImportFile = rememberCardsImportPicker { name, bytes ->
+        val started = com.lele.novelmaster.engine.AppTasks.launch("cardsImport:$pid") {
+            val r = Tools.importCardsOrDoc(pid, name, bytes, Repo.app)
+            withContext(Dispatchers.Main) {
+                ioResult = if (r.ok) "导入完成" to listOf(r.summary, r.detail).filter { it.isNotBlank() }.joinToString("\n\n")
+                else "导入未完成" to r.summary
+            }
+        }
+        if (started == null) ioResult = "任务进行中" to "导入任务已在进行，请等它完成"
+    }
 
     // v6.9.22：「分章大纲」独立页签与「全书大纲」并列（分章大纲卡 category=全书大纲、name=分章大纲，由系统自动同步）
     val cats = listOf("全部", "全书大纲", "分章大纲") + CardCategories.all.filter { it != "全书大纲" }
@@ -99,6 +114,29 @@ fun CardsScreen(nav: NavController, pid: Long) {
             ) { Text(if (checkBusy) "体检中…" else "🧾体检") }
             TextButton(onClick = { showInspire = true }) { Text("灵感分析") }
             TextButton(onClick = { showAdd = true }) { Text("＋新增") }
+            // v6.9.72：导入/导出入口——收进「⋯」菜单防顶栏拥挤
+            Box {
+                TextButton(onClick = { showIOMenu = true }) { Text("⋯") }
+                DropdownMenu(expanded = showIOMenu, onDismissRequest = { showIOMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("📤 导出全部设定卡") },
+                        onClick = {
+                            showIOMenu = false
+                            scope.launch(Dispatchers.IO) {
+                                val text = WriterEngine.buildCardsExport(pid)
+                                val title = Repo.dao.project(pid)?.title ?: "未命名"
+                                val safe = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "book" }
+                                withContext(Dispatchers.Main) { saveCardsFile("设定卡导出-$safe.md", text) }
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (importBusy) "📥 导入中…" else "📥 导入文件（卡导出/txt/Word）") },
+                        enabled = !importBusy,
+                        onClick = { showIOMenu = false; pickImportFile() }
+                    )
+                }
+            }
         }
     ) { pv ->
         Column(Modifier.padding(pv).fillMaxSize()) {
@@ -265,6 +303,19 @@ fun CardsScreen(nav: NavController, pid: Long) {
                 }
             },
             confirmButton = { TextButton(onClick = { checkResult = null }) { Text("知道了") } }
+        )
+    }
+    // v6.9.72：导入/导出结果弹窗
+    ioResult?.let { (title, detail) ->
+        AlertDialog(
+            onDismissRequest = { ioResult = null },
+            title = { Text(title) },
+            text = {
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    Text(detail, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { ioResult = null }) { Text("知道了") } }
         )
     }
     // v6.9.28：系统卡（分章大纲镜像）全文查看，只读不可编辑

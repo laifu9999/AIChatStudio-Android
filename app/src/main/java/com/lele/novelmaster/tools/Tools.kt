@@ -502,6 +502,35 @@ object Tools {
         }
     }
 
+    /** v6.9.72：导入文件——①设定卡导出格式的 md/txt → 直接恢复/更新设定卡；②普通 txt/docx 文档 → AI 阅读后生成设定卡 */
+    suspend fun importCardsOrDoc(pid: Long, fileName: String, bytes: ByteArray, context: Context? = null): ToolResult {
+        val text = try {
+            WriterEngine.extractDocText(fileName, bytes)
+        } catch (e: IllegalArgumentException) {
+            return ToolResult(false, e.message ?: "无法读取该文件")
+        } catch (e: Exception) {
+            return ToolResult(false, "读取文件失败：${e.message}")
+        }
+        com.lele.novelmaster.engine.AppTasks.setProgress("cardsImport:$pid", "已读取《$fileName》（${text.length} 字），正在识别内容…")
+        // 导出格式识别：出现「## [分类] 卡名」行即按设定卡导回（人不改格式也能导回）
+        if (Regex("(?m)^## \\[.+?\\] .+?\\s*$").containsMatchIn(text)) {
+            val (err, msg) = WriterEngine.importCardsText(pid, text, context)
+            if (err != null) return ToolResult(false, err)
+            return ToolResult(true, "已从《$fileName》导入设定卡：$msg",
+                "导入的卡已同步到项目文件夹（设定卡/分类/*.md）。同名卡若内容不同会被更新为文件里的版本。")
+        }
+        // 普通文档 → AI 生成设定卡（长文档截取开头 12000 字：设定多集中在开头/前置部分）
+        val capped = if (text.length > 12000)
+            text.take(12000) + "\n…（原文共 ${text.length} 字，已截取开头部分用于提炼设定）"
+        else text
+        com.lele.novelmaster.engine.AppTasks.setProgress("cardsImport:$pid", "《$fileName》是普通文档，正在让 AI 阅读并生成设定卡…")
+        val r = inspireFromText(pid, "以下是用户导入的文档《$fileName》，请从中提炼世界观/人物/主线/冲突/伏笔等设定并生成设定卡：\n\n$capped", context)
+        return if (r.ok)
+            ToolResult(true, "已阅读《$fileName》并生成设定卡：${r.summary}",
+                r.detail + "\n\n提示：文档很长时只提炼了开头部分（原文 ${text.length} 字）；生成后建议跑一次「设定体检」查漏补缺。")
+        else r
+    }
+
     /** 删除会话（= 删除小说项目，级联删章节/设定卡/聊天记录） */
     suspend fun deleteProject(pid: Long): ToolResult {
         val p = withContext(Dispatchers.IO) { Repo.dao.project(pid) } ?: return ToolResult(false, "会话不存在")

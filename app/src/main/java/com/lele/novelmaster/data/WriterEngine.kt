@@ -186,6 +186,129 @@ object WriterEngine {
         return merged
     }
 
+    // ================= v6.9.72：设定卡导出 / 导入 / 文档提取 =================
+
+    /** v6.9.72：全部设定卡导出为单个 md 文本——格式「## [分类] 卡名 + 正文」，
+     *  机器可解析（importCardsText）、人可读可改（改完再导回） */
+    suspend fun buildCardsExport(projectId: Long): String {
+        val dao = Repo.dao
+        val cards = dao.cards(projectId)
+        val title = dao.project(projectId)?.title ?: "未命名"
+        return buildString {
+            appendLine("# 乐乐写小说 · 设定卡导出")
+            appendLine("# 书名：$title")
+            appendLine("# 共 ${cards.size} 张卡。本文件可在「设定卡页 → ⋯ → 导入文件」一键导回；")
+            appendLine("# 直接导入普通 txt/Word 文档则会由 AI 阅读后生成设定卡。")
+            for (c in cards) {
+                appendLine()
+                appendLine("## [${c.category}] ${c.name}")
+                appendLine(c.content.trim())
+            }
+        }
+    }
+
+    /** v6.9.72：解析导出格式并导入——已有同名同分类卡则更新内容（不同才写），否则新增；
+     *  「分章大纲」「剧情进度」系统自动维护卡跳过。返回 (err, 汇总) */
+    suspend fun importCardsText(projectId: Long, text: String, context: Context?): Pair<String?, String> {
+        val dao = Repo.dao
+        val re = Regex("^## \\[(.+?)\\] (.+?)\\s*$")
+        var curCat = ""
+        var curName = ""
+        var curBody = StringBuilder()
+        var hasSeg = false
+        val segs = mutableListOf<Triple<String, String, String>>()
+        for (line in text.lines()) {
+            val m = re.find(line.trim())
+            if (m != null) {
+                if (hasSeg) segs.add(Triple(curCat, curName, curBody.toString().trim()))
+                curCat = m.groupValues[1].trim(); curName = m.groupValues[2].trim()
+                curBody = StringBuilder(); hasSeg = true
+            } else if (hasSeg) curBody.appendLine(line)
+        }
+        if (hasSeg) segs.add(Triple(curCat, curName, curBody.toString().trim()))
+        if (segs.isEmpty())
+            return "文件里没有找到设定卡导出格式（## [分类] 卡名）。普通文档会由 AI 自动生成设定卡，请确认选对了文件。" to ""
+        var added = 0
+        var updated = 0
+        val skipped = mutableListOf<String>()
+        val existing = dao.cards(projectId)
+        for ((rawCat, rawName, content) in segs) {
+            if (content.isBlank()) { skipped.add("「$rawName」内容为空"); continue }
+            if (rawName == "分章大纲" || rawName == "剧情进度") { skipped.add("「$rawName」系统自动维护，不导入"); continue }
+            val cat = if (rawCat in CardCategories.all) rawCat else "辅助设定"
+            val hit = existing.firstOrNull { it.category == cat && Prompts.normCardName(it.name) == Prompts.normCardName(rawName) }
+            if (hit != null) {
+                if (hit.content == content) continue
+                val nc = hit.copy(content = content, updatedAt = System.currentTimeMillis())
+                dao.updateCard(nc)
+                exportCardFile(projectId, nc, context)
+                updated++
+            } else {
+                val c = SettingCard(
+                    projectId = projectId, category = cat, name = rawName, content = content,
+                    priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
+                    status = if (cat == "伏笔钩子") "埋设中" else ""
+                )
+                dao.insertCard(c)
+                exportCardFile(projectId, c, context)
+                added++
+            }
+        }
+        if (added + updated > 0) { try { syncAllCardsToFiles(projectId, context) } catch (_: Exception) { } }
+        val head = "新增 $added 张、更新 $updated 张"
+        val tail = if (skipped.isEmpty()) "" else "；跳过 ${skipped.size} 条：${skipped.joinToString("；")}"
+        return null to (head + tail)
+    }
+
+    /** v6.9.72：从导入文件提取纯文本——txt/md 直接解码（UTF-8 优先、GBK 兜底）；
+     *  docx 解 zip 里的 word/document.xml（纯 Kotlin，无第三方库）；.doc 老格式不支持 */
+    fun extractDocText(fileName: String, bytes: ByteArray): String {
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "txt", "md", "markdown", "log" -> decodeTextBytes(bytes)
+            "docx" -> extractDocxText(bytes)
+            "doc" -> throw IllegalArgumentException("暂不支持老版 .doc 格式，请用 Word/WPS 把文件另存为 .docx 或 .txt 再导入")
+            else -> throw IllegalArgumentException("暂不支持 .$ext 文件，请使用 txt / md / docx")
+        }
+    }
+
+    private fun decodeTextBytes(bytes: ByteArray): String {
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+        } catch (_: Exception) {
+            try { String(bytes, java.nio.charset.Charset.forName("GBK")) } catch (_: Exception) { String(bytes, Charsets.UTF_8) }
+        }
+    }
+
+    private fun extractDocxText(bytes: ByteArray): String {
+        val xml: String = try {
+            var found: String? = null
+            java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { z ->
+                var e = z.nextEntry
+                while (e != null && found == null) {
+                    if (e.name == "word/document.xml") found = z.readBytes().toString(Charsets.UTF_8)
+                    e = z.nextEntry
+                }
+            }
+            found ?: throw IllegalArgumentException("这不是有效的 Word(.docx) 文档（没找到正文），请确认文件后缀")
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (_: Exception) {
+            throw IllegalArgumentException("无法解析 Word(.docx) 文档，请确认文件未损坏，或另存为 .txt 再导入")
+        }
+        var s = xml
+            .replace("</w:p>", "\n")
+            .replace(Regex("<w:br[^>]*/?>"), "\n")
+            .replace(Regex("<w:tab[^>]*/?>"), "\t")
+            .replace(Regex("<[^>]*>"), "")
+        s = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+        s = Regex("&#x([0-9a-fA-F]+);").replace(s) { it.groupValues[1].toInt(16).toChar().toString() }
+        s = Regex("&#(\\d+);").replace(s) { it.groupValues[1].toInt().toChar().toString() }
+        return s.replace(Regex("\\n{3,}"), "\n\n").trim()
+    }
+
     /** v5.5：把 AI 返回中的标题行、代码围栏、meta 说明等非正文内容去掉，只保留正文。 */
     private fun cleanBody(text: String, chapterIndex: Int, title: String): String {
         var s = text.trim()
