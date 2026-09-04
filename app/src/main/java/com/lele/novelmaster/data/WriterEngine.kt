@@ -1753,7 +1753,6 @@ object WriterEngine {
             // v6.9.64：建档硬校验——说明为空或过短＝点不出悬念指向，多半是普通情节凑数，拒绝建档
             val newHookLines = sumReply.lines().filter { it.contains("新埋伏笔") }
             var newHookDenied = false
-            var newHookSkipped = 0
             newHookLines.forEach { line ->
                 val body = line.substringAfter("】").trim()
                 val name = body.substringBefore("：").substringBefore(":").trim().take(30)
@@ -1765,7 +1764,7 @@ object WriterEngine {
                     }
                     val desc = body.substringAfter("：", "").substringAfter(":", "").trim()
                     if (desc.length < 6) {
-                        newHookSkipped++
+                        // v6.9.74：点不出悬念指向的直接静默拒收（不再计数播报）
                         return@forEach
                     }
                     val exists = dao.cards(project.id).any { it.category == "伏笔钩子" && it.name == name }
@@ -1786,10 +1785,8 @@ object WriterEngine {
                 dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
                     content = "⚠️ 未回收伏笔已超过 25 条，本章 AI 想埋的新伏笔未建档。建议说「伏笔体检」清理积压——回收旧伏笔比埋新伏笔更重要。"))
             }
-            if (newHookSkipped > 0) {
-                dao.insertMessage(Message(projectId = project.id, role = "tool", kind = "tool",
-                    content = "🔍 本章有 $newHookSkipped 条疑似凑数的「新伏笔」（说明里点不出悬念指向）未建档；若确属伏笔，可在设定卡手动补记。"))
-            }
+            // v6.9.74：「疑似凑数新伏笔」不再播报（用户反馈：没开任何自检却老弹检查提示，不省心）——
+            // 拒收逻辑照旧（说明点不出悬念指向的不建档），只是静默处理；确属伏笔可说「伏笔体检」或手动补记
         } catch (_: Exception) {
             // 摘要失败不影响正文
         }

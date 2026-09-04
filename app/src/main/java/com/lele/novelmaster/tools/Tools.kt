@@ -1146,7 +1146,8 @@ object Tools {
         val slimmedNames: List<String>,
         val savedChars: Int,
         val skipped: List<String> = emptyList(),
-        val deletedNames: List<String> = emptyList()
+        val deletedNames: List<String> = emptyList(),
+        val shortNames: List<String> = emptyList() // v6.9.74：疑似截断（<20字）被跳过的卡名——触发单卡定向重修
     )
 
     /** v6.9.42：解析【修复】/【精简】/【删除】行并应用到卡——备份原卡 → 改库/删卡 → 写回项目文件夹 → 全卡兜底同步。
@@ -1163,6 +1164,7 @@ object Tools {
         val slimmed = mutableListOf<String>()
         val deleted = mutableListOf<String>()
         val skipped = mutableListOf<String>() // v6.9.59：逐条记录未应用原因
+        val shortNames = mutableListOf<String>() // v6.9.74：疑似截断卡名
         var savedChars = 0
         val seen = mutableSetOf<String>()
         // v6.9.71：同一张卡只允许一种处置（修复/精简优先于删除）——防止修复后又删
@@ -1217,8 +1219,9 @@ object Tools {
             val newContent = parts[1].trim()
             if (name.isBlank()) continue
             if (newContent.length < 20) {
-                // v6.9.59：疑似 AI 输出截断——逐条反馈而不是静默丢弃
+                // v6.9.59：疑似 AI 输出截断——逐条反馈而不是静默丢弃；v6.9.74：记录卡名供单卡重修
                 skipped.add("「$name」给出的新内容过短（${newContent.length}字），疑似截断，已跳过")
+                shortNames.add(name)
                 continue
             }
             if (!seen.add(name)) continue
@@ -1273,7 +1276,71 @@ object Tools {
         }
         // v6.9.41：全卡兜底同步——确保项目文件夹与库完全一致
         try { WriterEngine.syncAllCardsToFiles(pid, Repo.app) } catch (_: Exception) { }
-        return CheckApplyResult(fixed, slimmed, savedChars, skipped, deleted)
+        return CheckApplyResult(fixed, slimmed, savedChars, skipped, deleted, shortNames)
+    }
+
+    /** v6.9.74：单卡定向重修——整批修复输出过短（疑似截断）时的兜底。
+     *  单独把这一张卡的原文+问题喂给 AI 完整重写，不再依赖下一轮复检碰运气。
+     *  返回落卡成功后的卡（失败返回 null），落卡口径与 applyCheckLines 完全一致（备份→改库→写文件）。 */
+    private suspend fun repairSingleCard(pid: Long, rawName: String, problem: String): SettingCard? {
+        val dao = Repo.dao
+        val cards = dao.cards(pid)
+        // 与 applyCheckLines 同口径的四级卡名匹配
+        val bare = rawName.replace(Regex("[「」『』《》\\[\\]【】\"'（）()·]"), "").trim()
+        val target = com.lele.novelmaster.data.Prompts.normCardName(bare)
+        val card = cards.firstOrNull { it.name == bare }
+            ?: cards.firstOrNull { com.lele.novelmaster.data.Prompts.normCardName(it.name) == target }
+            ?: cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.isNotEmpty() && target.isNotEmpty() && (a.contains(target) || target.contains(a)) }
+            ?: (if (target.length >= 2) cards.firstOrNull { val a = com.lele.novelmaster.data.Prompts.normCardName(it.name); a.length >= 2 && a.startsWith(target.take(2)) } else null)
+            ?: return null
+        if (card.name == "分章大纲" || card.name == "剧情进度" || card.name == "写作禁忌") return null
+        val (err, out) = WriterEngine.freeTask(
+            pid,
+            "任务：修复一张设定卡。\n" +
+                "【卡名】${card.name}（分类：${card.category}）\n" +
+                "【体检发现的问题】${problem.ifBlank { "内容存在矛盾或表述问题，需要修正" }}\n" +
+                "【该卡当前完整原文】\n${card.content}\n\n" +
+                "要求：输出修正后的完整卡片内容——直接输出卡内容本身（第一行就是正文），严禁输出卡名、标题、解释或任何前后缀；" +
+                "必须保留原文全部关键设定事实（人物/数值/关系/伏笔线索），只修正问题；长度不少于120字。全程只用简体中文。",
+            task = com.lele.novelmaster.data.TaskModels.CHECK
+        )
+        if (err != null) return null
+        val newContent = out.trim()
+        if (newContent.length < 20 || newContent == card.content.trim()) return null
+        val appCtx = Repo.app
+        if (appCtx != null) try {
+            val d = File(FileTools.baseDir(appCtx, pid), "设定卡/备份")
+            d.mkdirs()
+            File(d, "设定体检备份.md").appendText(
+                "==== ${card.category}/${card.name}（${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())} 单卡重修前） ====\n${card.content}\n\n",
+                Charsets.UTF_8
+            )
+        } catch (_: Exception) { }
+        dao.updateCard(card.copy(content = newContent, updatedAt = System.currentTimeMillis()))
+        try { WriterEngine.exportCardFile(pid, card.copy(content = newContent), Repo.app) } catch (_: Exception) { }
+        return card
+    }
+
+    /** v6.9.74：对疑似截断的卡逐张定向重修。返回 (成功卡名, 失败skip文案) */
+    private suspend fun repairShortCards(
+        pid: Long,
+        shorts: List<String>,
+        reportText: String,
+        progressKey: String
+    ): Pair<List<String>, List<String>> {
+        val okList = mutableListOf<String>()
+        val failList = mutableListOf<String>()
+        for (nm in shorts) {
+            com.lele.novelmaster.engine.AppTasks.setProgress(progressKey, "🔧 「$nm」上次修复输出过短，正在单独重修这张卡…")
+            // 从报告里找这张卡的【问题】行作为重修上下文
+            val problem = reportText.lineSequence()
+                .firstOrNull { it.trim().startsWith("【问题】") && it.contains(nm) }
+                ?.substringAfter("】")?.substringAfter("｜", "")?.trim().orEmpty()
+            val done = repairSingleCard(pid, nm, problem)
+            if (done != null) okList.add(done.name)
+            else failList.add("「$nm」单独重修后输出仍无效，本轮没有改——可说「确认修复：只处理$nm」再试一次")
+        }
+        return Pair(okList, failList)
     }
 
     /** 体检一键修复：作者确认报告方案后执行。v6.9.53 重写——
@@ -1308,7 +1375,16 @@ object Tools {
         var totalSlimmed = ar.slimmedNames.toMutableList()
         var totalDeleted = ar.deletedNames.toMutableList()
         var totalSaved = ar.savedChars
-        val allSkips = ar.skipped.toMutableList()
+        // v6.9.74：首轮疑似截断的卡立刻单卡定向重修（不再等复检碰运气）；
+        // 重修成功的卡从「过短已跳过」的 skip 列表里移除，避免提示自相矛盾
+        var firstSkips = ar.skipped
+        if (ar.shortNames.isNotEmpty()) {
+            val (ok2, fail2) = repairShortCards(pid, ar.shortNames, report, "cardsRepair:$pid")
+            totalFixed.addAll(ok2)
+            firstSkips = ar.skipped.filter { s -> ok2.none { n -> s.contains(n) && s.contains("过短") } }
+            firstSkips = firstSkips + fail2
+        }
+        val allSkips = firstSkips.toMutableList()
         val roundLog = mutableListOf<String>()
         var tailNote = ""
         var recheckDone = 0
@@ -1326,13 +1402,22 @@ object Tools {
             }
             val vcards = dao.cards(pid)
             val vr = applyCheckLines(pid, vcards, vout, progressKey = "cardsRepair:$pid")
-            val applied = vr.fixedNames.size + vr.slimmedNames.size + vr.deletedNames.size
-            roundLog.add("🔁 复检第 $recheckDone 轮发现遗留问题 → 追加修复 ${vr.fixedNames.size} 张、精简 ${vr.slimmedNames.size} 张、删除 ${vr.deletedNames.size} 张")
+            // v6.9.74：本轮疑似截断的卡也先单卡定向重修，成功计入本轮修复数
+            var retryFixed = 0
+            var roundSkips = vr.skipped
+            if (vr.shortNames.isNotEmpty()) {
+                val (ok2, fail2) = repairShortCards(pid, vr.shortNames, vout, "cardsRepair:$pid")
+                retryFixed = ok2.size
+                totalFixed.addAll(ok2)
+                roundSkips = vr.skipped.filter { s -> ok2.none { n -> s.contains(n) && s.contains("过短") } } + fail2
+            }
+            val applied = vr.fixedNames.size + vr.slimmedNames.size + vr.deletedNames.size + retryFixed
+            roundLog.add("🔁 复检第 $recheckDone 轮发现遗留问题 → 追加修复 ${vr.fixedNames.size + retryFixed} 张、精简 ${vr.slimmedNames.size} 张、删除 ${vr.deletedNames.size} 张")
             totalFixed.addAll(vr.fixedNames)
             totalSlimmed.addAll(vr.slimmedNames)
             totalDeleted.addAll(vr.deletedNames)
             totalSaved += vr.savedChars
-            allSkips.addAll(vr.skipped)
+            allSkips.addAll(roundSkips)
             if (applied == 0) {
                 tailNote = "\n\n⚠️ 复检第 $recheckDone 轮仍有修复方案但全部无法应用（卡名对不上/内容已一致/疑似截断）：\n" +
                     vr.skipped.joinToString("\n") { "· $it" } + "\n可说「确认修复：只处理××卡」让乐乐单独处理。"
