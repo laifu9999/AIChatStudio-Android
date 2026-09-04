@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +36,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -41,6 +44,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +61,7 @@ import com.lele.novelmaster.data.Chapter
 import com.lele.novelmaster.data.Project
 import com.lele.novelmaster.data.Repo
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /* ---------------- 阅读设置（持久化到 SharedPreferences） ---------------- */
 object ReaderPrefs {
@@ -87,6 +92,9 @@ val ReaderThemes = listOf(
 )
 val ReaderFonts = listOf("默认黑体", "衬线宋体", "等宽")
 
+/** v6.9.75：书架「选章阅读」——跨页面传递起始章号（避免改导航路由）；-1 = 从头读 */
+object ReaderJump { var startChapterIndex: Int = -1 }
+
 /* ================= 书架（自动生成：每个会话=一本书） ================= */
 
 @Composable
@@ -100,6 +108,12 @@ fun BookshelfScreen(nav: NavController) {
             m[p.id] = chs.count { it.content.isNotBlank() } to chs.sumOf { it.wordCount }
         }
         stats = m
+    }
+    // v6.9.75：选章阅读弹窗——选中的书 + 该书已写章节
+    var pickerBook by remember { mutableStateOf<Project?>(null) }
+    var pickerChs by remember { mutableStateOf<List<Chapter>>(emptyList()) }
+    LaunchedEffect(pickerBook) {
+        pickerChs = pickerBook?.let { b -> Repo.dao.chapters(b.id).filter { it.content.isNotBlank() } } ?: emptyList()
     }
 
     AppScaffold("📚 我的书架", onBack = { nav.popBackStack() }) { pv ->
@@ -168,12 +182,54 @@ fun BookshelfScreen(nav: NavController) {
                                     )
                                 }
                             }
+                            // v6.9.75：选章阅读入口（点卡片=从头连续阅读，点这里=挑一章开始读）
+                            Text(
+                                "📖 选章阅读",
+                                fontSize = 12.sp,
+                                color = Color(0xFF6750A4),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .padding(start = 4.dp, end = 4.dp)
+                                    .clickable { pickerBook = p }
+                            )
                             Text("›", fontSize = 22.sp, color = Color(0xFFB0AACC))
                         }
                     }
                 }
             }
         }
+    }
+
+    // v6.9.75：选章阅读弹窗——列出已写章节，点击跳到阅读器对应位置
+    pickerBook?.let { pb ->
+        AlertDialog(
+            onDismissRequest = { pickerBook = null },
+            title = { Text("选章阅读 · 《${pb.title}》", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            text = {
+                if (pickerChs.isEmpty()) {
+                    Text("这本书还没有正文，先去写几章吧。", fontSize = 14.sp, color = Color(0xFF8A8698))
+                } else {
+                    LazyColumn(Modifier.height(400.dp)) {
+                        items(pickerChs, key = { it.id }) { ch ->
+                            Text(
+                                "第${ch.chapterIndex}章  ${ch.title.ifBlank { "未命名" }}（${ch.wordCount}字）",
+                                fontSize = 14.sp,
+                                color = Color(0xFF1F1B2E),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        ReaderJump.startChapterIndex = ch.chapterIndex
+                                        pickerBook = null
+                                        nav.navigate("reader/${pb.id}")
+                                    }
+                                    .padding(vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { pickerBook = null }) { Text("取消") } }
+        )
     }
 }
 
@@ -197,11 +253,34 @@ fun ReaderScreen(nav: NavController, pid: Long) {
     val fontSize = settings.size.coerceIn(12, 34)
     val textStyle = TextStyle(fontFamily = fontFamily, fontSize = fontSize.sp, lineHeight = (fontSize * 1.75).sp, color = theme.text)
     val written = chapters.filter { it.content.isNotBlank() }
+    // v6.9.75：目录跳转——滚动/翻页两种模式都要能定位；scope 用于目录点击后跳章
+    val listState = rememberLazyListState()
+    val pagerState = rememberPagerState { written.size }
+    val scope = rememberCoroutineScope()
+    var showCatalog by remember { mutableStateOf(false) }
+    fun jumpTo(startIdx: Int) {
+        if (written.isEmpty()) return
+        val idx = written.indexOfFirst { it.chapterIndex >= startIdx }.let { if (it < 0) written.size - 1 else it }
+        if (settings.paging == 1) scope.launch { pagerState.scrollToPage(idx) }
+        else scope.launch { listState.scrollToItem(idx) }
+    }
+    // v6.9.75：书架「选章阅读」进来自动定位到所选章（ReaderJump 由书架设置，消费后立即复位）
+    LaunchedEffect(written, settings.paging) {
+        val start = ReaderJump.startChapterIndex
+        if (start >= 0 && written.isNotEmpty()) {
+            ReaderJump.startChapterIndex = -1
+            jumpTo(start)
+        }
+    }
 
     AppScaffold(
         title = "阅读 · ${project?.title ?: ""}",
         onBack = { nav.popBackStack() },
         actions = {
+            // v6.9.75：目录——阅读中也能随时挑章跳转
+            IconButton(onClick = { showCatalog = true }) {
+                Text("☰", fontSize = 20.sp, color = Color(0xFF1F1B2E))
+            }
             IconButton(onClick = { showSettings = true }) {
                 Icon(Icons.Filled.Settings, "阅读设置")
             }
@@ -219,6 +298,7 @@ fun ReaderScreen(nav: NavController, pid: Long) {
             // 上下滚动
             LazyColumn(
                 Modifier.padding(pv).fillMaxSize().background(theme.bg),
+                state = listState,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp)
             ) {
                 items(written, key = { it.id }) { ch ->
@@ -227,7 +307,6 @@ fun ReaderScreen(nav: NavController, pid: Long) {
             }
         } else {
             // 左右翻页（每章一页，章内可滚动）
-            val pagerState = rememberPagerState { written.size }
             androidx.compose.foundation.pager.HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.padding(pv).fillMaxSize().background(theme.bg)
@@ -304,6 +383,31 @@ fun ReaderScreen(nav: NavController, pid: Long) {
                                 1.dp, if (settings.paging == 1) Color(0xFF6750A4) else Color(0x33000000)
                             )
                         )
+                    }
+                }
+            }
+        }
+        // v6.9.75：目录弹窗——点章名即跳转（滚动/翻页模式均支持）
+        if (showCatalog) {
+            ModalBottomSheet(onDismissRequest = { showCatalog = false }) {
+                Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 30.dp)) {
+                    Text("目录 · 共 ${written.size} 章", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    Spacer(Modifier.height(10.dp))
+                    LazyColumn(Modifier.height(420.dp)) {
+                        items(written, key = { it.id }) { ch ->
+                            Text(
+                                "第${ch.chapterIndex}章  ${ch.title.ifBlank { "未命名" }}",
+                                fontSize = 14.sp,
+                                color = Color(0xFF1F1B2E),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        showCatalog = false
+                                        jumpTo(ch.chapterIndex)
+                                    }
+                                    .padding(vertical = 10.dp)
+                            )
+                        }
                     }
                 }
             }

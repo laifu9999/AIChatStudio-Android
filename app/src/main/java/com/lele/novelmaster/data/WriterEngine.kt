@@ -129,8 +129,7 @@ object WriterEngine {
         return out to total
     }
 
-    /** v6.9.41：注入偏好读取（无全局上下文时用默认值：摘要0章、窗口前2章） */
-    private fun sumCount() = Repo.app?.let { InjectPrefs.summaryCount(it) } ?: 0
+    /** v6.9.41：注入偏好读取（无全局上下文时用默认值：窗口前2章）；v6.9.75 摘要注入已废弃移除 */
     private fun winPrev() = Repo.app?.let { InjectPrefs.windowPrev(it) } ?: 2
 
     /** v6.9.41：把一张设定卡写回项目文件 files/设定卡/{分类}/{名}.md——改卡必须同步落盘（用户踩坑：体检修复只进了库，项目文件夹里还是旧内容） */
@@ -1200,7 +1199,7 @@ object WriterEngine {
 
     /**
      * 写单章：
-     *  1) 写前在聊天播报「📥 已注入内容」（必发卡/伏笔/摘要/结尾/相邻大纲摘要）
+     *  1) 写前在聊天播报「📥 已注入内容」（必发卡/伏笔/结尾/相邻大纲摘要；v6.9.75 起不含前情摘要）
      *  2) 生成正文 → 存库 → 同时落盘 files/正文/第N章-标题.txt
      *  3) 摘要 / 剧情进度 / 伏笔回收
      */
@@ -1251,7 +1250,7 @@ object WriterEngine {
         }
         val cards = dao.cards(project.id)
         val chapters = dao.chapters(project.id)
-        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0, sumCount(), winPrev())
+        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch0, winPrev())
 
         // 播报本次注入内容（每章都提示；插入失败=记录不可靠，抛错让自动写作立即停止）
         val inject = buildString {
@@ -1262,7 +1261,7 @@ object WriterEngine {
             val worldCards = cards.filter { it.category == "世界观" || it.category == "设定圣经" }
             append(" · 世界观/圣经 ${worldCards.size} 张完整注入${if (worldCards.isNotEmpty()) "（" + worldCards.joinToString("、") { it.name } + "）" else ""}")
             append(" · 未回收伏笔 ${cards.count { it.category == "伏笔钩子" && it.status != "已回收" }} 条")
-            append(" · 前5章摘要+上一章结尾300字+相邻大纲")
+            append(" · 上一章结尾300字+相邻大纲")
             append(" · 合计约 ${messages.sumOf { it.content.length }} 字")
         }
         dao.insertMessage(Message(projectId = project.id, role = "tool", content = inject, kind = "tool"))
@@ -1840,7 +1839,7 @@ object WriterEngine {
         val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(ch.projectId)
         val chapters = dao.chapters(ch.projectId)
-        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch, sumCount(), winPrev()).toMutableList()
+        val messages = Prompts.buildChapterMessages(project, cards, chapters, ch, winPrev()).toMutableList()
         messages.add(ChatMsg("user", "注意：这是重写版本，请给出质量更高、更精彩的全新写法，只输出正文。"))
         // v6.9.66：chatRes 保留截断标志——重写稿被截断/结尾未收束先续写补完（最多5轮）
         val res = AiClient.chatRes(cfg, messages)
@@ -1923,7 +1922,7 @@ object WriterEngine {
         // v6.9.30：大纲空白先补一条再动手（AI 不脱轨）；重取 chapters 保证窗口里是补好的大纲
         val ch = ensureOneOutline(project, ch0, Repo.app)
         val cards = dao.cards(projectId)
-        val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch, sumCount(), winPrev()).toMutableList()
+        val messages = Prompts.buildChapterMessages(project, cards, dao.chapters(projectId), ch, winPrev()).toMutableList()
         messages.add(ChatMsg("user", instruction))
         // v6.9.66：chatRes 保留截断标志——润色/扩写/补写/自检修等替换稿被截断或结尾未收束时，
         // 先自动续写补完（最多5轮）；补不完整拒绝替换（宁可不修也不让半句稿入库）

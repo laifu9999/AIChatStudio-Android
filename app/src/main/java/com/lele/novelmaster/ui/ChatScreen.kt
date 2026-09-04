@@ -672,6 +672,7 @@ private fun FeaturePanel(onRun: (String) -> Unit, onNav: (String) -> Unit, onSty
         Triple("📤", "导出发布", FNav("export/{pid}")),
         Triple("🎨", "聊天样式", FAction2(onStyle)),
         Triple("🔐", "存储授权", FAction2(onPerm)),
+        Triple("🧠", "系统提示词", FNav("sysprompt")),
         Triple("🤖", "AI 模型", FNav("ai"))
     )
     Column(

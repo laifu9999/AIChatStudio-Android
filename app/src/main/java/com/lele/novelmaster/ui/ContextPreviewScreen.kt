@@ -35,8 +35,9 @@ import kotlinx.coroutines.flow.firstOrNull
 
 /**
  * 上下文注入预览 —— 实时查看「写下一章」时 AI 将收到什么：
- * 必发设定卡 + 未回收伏笔 + 前5章摘要 + 上一章结尾600字 + 相邻大纲 + token 估算。
+ * 必发设定卡 + 未回收伏笔 + 上一章结尾300字 + 相邻大纲 + token 估算。
  * 与 Prompts.buildChapterMessages 完全同源，所见即所发。
+ * v6.9.75：前情摘要已彻底移出注入（摘要设置行一并移除），只保留大纲窗口可调。
  */
 @Composable
 fun ContextPreviewScreen(nav: NavController, pid: Long) {
@@ -44,11 +45,10 @@ fun ContextPreviewScreen(nav: NavController, pid: Long) {
     var result by remember { mutableStateOf<ToolResult?>(null) }
     var loading by remember { mutableStateOf(true) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    // v6.9.41：注入偏好——前情摘要章数（默认0=不注入）、相邻大纲窗口前N章（默认2），改动即时重算预览
-    var sumN by remember { mutableStateOf(com.lele.novelmaster.data.InjectPrefs.summaryCount(ctx)) }
+    // v6.9.41：注入偏好——相邻大纲窗口前N章（默认2），改动即时重算预览
     var winPrev by remember { mutableStateOf(com.lele.novelmaster.data.InjectPrefs.windowPrev(ctx)) }
 
-    LaunchedEffect(pid, project?.id, sumN, winPrev) {
+    LaunchedEffect(pid, project?.id, winPrev) {
         // 当前会话优先；没有会话时自动取第一本（不让用户再选）
         val target = if (pid > 0L) pid else Repo.dao.projectsFlow().firstOrNull()?.firstOrNull()?.id ?: 0L
         if (target > 0L) {
@@ -74,13 +74,7 @@ fun ContextPreviewScreen(nav: NavController, pid: Long) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
-            // v6.9.41：注入偏好设置行
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("前情摘要章数", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                TextButton(onClick = { sumN = (sumN - 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setSummaryCount(ctx, sumN) }) { Text("－") }
-                Text("$sumN", fontSize = 15.sp, modifier = Modifier.padding(horizontal = 6.dp))
-                TextButton(onClick = { sumN = (sumN + 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setSummaryCount(ctx, sumN) }) { Text("＋") }
-            }
+            // v6.9.41：注入偏好设置行（v6.9.75：摘要行移除，仅保留大纲窗口）
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("大纲窗口：往前几章", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                 TextButton(onClick = { winPrev = (winPrev - 1).coerceIn(0, 10); com.lele.novelmaster.data.InjectPrefs.setWindowPrev(ctx, winPrev) }) { Text("－") }

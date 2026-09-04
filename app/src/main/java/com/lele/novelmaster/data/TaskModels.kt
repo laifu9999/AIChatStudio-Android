@@ -60,16 +60,15 @@ object TaskModels {
 
 /**
  * v6.9.41：写章注入偏好（全局）。
- *  - summaryCount：注入「前情摘要」的章数，0 = 不注入（默认——有相邻大纲+上一章结尾，摘要没必要）；
+ *  - v6.9.75：summaryCount（前情摘要章数）已废弃——用户要求彻底移除摘要注入，衔接只靠结尾+大纲窗口；
  *  - windowPrev：分章大纲窗口往前多注入几章（默认 2，即前两章+本章+后一章）。
+ *  - v6.9.75：writerSystemOverride——用户自定义写章系统提示词（功能面板🧠「系统提示词」查看/修改），
+ *    空 = 使用 Prompts.writerRules() 内置默认；非空 = 整体替换内置规则。
  */
 object InjectPrefs {
     private const val FILE = "inject_prefs"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-
-    fun setSummaryCount(ctx: Context, n: Int) = sp(ctx).edit().putInt("summaryCount", n.coerceIn(0, 10)).apply()
-    fun summaryCount(ctx: Context): Int = sp(ctx).getInt("summaryCount", 0)
 
     fun setWindowPrev(ctx: Context, n: Int) = sp(ctx).edit().putInt("windowPrev", n.coerceIn(0, 10)).apply()
     fun windowPrev(ctx: Context): Int = sp(ctx).getInt("windowPrev", 2)
@@ -86,4 +85,8 @@ object InjectPrefs {
     // 未登场角色与无关条目自动降为一行档案（省 token 且一致性不丢）；关=全部整卡注入（旧行为）
     fun setLeanInject(ctx: Context, on: Boolean) = sp(ctx).edit().putBoolean("leanInject", on).apply()
     fun leanInject(ctx: Context): Boolean = sp(ctx).getBoolean("leanInject", true)
+
+    // v6.9.75：自定义写章系统提示词（空=内置默认 Prompts.writerRules()；非空=整体替换）
+    fun setWriterSystemOverride(ctx: Context, s: String) = sp(ctx).edit().putString("writerSystemOverride", s).apply()
+    fun writerSystemOverride(ctx: Context): String = sp(ctx).getString("writerSystemOverride", "") ?: ""
 }

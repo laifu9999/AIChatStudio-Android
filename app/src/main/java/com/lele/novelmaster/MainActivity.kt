@@ -28,6 +28,7 @@ import com.lele.novelmaster.ui.FilesScreen
 import com.lele.novelmaster.ui.NovelTheme
 import com.lele.novelmaster.ui.ProjectScreen
 import com.lele.novelmaster.ui.ReaderScreen
+import com.lele.novelmaster.ui.SystemPromptScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -91,6 +92,7 @@ fun AppNav() {
             EditorScreen(nav, e.arguments?.getString("chapterId")?.toLongOrNull() ?: 0L)
         }
         composable("ai") { AiScreen(nav) }
+        composable("sysprompt") { SystemPromptScreen(nav) }
         composable("autowrite/{id}") { e ->
             AutoWriteScreen(nav, e.arguments?.getString("id")?.toLongOrNull() ?: 0L)
         }

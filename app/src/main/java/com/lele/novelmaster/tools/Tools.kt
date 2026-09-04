@@ -559,28 +559,21 @@ object Tools {
             ?: return ToolResult(false, "全部章节已写完，无下一章可预览")
 
         val selected = com.lele.novelmaster.data.Prompts.selectCards(cards, next.outline + next.title)
-        // v6.9.41：与实际注入同源——摘要章数可配（默认0=不注入），相邻窗口前N章可配
+        // v6.9.41：与实际注入同源——相邻窗口前N章可配；v6.9.75 摘要注入已废弃（彻底移除）
         val appCtx = Repo.app
-        val sumN = if (appCtx != null) com.lele.novelmaster.data.InjectPrefs.summaryCount(appCtx) else 0
         val winPrev = if (appCtx != null) com.lele.novelmaster.data.InjectPrefs.windowPrev(appCtx) else 2
-        val recent = chapters.filter { it.chapterIndex < next.chapterIndex && it.summary.isNotBlank() }.takeLast(sumN)
         val prev = chapters.firstOrNull { it.chapterIndex == next.chapterIndex - 1 }
         val neighbors = chapters
             .filter { it.chapterIndex in (next.chapterIndex - winPrev)..(next.chapterIndex + 1) && it.outline.isNotBlank() }
             .joinToString("\n") { "第${it.chapterIndex}章《${it.title}》:${it.outline.take(60)}" }
 
-        val chars = com.lele.novelmaster.data.Prompts.buildChapterMessages(project, cards, chapters, next, sumN, winPrev)
+        val chars = com.lele.novelmaster.data.Prompts.buildChapterMessages(project, cards, chapters, next, winPrev)
             .sumOf { it.content.length }
         val detail = buildString {
             appendLine("▶ 目标：第 ${next.chapterIndex} 章《${next.title.ifBlank { "未命名" }}》")
             appendLine()
             appendLine("【必发设定卡 + 未回收伏笔 + 相关卡】${selected.size} 张")
             selected.forEach { appendLine("  • ${it.category}/${it.name}（${it.content.length}字）") }
-            if (recent.isNotEmpty()) {
-                appendLine()
-                appendLine("【前情摘要】${recent.size} 条")
-                recent.forEach { appendLine("  • 第${it.chapterIndex}章：${it.summary.take(50)}…") }
-            }
             appendLine()
             appendLine("【上一章结尾】${if (prev != null && prev.content.isNotBlank()) "${prev.content.takeLast(300).length} 字" else "无"}")
             appendLine()

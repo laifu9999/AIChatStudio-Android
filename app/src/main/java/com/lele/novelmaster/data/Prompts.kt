@@ -5,7 +5,7 @@ package com.lele.novelmaster.data
  *
  * 设计目标：写 300 章不跑题、不浪费 token。
  * 策略：
- *  1. 不发送全部历史正文，只发送「前5章摘要 + 上一章结尾600字」→ 用摘要代替全文，token 恒定不随章节数膨胀
+ *  1. 不发送全部历史正文，只发送「上一章结尾300字 + 相邻大纲窗口」→ 用结尾+大纲代替全文，token 恒定不随章节数膨胀（v6.9.75：前情摘要已彻底移出注入）
  *  2. 设定卡按优先级与关键词相关度智能挑选：每章必发卡 + 未回收伏笔全发；常规卡按与本章大纲的关键词重合度排序取前14张
  *  3. 低频卡（priority=0）不参与注入
  */
@@ -122,22 +122,35 @@ object Prompts {
         return merged.filter { minIdByKey[it.category + "|" + normCardName(it.name)] == it.id }
     }
 
-    /** v6.9.73：focus=本章大纲+标题+上一章结尾（分层注入用它判断谁登场）；空=全量注入 */
-    fun writerSystem(selected: List<SettingCard>, focus: String = ""): String = buildString {
+    /**
+     * v6.9.75：内置写章系统提示词（13条基础规则）——写章/续写共用，
+     * 「系统提示词」页（功能面板🧠入口）查看与恢复默认也用同一口径。
+     */
+    fun writerRules(): String = buildString {
         appendLine("你是一位顶级网络小说作家，正在按大纲逐章写作。严格遵守：")
         appendLine("1. 人物的体质、灵根、血脉、境界、功法、外貌、称谓、性格是硬性设定，必须与【人物设定】逐字一致，绝不允许自行更改或另造（例如设定为先天剑体/天灵根，就绝不能写成其他体质灵根）。世界观规则同样不得违背。")
-        appendLine("2. 与前情摘要、上一章结尾自然衔接；不重复已写过的情节，不另起炉灶。")
+        appendLine("2. 与上一章结尾自然衔接；不重复已写过的情节，不另起炉灶。")
         appendLine("3. 伏笔规则：【未回收伏笔】块按优先级排列（已回收的不在其中，绝不可再当新伏笔写）。最前的是本章大纲点名回收的伏笔——**本章必须完成其回收剧情，名称与大纲逐字一致**；其次是剧情窗口已开（关联人物/事件在本章登场）的伏笔——强烈建议安排自然回收；末尾是埋设较久、迟迟未动的伏笔——剧情允许就优先安排，或明确断线放弃。回收必须满足：当初埋下的细节重新登场并产生新的戏剧意义（揭开悬念/促成反转/情感冲击），出人意料又在情理之中。**裁判权在剧情：本章没有自然回收窗口的伏笔宁可不收，严禁为清库存硬收、严禁一句带过的生硬交代、严禁按埋设先后机械排队回收**。**清单是历史自动记录，可能混入误记的非伏笔：若某条实为普通道具/人物/情节、并无悬念可揭（点不出「读者在等什么答案」），直接忽略它，绝不为它安排回收**。埋新伏笔要克制：只埋刻意设计的悬念（反常细节、暗示、未解之谜），普通情节、冲突、转折都不是伏笔。")
         appendLine("4. 每章必须有推进、有冲突、章末留钩子（悬念）。多用场景与对话（对话建议占三成以上，对话要有潜台词、能推动剧情与信息差），少干巴巴的旁白。")
         appendLine("5. 只输出正文本身：不要输出章节标题、章节号、序号、解释、总结或任何多余内容。")
         appendLine("6. 必须一次性写完整一章：从开头一路写到章末钩子，情节自然收束，绝不允许中途停笔、省略或写“未完待续/下半部分”。")
-        appendLine("7. 绝不重复：不要复述前情摘要里已经写过的情节，不要写“正如前文所说”“上一章提到”这类回顾句，直接推进新的戏。")
+        appendLine("7. 绝不重复：不要复述已写过的情节，不要写“正如前文所说”“上一章提到”这类回顾句，直接推进新的戏。")
         appendLine("8. 不写任何创作说明：不要出现“本章完”“作者有话”“（此处省略）”“由于篇幅”之类的话，写完最后一个句号就停。")
         appendLine("9. 笔法：场景、动作、对话、心理交替推进；每 300~500 字给一个新的信息点或小转折，保持张力。开头直接入戏（从场景或冲突切入），不要铺垫式开头。")
         appendLine("10. 若存在【写作禁忌】块，其中列出的都是本书写错过并被系统纠正的矛盾模式（原文=>修正），本章绝不允许再犯同样的错误。")
         appendLine("11. 去AI味（发布级硬要求）：结尾严禁写概括本章的总结段；少用“仿佛/似乎/宛如”式堆砌比喻；严禁“眸中闪过一丝XX”“嘴角勾起一抹弧度”“空气仿佛凝固了”这类高频套路句；不滥用成语与四字排比；形容词少而准，多用具体名词与动作呈现（show, don't tell）。")
         appendLine("12. 全知解说克制：不写“他知道”“他明白”“殊不知”式的作者旁白替人物解释心理，改由动作、对话与细节自然流露；同一句式、同一个口头禅、同一种比喻在一章内不要反复出现。")
         appendLine("13. 章末钩子必须是具体事件（危机降临/意外来客/秘密揭露/关键反转/重大决定），不能只是一句情绪渲染或“他不知道的是…”的空泛预告。")
+    }
+
+    /**
+     * v6.9.73：focus=本章大纲+标题+上一章结尾（分层注入用它判断谁登场）；空=全量注入。
+     * v6.9.75：基础规则抽成 writerRules()（功能面板「系统提示词」查看/修改共用同一口径）；
+     *          用户自定义提示词非空时整体替换内置规则（设定卡等注入块仍自动追加在后）。
+     */
+    fun writerSystem(selected: List<SettingCard>, focus: String = ""): String = buildString {
+        val ov = com.lele.novelmaster.data.Repo.app?.let { com.lele.novelmaster.data.InjectPrefs.writerSystemOverride(it) } ?: ""
+        if (ov.isNotBlank()) append(ov.trim()) else append(writerRules())
         appendLine()
         // v6.8.3：三层注入——
         //  第1层 人物设定（硬约束，600字/张全量）；
@@ -237,19 +250,19 @@ object Prompts {
         append(budgetCardBlock(restTrimmed, budget = 900, perCard = 300))
     }
 
-    /** 组装写章所需的完整消息；v6.9.41 summaryCount/windowPrev 可配（默认不注入前情摘要、窗口前2章） */
+    /**
+     * 组装写章所需的完整消息。
+     * v6.9.75：按用户要求彻底移除「前情摘要」注入——衔接剧情只靠【上一章结尾】+【相邻大纲窗口】，
+     * 摘要不再进入写章上下文（摘要仍生成，仅供自检/全书体检用）；windowPrev 可配（默认前2章）。
+     */
     fun buildChapterMessages(
         project: Project,
         cards: List<SettingCard>,
         chapters: List<Chapter>,
         chapter: Chapter,
-        summaryCount: Int = 0,
         windowPrev: Int = 2
     ): List<ChatMsg> {
         val selected = selectCards(cards, chapter.outline + chapter.title)
-        val recent = chapters
-            .filter { it.chapterIndex < chapter.chapterIndex && it.summary.isNotBlank() }
-            .takeLast(summaryCount.coerceAtLeast(0))
         val prev = chapters.firstOrNull { it.chapterIndex == chapter.chapterIndex - 1 }
         // v6.9.73：分层注入的判定文本——本章大纲+标题+上一章结尾（结尾里出场的人物往往本章接着登场）
         val injFocus = chapter.outline + chapter.title + (prev?.content?.takeLast(300) ?: "")
@@ -274,11 +287,6 @@ object Prompts {
         val user = buildString {
             appendLine("【书名】${project.title}　【类型】${project.genre}")
             if (project.description.isNotBlank()) appendLine("【简介】${project.description.take(100)}")
-            if (recent.isNotEmpty()) {
-                appendLine()
-                appendLine("【前情摘要】")
-                recent.forEach { appendLine("第${it.chapterIndex}章《${it.title}》：${it.summary.take(80)}") }
-            }
             if (prev != null && prev.content.isNotBlank()) {
                 appendLine()
                 appendLine("【上一章结尾（本章开头要自然衔接）】")
