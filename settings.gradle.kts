@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "LeLe-NovelMaster"
+rootProject.name = "Mobipaint"
 include(":app")
