@@ -32,9 +32,10 @@ android {
         compose = true
     }
     // 关键：主干仓库上共存着「乐乐写小说」(com/lele/novelmaster) 的源码，
-    // 墨笔构建时必须排除，否则混合编译会因缺少 Room 等依赖而失败
+    // 墨笔构建时必须从 java 与 kotlin 两个源集都排除，否则混合编译必失败
     sourceSets.getByName("main") {
         java.exclude("com/lele/novelmaster/**")
+        kotlin.exclude("com/lele/novelmaster/**")
     }
 }
 
