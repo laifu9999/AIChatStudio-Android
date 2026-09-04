@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import com.lele.mobipaint.ui.ChatEngine
 import com.lele.mobipaint.ui.MobipaintTheme
 import com.lele.mobipaint.ui.Nav
 import com.lele.mobipaint.ui.Screen
