@@ -2,18 +2,19 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
 }
 
 android {
-    namespace = "com.lele.mobipaint"
+    namespace = "com.lele.novelmaster"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.lele.mobipaint"
+        applicationId = "com.lele.novelmaster"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 145
+        versionName = "6.9.73"
     }
 
     buildTypes {
@@ -31,18 +32,6 @@ android {
     buildFeatures {
         compose = true
     }
-    // 关键：主干仓库上共存着「乐乐写小说」(com/lele/novelmaster) 的源码，
-    // 墨笔构建时必须排除（java 与 kotlin 两个源集都要排）
-    sourceSets.getByName("main") {
-        java.exclude("com/lele/novelmaster/**")
-    }
-}
-
-// Kotlin 编译任务(compileDebugKotlin)用的是 KGP 的 kotlin 源集，必须单独排除
-kotlin {
-    sourceSets.getByName("main") {
-        kotlin.exclude("com/lele/novelmaster/**")
-    }
 }
 
 dependencies {
@@ -50,8 +39,13 @@ dependencies {
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
