@@ -141,6 +141,16 @@ object WriterEngine {
         } catch (_: Exception) { }
     }
 
+    /** v6.9.76：分章大纲专用落盘——写 设定卡/分章大纲/分章大纲.md（与 syncChapterOutlineCard 同一位置，
+     *  防止在 全书大纲/ 下再落一份导致同步时新旧两份并存） */
+    fun exportOutlineCardFile(projectId: Long, card: SettingCard, context: Context?) {
+        if (context == null) return
+        try {
+            val d = dir(context, projectId, "设定卡/分章大纲") ?: return
+            File(d, "分章大纲.md").writeText("# 全书大纲 · 分章大纲（章节标题以此为准）\n\n${card.content}\n", Charsets.UTF_8)
+        } catch (_: Exception) { }
+    }
+
     /** v6.9.58：删除项目文件夹里的设定卡文件——删卡/改卡名后必须调用，
      *  否则下次 syncFromLocalFiles 会把旧文件当新卡重新导入（删掉的卡「复活」、新旧卡并存） */
     fun deleteCardFile(projectId: Long, card: SettingCard, context: Context?) {
@@ -207,7 +217,8 @@ object WriterEngine {
     }
 
     /** v6.9.72：解析导出格式并导入——已有同名同分类卡则更新内容（不同才写），否则新增；
-     *  「分章大纲」「剧情进度」系统自动维护卡跳过。返回 (err, 汇总) */
+     *  v6.9.76：「分章大纲」按用户要求恢复导入（导出有导回也要有；category 强制全书大纲、priority=2，
+     *  与系统镜像卡同构，下次同步章节大纲时会照常覆盖）；「剧情进度」每章自动重写，导入无意义仍跳过。返回 (err, 汇总) */
     suspend fun importCardsText(projectId: Long, text: String, context: Context?): Pair<String?, String> {
         val dao = Repo.dao
         val re = Regex("^## \\[(.+?)\\] (.+?)\\s*$")
@@ -233,23 +244,31 @@ object WriterEngine {
         val existing = dao.cards(projectId)
         for ((rawCat, rawName, content) in segs) {
             if (content.isBlank()) { skipped.add("「$rawName」内容为空"); continue }
-            if (rawName == "分章大纲" || rawName == "剧情进度") { skipped.add("「$rawName」系统自动维护，不导入"); continue }
-            val cat = if (rawCat in CardCategories.all) rawCat else "辅助设定"
-            val hit = existing.firstOrNull { it.category == cat && Prompts.normCardName(it.name) == Prompts.normCardName(rawName) }
+            if (rawName == "剧情进度") { skipped.add("「剧情进度」系统自动维护，不导入"); continue }
+            // v6.9.76：分章大纲允许导回——与系统镜像卡同构（category=全书大纲、priority=2）；
+            // 匹配/落卡都按「分章大纲」唯一名，文件也写回 设定卡/分章大纲/分章大纲.md（与同步口径一致）
+            val isOutline = rawName == "分章大纲"
+            val cat = when {
+                isOutline -> "全书大纲"
+                rawCat in CardCategories.all -> rawCat
+                else -> "辅助设定"
+            }
+            val name = if (isOutline) "分章大纲" else rawName
+            val hit = existing.firstOrNull { it.category == cat && Prompts.normCardName(it.name) == Prompts.normCardName(name) }
             if (hit != null) {
                 if (hit.content == content) continue
                 val nc = hit.copy(content = content, updatedAt = System.currentTimeMillis())
                 dao.updateCard(nc)
-                exportCardFile(projectId, nc, context)
+                if (isOutline) exportOutlineCardFile(projectId, nc, context) else exportCardFile(projectId, nc, context)
                 updated++
             } else {
                 val c = SettingCard(
-                    projectId = projectId, category = cat, name = rawName, content = content,
-                    priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经") 2 else 1,
+                    projectId = projectId, category = cat, name = name, content = content,
+                    priority = if (cat == "世界观" || cat == "人物设定" || cat == "设定圣经" || isOutline) 2 else 1,
                     status = if (cat == "伏笔钩子") "埋设中" else ""
                 )
                 dao.insertCard(c)
-                exportCardFile(projectId, c, context)
+                if (isOutline) exportOutlineCardFile(projectId, c, context) else exportCardFile(projectId, c, context)
                 added++
             }
         }

@@ -72,7 +72,8 @@ object ReaderPrefs {
             theme = sp.getInt("theme", 1),
             font = sp.getInt("font", 0),
             size = sp.getInt("size", 18),
-            paging = sp.getInt("paging", 0)
+            // v6.9.76：默认左右翻页（用户要求书架阅读能左右翻页；阅读设置里仍可切回上下滚动）
+            paging = sp.getInt("paging", 1)
         )
     }
     fun save(ctx: android.content.Context, s: ReaderSettings) {
