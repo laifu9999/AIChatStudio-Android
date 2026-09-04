@@ -3,6 +3,7 @@ package com.lele.mobipaint
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,6 +27,9 @@ import com.lele.mobipaint.ui.ShelfScreen
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 边到边模式 + adjustResize(Manifest) + imePadding(下方) 三件套，
+        // 保证聊天/写作/设定的输入框弹出键盘时不会被遮挡
+        enableEdgeToEdge()
         Db.init(this)
         setContent {
             MobipaintTheme {
