@@ -165,12 +165,15 @@ object NoteStore {
     }
 
     /** 缩略图解码（省内存） */
-    fun decodeThumb(path: String, req: Int): Bitmap? {
+    fun decodeThumb(path: String, req: Int): Bitmap? = decodeSampled(path, req * 2)
+
+    /** 按最大边采样解码（看大图用，2048 足够清晰且省内存） */
+    fun decodeSampled(path: String, maxDim: Int): Bitmap? {
         return try {
             val bo = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(path, bo)
             var sample = 1
-            while (bo.outWidth / sample > req * 2 || bo.outHeight / sample > req * 2) sample *= 2
+            while (maxOf(bo.outWidth, bo.outHeight) / sample > maxDim) sample *= 2
             BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
         } catch (_: Exception) {
             null

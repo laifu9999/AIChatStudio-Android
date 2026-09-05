@@ -31,6 +31,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -66,6 +68,8 @@ class EditorActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v1.1：让 Compose 拿到完整 WindowInsets（含 IME），配合 imePadding 修横屏键盘挡输入框
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         ContextCompat.startForegroundService(
             this, Intent(this, OverlayService::class.java).setAction(OverlayService.ACTION_HIDE)
         )
@@ -114,6 +118,7 @@ private fun EditorUI(
     var text by remember { mutableStateOf(initialText) }
     val images = remember { mutableStateListOf<String>().apply { addAll(initialImages) } }
     var status by remember { mutableStateOf("") }
+    var viewerPath by remember { mutableStateOf<String?>(null) }
 
     fun close(resume: Boolean) {
         if (resume && fromBall) MediaCtl.play(ctx)
@@ -178,7 +183,12 @@ private fun EditorUI(
             colors = CardDefaults.cardColors(containerColor = Color(0xFFFDFDFE)),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
-            Column(Modifier.padding(16.dp)) {
+            Column(
+                Modifier
+                    .padding(16.dp)
+                    // v1.1：内容可滚动 + IME insets 生效，横屏小键盘区也能看到正在输入的字
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "📝 速记",
@@ -195,7 +205,7 @@ private fun EditorUI(
                     onValueChange = { text = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 120.dp, max = 300.dp),
+                        .heightIn(min = 96.dp, max = 220.dp),
                     placeholder = { Text("记录这一刻…", color = Color(0xFF9A97AC)) },
                     maxLines = 12
                 )
@@ -217,6 +227,7 @@ private fun EditorUI(
                                                 Color(0xFFECEAF5),
                                                 RoundedCornerShape(10.dp)
                                             )
+                                            .clickable { viewerPath = p }
                                     )
                                 } else {
                                     Box(
@@ -256,13 +267,43 @@ private fun EditorUI(
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = {
-                        val mpm =
-                            ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
-                                as? android.media.projection.MediaProjectionManager
-                        if (mpm != null) {
-                            projectionLauncher.launch(mpm.createScreenCaptureIntent())
+                        // v1.1：Android 11+ 走无障碍服务免授权截图（开启一次，永不再弹窗）；
+                        // Android 10 及以下退回 MediaProjection（每次需授权）
+                        if (android.os.Build.VERSION.SDK_INT >= 30) {
+                            if (CaptureA11yService.instance != null) {
+                                status = "正在截图…"
+                                rootView.visibility = View.INVISIBLE
+                                android.os.Handler(android.os.Looper.getMainLooper())
+                                    .postDelayed({
+                                        CaptureA11yService.capture { path ->
+                                            rootView.visibility = View.VISIBLE
+                                            if (path.isNotBlank() && !images.contains(path)) {
+                                                images.add(path)
+                                                status = "已加入截图 ${images.size} 张"
+                                            } else if (path.isBlank()) {
+                                                status = "截图失败，请重试"
+                                            }
+                                        }
+                                    }, 300)
+                            } else {
+                                status = "请在列表中开启「乐乐速记·免授权截图」（只需一次，之后点📷直接截图）"
+                                try {
+                                    ctx.startActivity(
+                                        android.content.Intent(
+                                            android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS
+                                        )
+                                    )
+                                } catch (_: Exception) { }
+                            }
                         } else {
-                            status = "此系统不支持截图"
+                            val mpm =
+                                ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                                    as? android.media.projection.MediaProjectionManager
+                            if (mpm != null) {
+                                projectionLauncher.launch(mpm.createScreenCaptureIntent())
+                            } else {
+                                status = "此系统不支持截图"
+                            }
                         }
                     }) { Text("📷 截图") }
                     Spacer(Modifier.weight(1f))
@@ -300,5 +341,10 @@ private fun EditorUI(
                 }
             }
         }
+    }
+
+    // v1.1：全屏看图
+    viewerPath?.let { p ->
+        ImageViewerDialog(path = p, onClose = { viewerPath = null })
     }
 }

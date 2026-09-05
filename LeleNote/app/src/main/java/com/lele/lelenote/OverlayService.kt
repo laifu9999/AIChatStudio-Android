@@ -107,9 +107,6 @@ class OverlayService : Service() {
             y = (resources.displayMetrics.heightPixels * 0.35f).toInt()
         }
 
-        val sw = resources.displayMetrics.widthPixels
-        val sh = resources.displayMetrics.heightPixels
-
         var downRawX = 0f
         var downRawY = 0f
         var startX = 0
@@ -131,8 +128,12 @@ class OverlayService : Service() {
                     val dy = ev.rawY - downRawY
                     if (moved || dx * dx + dy * dy > 12f * 12f * d * d) {
                         moved = true
-                        p.x = (startX + dx).toInt().coerceIn(0, (sw - size).coerceAtLeast(0))
-                        p.y = (startY + dy).toInt().coerceIn(0, (sh - size).coerceAtLeast(0))
+                        // v1.1：每次拖动取实时屏幕尺寸（修横屏拖不到右边——旧代码缓存了竖屏宽度）
+                        val dm = resources.displayMetrics
+                        val swNow = dm.widthPixels
+                        val shNow = dm.heightPixels
+                        p.x = (startX + dx).toInt().coerceIn(0, (swNow - size).coerceAtLeast(0))
+                        p.y = (startY + dy).toInt().coerceIn(0, (shNow - size).coerceAtLeast(0))
                         try { wm?.updateViewLayout(view, p) } catch (_: Exception) { }
                     }
                     true

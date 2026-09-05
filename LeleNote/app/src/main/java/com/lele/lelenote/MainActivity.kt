@@ -23,13 +23,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -108,7 +111,9 @@ class MainActivity : ComponentActivity() {
         var deleteNote by remember { mutableStateOf<Note?>(null) }
         var ballOn by remember { mutableStateOf(false) }
         var canOverlay by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
+        var a11yOn by remember { mutableStateOf(false) }
         var toast by remember { mutableStateOf("") }
+        var viewerPath by remember { mutableStateOf<String?>(null) }
         val df = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
 
         fun toastMsg(s: String) { toast = s }
@@ -172,6 +177,7 @@ class MainActivity : ComponentActivity() {
         // 回到前台时校准悬浮球状态（重复启动服务是幂等的，球不会叠加）
         androidx.compose.runtime.LaunchedEffect(refresh.intValue) {
             canOverlay = Settings.canDrawOverlays(ctx)
+            a11yOn = Build.VERSION.SDK_INT >= 30 && CaptureA11yService.instance != null
             ballOn = act.ballPrefOn() && canOverlay
             if (ballOn) {
                 ContextCompat.startForegroundService(
@@ -224,6 +230,35 @@ class MainActivity : ComponentActivity() {
                                     )
                                 } catch (_: Exception) { }
                             }) { Text("去授权") }
+                        }
+                    }
+                }
+
+                // 免授权截图引导（Android 11+ 未开启时显示）
+                if (Build.VERSION.SDK_INT >= 30 && !a11yOn) {
+                    Card(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFEAF3FF))
+                    ) {
+                        Row(
+                            Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "开启「免授权截图」后，点📷直接截图，不再每次弹窗选共享（只需开启一次）",
+                                fontSize = 13.sp,
+                                color = Color(0xFF1E4E8C),
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = {
+                                try {
+                                    startActivity(
+                                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                    )
+                                } catch (_: Exception) { }
+                            }) { Text("去开启") }
                         }
                     }
                 }
@@ -325,40 +360,64 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 详情弹窗
+        // 详情弹窗（v1.1：近全屏、正文滚动、截图点击放大）
         detailNote?.let { n ->
-            Dialog(onDismissRequest = { detailNote = null }) {
+            Dialog(
+                onDismissRequest = { detailNote = null },
+                properties = androidx.compose.ui.window.DialogProperties(
+                    usePlatformDefaultWidth = false
+                )
+            ) {
                 Card(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp)
+                        .heightIn(max = 640.dp),
                     shape = RoundedCornerShape(18.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.White)
                 ) {
                     Column(Modifier.padding(18.dp)) {
-                        Text(
-                            df.format(Date(if (n.updatedAt > 0) n.updatedAt else n.createdAt)),
-                            fontSize = 11.sp, color = Color(0xFF9A97AC)
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                df.format(Date(if (n.updatedAt > 0) n.updatedAt else n.createdAt)),
+                                fontSize = 11.sp, color = Color(0xFF9A97AC),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                "×", fontSize = 18.sp, color = Color(0xFF8A8698),
+                                modifier = Modifier
+                                    .clickable { detailNote = null }
+                                    .padding(4.dp)
+                            )
+                        }
                         Spacer(Modifier.height(8.dp))
                         Text(
                             n.text.ifBlank { "（无文字）" },
-                            fontSize = 15.sp, color = Color(0xFF20223A),
-                            modifier = Modifier.height(160.dp)
+                            fontSize = 15.sp,
+                            lineHeight = 22.sp,
+                            color = Color(0xFF20223A),
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .heightIn(min = 60.dp)
+                                .verticalScroll(rememberScrollState())
                         )
                         if (n.images.isNotEmpty()) {
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(10.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(n.images) { p ->
-                                    val bmp = remember(p) { NoteStore.decodeThumb(p, 512) }
+                                    val bmp = remember(p) { NoteStore.decodeThumb(p, 256) }
                                     if (bmp != null) {
                                         Image(
                                             bitmap = bmp.asImageBitmap(),
-                                            contentDescription = null,
+                                            contentDescription = "截图",
                                             contentScale = ContentScale.Crop,
                                             modifier = Modifier
-                                                .size(150.dp)
+                                                .size(200.dp)
                                                 .background(
                                                     Color(0xFFECEAF5),
                                                     RoundedCornerShape(10.dp)
                                                 )
+                                                .clickable { viewerPath = p }
                                         )
                                     }
                                 }
@@ -411,6 +470,11 @@ class MainActivity : ComponentActivity() {
                     TextButton(onClick = { deleteNote = null }) { Text("取消") }
                 }
             )
+        }
+
+        // 全屏看图（v1.1）
+        viewerPath?.let { p ->
+            ImageViewerDialog(path = p, onClose = { viewerPath = null })
         }
 
         // 轻提示

@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">乐乐速记</string>
+    <string name="a11y_desc">免授权截图：开启后乐乐速记可直接全屏截图，无需每次弹窗授权。此服务不监听、不收集任何屏幕内容或操作数据。</string>
 </resources>
