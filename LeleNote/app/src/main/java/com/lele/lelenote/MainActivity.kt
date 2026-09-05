@@ -74,6 +74,7 @@ import java.util.Locale
 /**
  * 乐乐速记主界面：笔记列表 / 详情查看 / 编辑 / 分享 / 删除，
  * 悬浮球开关 + 悬浮窗权限引导，全部笔记导出 / 导入（JSON，截图内嵌）。
+ * v1.2：新增导出 Word 文档（截图内嵌，方便阅读），支持全部 / 单条导出。
  */
 class MainActivity : ComponentActivity() {
 
@@ -137,6 +138,39 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+
+        // v1.2：导出 Word（含截图内嵌）；pendingDocxNotes 决定导全部还是单条
+        var pendingDocxNotes by remember { mutableStateOf<List<Note>?>(null) }
+        val docxLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        ) { uri ->
+            val targets = pendingDocxNotes
+            pendingDocxNotes = null
+            if (uri != null && targets != null) {
+                scope.launch {
+                    try {
+                        val bytes = withContext(Dispatchers.IO) { DocxExport.buildDocx(targets) }
+                        withContext(Dispatchers.IO) {
+                            contentResolver.openOutputStream(uri)?.use { os -> os.write(bytes) }
+                        }
+                        toastMsg("已导出 Word（${targets.size} 条笔记，截图已内嵌）")
+                    } catch (e: Exception) {
+                        toastMsg("导出 Word 失败：${e.message ?: "未知错误"}")
+                    }
+                }
+            }
+        }
+
+        fun exportWord(notes: List<Note>) {
+            if (notes.isEmpty()) {
+                toastMsg("还没有笔记可导出")
+                return
+            }
+            pendingDocxNotes = notes
+            docxLauncher.launch(suggestDocxName())
         }
 
         // 导入：从网盘/文件管理器选备份 JSON
@@ -284,6 +318,18 @@ class MainActivity : ComponentActivity() {
                     TextButton(onClick = {
                         importLauncher.launch(arrayOf("application/json", "text/plain"))
                     }) { Text("📥 导入") }
+                }
+
+                // v1.2：导出 Word 文档（含截图，方便直接阅读）
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 0.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { exportWord(NoteStore.load(ctx)) }) {
+                        Text("📄 导出 Word 文档（含截图）")
+                    }
                 }
 
                 if (notes.isEmpty()) {
@@ -434,6 +480,8 @@ class MainActivity : ComponentActivity() {
                                     Intent.createChooser(share, "分享笔记")
                                 )
                             }) { Text("📤 分享") }
+                            // v1.2：单条导出 Word
+                            TextButton(onClick = { exportWord(listOf(n)) }) { Text("📄 Word") }
                             TextButton(onClick = {
                                 ctx.startActivity(
                                     Intent(ctx, EditorActivity::class.java)
@@ -492,5 +540,10 @@ class MainActivity : ComponentActivity() {
     private fun suggestName(): String {
         val df = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault())
         return "leenote_${df.format(Date())}.json"
+    }
+
+    private fun suggestDocxName(): String {
+        val df = SimpleDateFormat("yyyyMMdd_HHmm", Locale.getDefault())
+        return "leenote_${df.format(Date())}.docx"
     }
 }
