@@ -108,6 +108,18 @@ class Gen:
         dAhp = dA - cv2.GaussianBlur(dA, (0, 0), 5.0)
         label = np.clip((dLhp - 1.5) / 6.0, 0, 1) * np.clip((dAhp + 1.0) / 3.0, 0, 1)
         label = np.clip(label * 2.2, 0, 1)
+
+        # 干净底图皮肤区（贴斑只贴皮肤；标签也只信皮肤区）
+        labf = cv2.cvtColor((fixed * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+        skinm = ((labf[..., 1] > 126) & (labf[..., 1] < 162) &
+                 (labf[..., 2] > 130) & (labf[..., 2] < 165) &
+                 (labf[..., 0] > 90)).astype(np.uint8)
+        self.skinm = cv2.dilate(skinm, np.ones((5, 5), np.uint8))
+
+        # 五官暗部保护：眼角/鼻翼等暗部在两图里的细微差异会被差分标签
+        # 误当成斑点教给网络 → 修图时在眼角出黑点。标签只在皮肤区内有效。
+        skin_er = cv2.erode(self.skinm, np.ones((7, 7), np.uint8)).astype(np.float32)
+        label = label * skin_er
         lab_u8 = cv2.morphologyEx((label * 255).astype(np.uint8),
                                   cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
         self.label = lab_u8.astype(np.float32) / 255.0
@@ -128,12 +140,6 @@ class Gen:
             self.sprites.append((sp_rgb, sp_a))
         print("真实雀斑精灵: %d 个" % len(self.sprites))
 
-        # 干净底图皮肤区
-        labf = cv2.cvtColor((fixed * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
-        skinm = ((labf[..., 1] > 126) & (labf[..., 1] < 162) &
-                 (labf[..., 2] > 130) & (labf[..., 2] < 165) &
-                 (labf[..., 0] > 90)).astype(np.uint8)
-        self.skinm = cv2.dilate(skinm, np.ones((5, 5), np.uint8))
         self.tone_field = lowpass(fixed - orig)
         print("数据就绪: %dx%d" % (self.w, self.h))
 
