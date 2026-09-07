@@ -5,9 +5,10 @@
 set -e
 echo "===== 乐乐云端训练开始 $(date +%F\ %T) ====="
 
-# AutoDL 镜像一般自带 torch；缺啥装啥
+# AutoDL/仙宫云镜像一般自带 torch；缺啥装啥
 python -c "import torch, cv2, numpy" 2>/dev/null || \
     pip install -q torch numpy opencv-python-headless
+python -c "import onnx" 2>/dev/null || pip install -q onnx
 
 python - <<'EOF'
 import torch
@@ -18,7 +19,8 @@ EOF
 INIT=""
 [ -f init_model.pt ] && INIT="--init init_model.pt" && echo "热启动: init_model.pt"
 
-python train_cloud.py --data-dir . --steps "${STEPS:-1500}" --batch "${BATCH:-16}" $INIT
+# 步数默认拉满（8000 步 ≈ 4090 上 10 分钟）；要更狠可 STEPS=12000 bash run_cloud.sh
+python train_cloud.py --data-dir . --steps "${STEPS:-8000}" --batch "${BATCH:-16}" $INIT
 
 # 结果自动回传 GitHub；并把新权重存为种子，下次训练自动从它继续（越练越强）
 cp output/spot_fix_unet.pt init_model.pt
