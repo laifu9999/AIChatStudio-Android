@@ -162,14 +162,14 @@ class Gen:
             sh, sw = sp_a.shape[:2]
             if sh >= PATCH or sw >= PATCH:
                 continue
-            for _try in range(6):
-                y = int(ys[int(self.rng.integers(0, len(ys)))]) - sh // 2
-                x = int(xs[int(self.rng.integers(0, len(xs)))]) - sw // 2
-                if 0 <= y and y + sh <= PATCH and 0 <= x and x + sw <= PATCH:
-                    a = sp_a * self.rng.uniform(0.7, 1.1)
-                    out[y:y + sh, x:x + sw] = out[y:y + sh, x:x + sw] * (1 - a[..., None]) + sp_rgb * a[..., None]
-                    pm[y:y + sh, x:x + sw] = np.maximum(pm[y:y + sh, x:x + sw], a)
-                    break
+                for _try in range(6):
+                    y = int(ys[int(self.rng.integers(0, len(ys)))]) - sh // 2
+                    x = int(xs[int(self.rng.integers(0, len(xs)))]) - sw // 2
+                    if 0 <= y and y + sh <= PATCH and 0 <= x and x + sw <= PATCH:
+                        a = sp_a * self.rng.uniform(0.8, 1.25)  # 深删加强：贴得更重
+                        out[y:y + sh, x:x + sw] = out[y:y + sh, x:x + sw] * (1 - a[..., None]) + sp_rgb * a[..., None]
+                        pm[y:y + sh, x:x + sw] = np.maximum(pm[y:y + sh, x:x + sw], a)
+                        break
         return out, pm
 
     def _big_blob(self, patch):
@@ -258,7 +258,7 @@ def main():
         out = net(x)
         rgb = sig(out["rgb"])
         l1 = torch.abs(rgb - t)
-        wmap = 1.0 + 6.0 * torch.clamp(torch.abs(x - t) * 10.0, 0.0, 1.0)
+        wmap = 1.0 + 10.0 * torch.clamp(torch.abs(x - t) * 10.0, 0.0, 1.0)  # 见斑必删净（10x 加权）
         l1 = (l1 * wmap).mean()
         g = (torch.abs(rgb[..., 1:] - rgb[..., :-1]) - torch.abs(t[..., 1:] - t[..., :-1])).abs().mean() \
             + (torch.abs(rgb[..., 1:, :] - rgb[..., :-1, :]) - torch.abs(t[..., 1:, :] - t[..., :-1, :])).abs().mean()
