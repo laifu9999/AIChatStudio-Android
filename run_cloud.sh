@@ -14,12 +14,19 @@ import torch
 print("设备:", "CUDA ✓", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU(没租到卡!)")
 EOF
 
-python train_cloud.py --data-dir . --steps "${STEPS:-1500}" --batch "${BATCH:-16}"
+# 热启动：仓库里有 init_model.pt 就从它继续练（累积训练，越练越强）
+INIT=""
+[ -f init_model.pt ] && INIT="--init init_model.pt" && echo "热启动: init_model.pt"
+
+python train_cloud.py --data-dir . --steps "${STEPS:-1500}" --batch "${BATCH:-16}" $INIT
+
+# 结果自动回传 GitHub；并把新权重存为种子，下次训练自动从它继续（越练越强）
+cp output/spot_fix_unet.pt init_model.pt
 
 # 结果自动回传 GitHub
 git config user.email "laifu9999@users.noreply.github.com"
 git config user.name "laifu9999"
-git add output/ 2>/dev/null || true
+git add output/ init_model.pt 2>/dev/null || true
 git commit -m "train result $(date +%F-%H%M%S)" || echo "(无新结果可提交)"
 git push origin HEAD
 echo "===== 训练完成，结果已自动回传 GitHub，可以关机了 ====="
