@@ -5,10 +5,14 @@
 set -e
 echo "===== 乐乐云端训练开始 $(date +%F\ %T) ====="
 
+# SSH 非交互 shell 没有 conda PATH：硬编码补上（常见位置探测）
+export PATH="/root/miniconda3/bin:/opt/conda/bin:$PATH"
+command -v python >/dev/null || export PATH="$(dirname "$(find /root /opt -maxdepth 3 -name python -type f 2>/dev/null | head -1)"):$PATH"
+
 # AutoDL/仙宫云镜像一般自带 torch；缺啥装啥
 python -c "import torch, cv2, numpy" 2>/dev/null || \
-    pip install -q torch numpy opencv-python-headless
-python -c "import onnx" 2>/dev/null || pip install -q onnx
+    python -m pip install -q torch numpy opencv-python-headless
+python -c "import onnx" 2>/dev/null || python -m pip install -q onnx
 
 python - <<'EOF'
 import torch
